@@ -7,6 +7,8 @@
 #include <sstream>
 #include <fstream>
 #include <unistd.h>
+#include <unordered_map>
+#include <dlfcn.h>  // For dladdr to find library path
 
 namespace mps {
 
@@ -56,29 +58,35 @@ TensorType parseTensorTypeString(const std::string& str) {
     return result;
 }
 
-// Map operation name to OpKind
+// Operation name to OpKind lookup table
+static const std::unordered_map<std::string, OpKind> kOpKindMap = {
+    {"stablehlo.add", OpKind::Add},
+    {"stablehlo.multiply", OpKind::Multiply},
+    {"stablehlo.subtract", OpKind::Subtract},
+    {"stablehlo.divide", OpKind::Divide},
+    {"stablehlo.tanh", OpKind::Tanh},
+    {"stablehlo.exponential", OpKind::Exp},
+    {"stablehlo.log", OpKind::Log},
+    {"stablehlo.negate", OpKind::Negate},
+    {"stablehlo.abs", OpKind::Abs},
+    {"stablehlo.dot", OpKind::Dot},
+    {"stablehlo.dot_general", OpKind::DotGeneral},
+    {"stablehlo.reshape", OpKind::Reshape},
+    {"stablehlo.transpose", OpKind::Transpose},
+    {"stablehlo.broadcast", OpKind::Broadcast},
+    {"stablehlo.broadcast_in_dim", OpKind::BroadcastInDim},
+    {"stablehlo.reduce", OpKind::Reduce},
+    {"stablehlo.convert", OpKind::Convert},
+    {"stablehlo.constant", OpKind::Constant},
+    {"func.return", OpKind::Return},
+    {"return", OpKind::Return},
+    {"func.call", OpKind::Call},
+    {"call", OpKind::Call},
+};
+
 OpKind parseOpKind(const std::string& op_name) {
-    if (op_name == "stablehlo.add") return OpKind::Add;
-    if (op_name == "stablehlo.multiply") return OpKind::Multiply;
-    if (op_name == "stablehlo.subtract") return OpKind::Subtract;
-    if (op_name == "stablehlo.divide") return OpKind::Divide;
-    if (op_name == "stablehlo.tanh") return OpKind::Tanh;
-    if (op_name == "stablehlo.exponential") return OpKind::Exp;
-    if (op_name == "stablehlo.log") return OpKind::Log;
-    if (op_name == "stablehlo.negate") return OpKind::Negate;
-    if (op_name == "stablehlo.abs") return OpKind::Abs;
-    if (op_name == "stablehlo.dot") return OpKind::Dot;
-    if (op_name == "stablehlo.dot_general") return OpKind::DotGeneral;
-    if (op_name == "stablehlo.reshape") return OpKind::Reshape;
-    if (op_name == "stablehlo.transpose") return OpKind::Transpose;
-    if (op_name == "stablehlo.broadcast") return OpKind::Broadcast;
-    if (op_name == "stablehlo.broadcast_in_dim") return OpKind::BroadcastInDim;
-    if (op_name == "stablehlo.reduce") return OpKind::Reduce;
-    if (op_name == "stablehlo.convert") return OpKind::Convert;
-    if (op_name == "stablehlo.constant") return OpKind::Constant;
-    if (op_name == "func.return" || op_name == "return") return OpKind::Return;
-    if (op_name == "func.call" || op_name == "call") return OpKind::Call;
-    return OpKind::Unknown;
+    auto it = kOpKindMap.find(op_name);
+    return (it != kOpKindMap.end()) ? it->second : OpKind::Unknown;
 }
 
 // Simple text-based parser for MLIR/StableHLO
@@ -466,20 +474,41 @@ std::string bytecodeToText(const char* data, size_t size) {
     }
     close(output_fd);
 
-    // Run stablehlo-translate to convert bytecode to text
-    // The tool should be in our build directory
-    std::string stablehlo_translate = "/Users/till/git/jax-mps/third_party/stablehlo/stablehlo-build/bin/stablehlo-translate";
+    // Find stablehlo-translate relative to our library location
+    // First try environment variable, then relative paths, then common locations
+    std::string stablehlo_translate;
+
+    // Check environment variable first
+    const char* env_path = getenv("STABLEHLO_TRANSLATE");
+    if (env_path && access(env_path, X_OK) == 0) {
+        stablehlo_translate = env_path;
+    } else {
+        // Try to find relative to the library using dladdr
+        Dl_info dl_info;
+        if (dladdr((void*)bytecodeToText, &dl_info) && dl_info.dli_fname) {
+            std::string lib_dir = dl_info.dli_fname;
+            size_t last_slash = lib_dir.rfind('/');
+            if (last_slash != std::string::npos) {
+                lib_dir = lib_dir.substr(0, last_slash);
+                // Try relative to build/lib (common structure)
+                std::string candidate = lib_dir + "/../third_party/stablehlo/stablehlo-build/bin/stablehlo-translate";
+                if (access(candidate.c_str(), X_OK) == 0) {
+                    stablehlo_translate = candidate;
+                }
+            }
+        }
+    }
+
+    // If not found, bytecode parsing will fail and we'll use identity fallback
+    if (stablehlo_translate.empty()) {
+        // Bytecode conversion unavailable - this is expected if stablehlo tools aren't built
+        unlink(temp_input);
+        unlink(temp_output);
+        return result;
+    }
 
     std::string cmd = stablehlo_translate + " --deserialize < " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
-
     int ret = system(cmd.c_str());
-
-    if (ret != 0) {
-        // Try mlir-opt as fallback (silently)
-        std::string mlir_opt = "/Users/till/git/jax-mps/third_party/stablehlo/llvm-build/bin/mlir-opt";
-        cmd = mlir_opt + " " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
-        ret = system(cmd.c_str());
-    }
 
     // Read output
     std::ifstream output_file(temp_output);

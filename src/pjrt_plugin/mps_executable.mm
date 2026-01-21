@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 #import <regex>
 #import <sstream>
+#import <unordered_map>
 
 namespace jax_mps {
 
@@ -341,6 +342,108 @@ MpsExecutable::~MpsExecutable() {
     }
 }
 
+// ============================================================================
+// Operation Dispatch Table
+// ============================================================================
+// Table-driven operation dispatch for MPSGraph operations.
+// Each handler takes the graph, tensors dict, operation info, and output shape,
+// and returns the resulting MPSGraphTensor.
+
+using TensorDict = NSMutableDictionary<NSString*, MPSGraphTensor*>*;
+using OpHandler = MPSGraphTensor* (*)(MPSGraph*, TensorDict, const HloOp&, NSArray<NSNumber*>*);
+
+// Helper to get tensor by name
+static inline MPSGraphTensor* GetTensor(TensorDict tensors, const std::string& name) {
+    return tensors[[NSString stringWithUTF8String:name.c_str()]];
+}
+
+// Binary operation handlers
+static MPSGraphTensor* HandleAdd(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g additionWithPrimaryTensor:GetTensor(t, op.inputs[0])
+                        secondaryTensor:GetTensor(t, op.inputs[1])
+                                   name:nil];
+}
+
+static MPSGraphTensor* HandleMultiply(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g multiplicationWithPrimaryTensor:GetTensor(t, op.inputs[0])
+                              secondaryTensor:GetTensor(t, op.inputs[1])
+                                         name:nil];
+}
+
+static MPSGraphTensor* HandleSubtract(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g subtractionWithPrimaryTensor:GetTensor(t, op.inputs[0])
+                           secondaryTensor:GetTensor(t, op.inputs[1])
+                                      name:nil];
+}
+
+static MPSGraphTensor* HandleDivide(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g divisionWithPrimaryTensor:GetTensor(t, op.inputs[0])
+                        secondaryTensor:GetTensor(t, op.inputs[1])
+                                   name:nil];
+}
+
+static MPSGraphTensor* HandleDot(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g matrixMultiplicationWithPrimaryTensor:GetTensor(t, op.inputs[0])
+                                    secondaryTensor:GetTensor(t, op.inputs[1])
+                                               name:nil];
+}
+
+// Unary operation handlers
+static MPSGraphTensor* HandleTanh(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g tanhWithTensor:GetTensor(t, op.inputs[0]) name:nil];
+}
+
+static MPSGraphTensor* HandleExp(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g exponentWithTensor:GetTensor(t, op.inputs[0]) name:nil];
+}
+
+static MPSGraphTensor* HandleLog(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g logarithmWithTensor:GetTensor(t, op.inputs[0]) name:nil];
+}
+
+static MPSGraphTensor* HandleNegate(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g negativeWithTensor:GetTensor(t, op.inputs[0]) name:nil];
+}
+
+static MPSGraphTensor* HandleAbs(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g absoluteWithTensor:GetTensor(t, op.inputs[0]) name:nil];
+}
+
+// Shape operation handlers
+static MPSGraphTensor* HandleBroadcast(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
+    return [g broadcastTensor:GetTensor(t, op.inputs[0]) toShape:shape name:nil];
+}
+
+static MPSGraphTensor* HandleReshape(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
+    return [g reshapeTensor:GetTensor(t, op.inputs[0]) withShape:shape name:nil];
+}
+
+static MPSGraphTensor* HandleConvert(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+    return [g castTensor:GetTensor(t, op.inputs[0]) toType:PjrtDtypeToMps(op.dtype) name:nil];
+}
+
+// Dispatch table mapping operation names to handlers
+static const std::unordered_map<std::string, OpHandler> kOpHandlers = {
+    // Binary ops
+    {"add", HandleAdd},
+    {"multiply", HandleMultiply},
+    {"subtract", HandleSubtract},
+    {"divide", HandleDivide},
+    {"dot", HandleDot},
+    {"dot_general", HandleDot},
+    // Unary ops
+    {"tanh", HandleTanh},
+    {"exp", HandleExp},
+    {"log", HandleLog},
+    {"negate", HandleNegate},
+    {"abs", HandleAbs},
+    // Shape ops
+    {"broadcast", HandleBroadcast},
+    {"broadcast_in_dim", HandleBroadcast},
+    {"reshape", HandleReshape},
+    {"convert", HandleConvert},
+};
+
 std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
     const std::vector<MpsBuffer*>& inputs,
     MpsDevice* device) {
@@ -398,113 +501,16 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
                 [output_shape addObject:@(dim)];
             }
 
-            if (op.name == "add") {
-                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-                MPSGraphTensor* out = [graph additionWithPrimaryTensor:lhs
-                                                       secondaryTensor:rhs
-                                                                  name:nil];
+            // Look up handler in dispatch table
+            auto it = kOpHandlers.find(op.name);
+            if (it != kOpHandlers.end()) {
+                MPSGraphTensor* out = it->second(graph, tensors, op, output_shape);
                 tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
                 result_tensor = out;
-            }
-            else if (op.name == "dot" || op.name == "dot_general") {
-                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-                MPSGraphTensor* out = [graph matrixMultiplicationWithPrimaryTensor:lhs
-                                                                   secondaryTensor:rhs
-                                                                              name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "tanh") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph tanhWithTensor:input name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "multiply") {
-                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-                MPSGraphTensor* out = [graph multiplicationWithPrimaryTensor:lhs
-                                                             secondaryTensor:rhs
-                                                                        name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "subtract") {
-                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-                MPSGraphTensor* out = [graph subtractionWithPrimaryTensor:lhs
-                                                          secondaryTensor:rhs
-                                                                     name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "divide") {
-                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-                MPSGraphTensor* out = [graph divisionWithPrimaryTensor:lhs
-                                                       secondaryTensor:rhs
-                                                                  name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "exp") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph exponentWithTensor:input name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "log") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph logarithmWithTensor:input name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "negate") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph negativeWithTensor:input name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "abs") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph absoluteWithTensor:input name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "broadcast_in_dim" || op.name == "broadcast") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                // Broadcast to the target shape
-                MPSGraphTensor* out = [graph broadcastTensor:input
-                                                     toShape:output_shape
-                                                        name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "reshape") {
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSGraphTensor* out = [graph reshapeTensor:input
-                                                 withShape:output_shape
-                                                      name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else if (op.name == "convert") {
-                // Type conversion - just pass through for now (same type)
-                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-                MPSDataType target_type = PjrtDtypeToMps(op.dtype);
-                MPSGraphTensor* out = [graph castTensor:input
-                                                 toType:target_type
-                                                   name:nil];
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            }
-            else {
-                // NSLog(@"Unsupported operation: %s", op.name.c_str());
-                // For unsupported ops, try to pass through the first input
+            } else {
+                // Unsupported op: pass through first input as fallback
                 if (!op.inputs.empty()) {
-                    MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                    MPSGraphTensor* input = GetTensor(tensors, op.inputs[0]);
                     if (input) {
                         tensors[[NSString stringWithUTF8String:op.output.c_str()]] = input;
                         result_tensor = input;

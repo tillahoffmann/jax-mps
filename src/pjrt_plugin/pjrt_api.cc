@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,6 +24,102 @@
 #include "pjrt_plugin/mps_buffer.h"
 #include "pjrt_plugin/mps_executable.h"
 #include "pjrt_plugin/stablehlo_parser.h"
+
+// ============================================================================
+// Minimal Protobuf Wire Format Encoder
+// ============================================================================
+// This provides type-safe encoding without requiring the protobuf library.
+// Wire format reference: https://protobuf.dev/programming-guides/encoding/
+
+namespace proto {
+
+// Wire types
+enum WireType : uint8_t {
+    VARINT = 0,           // int32, int64, uint32, uint64, sint32, sint64, bool, enum
+    FIXED64 = 1,          // fixed64, sfixed64, double
+    LENGTH_DELIMITED = 2, // string, bytes, embedded messages, packed repeated fields
+    FIXED32 = 5,          // fixed32, sfixed32, float
+};
+
+// Encode a varint (variable-length integer)
+inline void encode_varint(std::string& out, uint64_t value) {
+    while (value > 0x7F) {
+        out.push_back(static_cast<char>((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+    out.push_back(static_cast<char>(value));
+}
+
+// Encode a field tag (field_number << 3 | wire_type)
+inline void encode_tag(std::string& out, uint32_t field_number, WireType wire_type) {
+    encode_varint(out, (field_number << 3) | wire_type);
+}
+
+// Encode a varint field
+inline void encode_varint_field(std::string& out, uint32_t field_number, uint64_t value) {
+    encode_tag(out, field_number, VARINT);
+    encode_varint(out, value);
+}
+
+// Encode a length-delimited field (embedded message, string, bytes)
+inline void encode_bytes_field(std::string& out, uint32_t field_number, const std::string& data) {
+    encode_tag(out, field_number, LENGTH_DELIMITED);
+    encode_varint(out, data.size());
+    out.append(data);
+}
+
+// ============================================================================
+// XLA DeviceAssignment Proto Encoder
+// ============================================================================
+// Proto definition (from xla/xla_data.proto):
+//
+// message DeviceAssignmentProto {
+//   int32 replica_count = 1;
+//   int32 computation_count = 2;
+//   message ComputationDevice {
+//     repeated int32 replica_device_ids = 1;
+//   }
+//   repeated ComputationDevice computation_devices = 3;
+// }
+
+struct ComputationDevice {
+    std::vector<int32_t> replica_device_ids;
+
+    std::string encode() const {
+        std::string out;
+        for (int32_t id : replica_device_ids) {
+            encode_varint_field(out, 1, static_cast<uint64_t>(id));
+        }
+        return out;
+    }
+};
+
+struct DeviceAssignment {
+    int32_t replica_count = 1;
+    int32_t computation_count = 1;
+    std::vector<ComputationDevice> computation_devices;
+
+    std::string encode() const {
+        std::string out;
+        encode_varint_field(out, 1, static_cast<uint64_t>(replica_count));
+        encode_varint_field(out, 2, static_cast<uint64_t>(computation_count));
+        for (const auto& device : computation_devices) {
+            encode_bytes_field(out, 3, device.encode());
+        }
+        return out;
+    }
+
+    // Create a simple single-device assignment
+    static DeviceAssignment single_device(int32_t device_id = 0) {
+        DeviceAssignment da;
+        da.replica_count = 1;
+        da.computation_count = 1;
+        da.computation_devices.push_back({{device_id}});
+        return da;
+    }
+};
+
+} // namespace proto
 
 // ============================================================================
 // Opaque wrapper types
@@ -836,29 +933,9 @@ static void MpsDeviceAssignmentDeleter(PJRT_DeviceAssignmentSerialized* da) {
 PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(PJRT_LoadedExecutable_GetDeviceAssignment_Args* args) {
     MPS_LOG(" PJRT_LoadedExecutable_GetDeviceAssignment called\n");
 
-    // Create a minimal DeviceAssignment proto (1 replica, 1 partition, device 0)
-    // The proto format is: replica_count (varint), computation_count (varint),
-    // then computation_devices for each replica.
-    // For simplicity, we'll create a binary protobuf-like format.
-    // However, XLA expects actual protobuf serialization.
-    // Let's return empty data and see if that's handled gracefully.
-
+    // Create DeviceAssignment proto: 1 replica, 1 computation, device 0
     auto* serialized = new MpsDeviceAssignmentSerialized();
-    // Minimal DeviceAssignment proto: replica_count=1, computation_count=1, one device ID=0
-    // Proto field 1 (replica_count) = varint, field 2 (computation_count) = varint
-    // field 3 (computation_devices) repeated
-    // We need a real protobuf here. Let's use a hand-crafted minimal proto:
-    // Field 1 (replica_count): wire type 0, value 1 -> 0x08 0x01
-    // Field 2 (computation_count): wire type 0, value 1 -> 0x10 0x01
-    // Field 3 (computation_devices): wire type 2 (length-delimited), contains replica_device_ids
-    //   Sub-field 1: replica_device_ids repeated int64 -> 0x08 0x00 (value 0)
-    // Full proto for 1 replica, 1 partition, device 0:
-    serialized->data = std::string(
-        "\x08\x01"  // replica_count = 1
-        "\x10\x01"  // computation_count = 1
-        "\x1a\x02"  // computation_devices (field 3, wire type 2, length 2)
-        "\x08\x00", // replica_device_ids = [0]
-        8);
+    serialized->data = proto::DeviceAssignment::single_device(0).encode();
 
     args->serialized_bytes = serialized->data.data();
     args->serialized_bytes_size = serialized->data.size();
@@ -866,7 +943,7 @@ PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(PJRT_LoadedExecutable_GetDe
     args->serialized_device_assignment_deleter = MpsDeviceAssignmentDeleter;
 
     MPS_LOG(" PJRT_LoadedExecutable_GetDeviceAssignment returning %zu bytes\n",
-            args->serialized_bytes_size); fflush(stderr);
+            args->serialized_bytes_size);
     return nullptr;
 }
 
