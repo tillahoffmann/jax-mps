@@ -16,12 +16,12 @@ import sys
 # Add python package to path for development
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "python"))
 
-# Set library path for development
-build_lib = os.path.join(os.path.dirname(__file__), "build", "lib")
-if os.path.exists(build_lib):
-    os.environ["JAX_MPS_LIBRARY_PATH"] = os.path.join(
-        build_lib, "libpjrt_plugin_mps.dylib"
-    )
+# Set library path for development (only if the actual dylib exists)
+build_lib_path = os.path.join(
+    os.path.dirname(__file__), "build", "lib", "libpjrt_plugin_mps.dylib"
+)
+if os.path.exists(build_lib_path):
+    os.environ["JAX_MPS_LIBRARY_PATH"] = build_lib_path
 
 
 def main():
@@ -36,8 +36,7 @@ def main():
         print(f"JAX version: {jax.__version__}")
         print(f"Available backends: {jax.devices()}")
     except ImportError:
-        print("JAX not installed. Install with: pip install jax")
-        return
+        sys.exit("ERROR: JAX not installed. Install with: pip install jax")
 
     # Try to initialize our plugin
     try:
@@ -46,13 +45,13 @@ def main():
         print(f"jax-mps version: {mps.__version__}")
         mps.initialize()
     except Exception as e:
-        print(f"Could not initialize MPS plugin: {e}")
-        print("This is expected if the native library hasn't been built yet.")
-        print("\nTo build:")
-        print("  mkdir build && cd build")
-        print("  cmake ..")
-        print("  make")
-        return
+        sys.exit(
+            f"ERROR: Could not initialize MPS plugin: {e}\n\n"
+            "To build the native library:\n"
+            "  mkdir build && cd build\n"
+            "  cmake ..\n"
+            "  make"
+        )
 
     # Simple test
     print("\nRunning simple test...")
@@ -75,7 +74,7 @@ def main():
 
         print("\nAll tests passed!")
     except Exception as e:
-        print(f"Error during test: {e}")
+        sys.exit(f"ERROR: Test failed: {e}")
 
 
 if __name__ == "__main__":
