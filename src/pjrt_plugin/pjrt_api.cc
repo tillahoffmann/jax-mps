@@ -341,8 +341,12 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     MPS_LOG(" PJRT_Client_Compile\n");
 
     PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
-    if (!client) {
-        return MakeError("No client available for compilation");
+    if (!client || !client->client) {
+        return MakeError("No MPS client available for compilation. Metal GPU may not be present.");
+    }
+    if (!client->client->metal_device()) {
+        return MakeError(
+            "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
     }
 
     // Get the program from the args
@@ -424,8 +428,15 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
     MPS_LOG(" PJRT_Client_BufferFromHostBuffer\n");
 
     PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
-    if (!client) {
-        return MakeError("No client available");
+    if (!client || !client->client) {
+        return MakeError("No MPS client available. Metal GPU may not be present.");
+    }
+    if (!client->client->metal_device()) {
+        return MakeError(
+            "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
+    }
+    if (!args->data) {
+        return MakeError("Cannot create buffer: null data pointer provided");
     }
 
     std::vector<int64_t> dims(args->dims, args->dims + args->num_dims);
@@ -435,7 +446,7 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
                                              args->device ? args->device->device : nullptr);
 
     if (!mps_buffer) {
-        return MakeError("Failed to create buffer");
+        return MakeError("Failed to create Metal buffer. GPU memory may be exhausted.");
     }
 
     auto* buffer = new PJRT_Buffer();

@@ -273,8 +273,21 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
     }
 
     @autoreleasepool {
+        // Verify Metal device is available
+        if (!client_) {
+            return ExecutionResult::Error("No MPS client available");
+        }
+        id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)client_->metal_device();
+        if (!mtl_device) {
+            return ExecutionResult::Error(
+                "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
+        }
+
         // Create MPSGraph
         MPSGraph* graph = [[MPSGraph alloc] init];
+        if (!graph) {
+            return ExecutionResult::Error("Failed to create MPSGraph. Metal may not be available.");
+        }
 
         // Map from HLO names to MPSGraphTensor
         NSMutableDictionary<NSString*, MPSGraphTensor*>* tensors = [NSMutableDictionary dictionary];
@@ -282,8 +295,6 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         // Create placeholder tensors for parameters
         NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds =
             [NSMutableDictionary dictionary];
-
-        id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)client_->metal_device();
 
         // Validate input count
         if (inputs.size() < computation_.parameters.size()) {
