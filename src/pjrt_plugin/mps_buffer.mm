@@ -84,7 +84,20 @@ size_t MpsBuffer::byte_size() const {
 }
 
 void MpsBuffer::ToHostBuffer(void* dst, std::function<void()> on_done) {
-    if (is_deleted_ || !metal_buffer_) {
+    if (is_deleted_) {
+        NSLog(@"ERROR: ToHostBuffer called on deleted buffer");
+        if (on_done)
+            on_done();
+        return;
+    }
+    if (!metal_buffer_) {
+        NSLog(@"ERROR: ToHostBuffer called with null Metal buffer");
+        if (on_done)
+            on_done();
+        return;
+    }
+    if (!dst) {
+        NSLog(@"ERROR: ToHostBuffer called with null destination pointer");
         if (on_done)
             on_done();
         return;
@@ -94,9 +107,14 @@ void MpsBuffer::ToHostBuffer(void* dst, std::function<void()> on_done) {
 
     // For shared memory (Apple Silicon), we can read directly
     void* contents = [buffer contents];
-    if (contents && dst) {
-        memcpy(dst, contents, byte_size());
+    if (!contents) {
+        NSLog(@"ERROR: Failed to get Metal buffer contents");
+        if (on_done)
+            on_done();
+        return;
     }
+
+    memcpy(dst, contents, byte_size());
 
     if (on_done)
         on_done();

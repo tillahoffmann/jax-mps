@@ -82,7 +82,12 @@ MpsDevice* MpsClient::LookupDevice(int device_id) {
 std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int dtype,
                                                            const std::vector<int64_t>& dims,
                                                            MpsDevice* device) {
-    if (!metal_device_ || !data) {
+    if (!metal_device_) {
+        NSLog(@"ERROR: BufferFromHostBuffer called with no Metal device");
+        return nullptr;
+    }
+    if (!data) {
+        NSLog(@"ERROR: BufferFromHostBuffer called with null data pointer");
         return nullptr;
     }
 

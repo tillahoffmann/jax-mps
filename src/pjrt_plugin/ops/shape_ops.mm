@@ -63,7 +63,12 @@ REGISTER_OP(reshape, Handle_reshape);
 
 static MPSGraphTensor* Handle_convert(MPSGraph* g, TensorDict t, const HloOp& op,
                                       NSArray<NSNumber*>*) {
-    return [g castTensor:GetTensor(t, op.inputs[0]) toType:PjrtDtypeToMps(op.dtype) name:nil];
+    MPSDataType dtype = PjrtDtypeToMps(op.dtype);
+    if (dtype == MPSDataTypeInvalid) {
+        NSLog(@"ERROR: Invalid dtype %d for convert operation", op.dtype);
+        return nullptr;
+    }
+    return [g castTensor:GetTensor(t, op.inputs[0]) toType:dtype name:nil];
 }
 REGISTER_OP(convert, Handle_convert);
 
