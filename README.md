@@ -105,15 +105,13 @@ Adding new operations is straightforward - just add an entry to the `kOpHandlers
 ```
 jax-mps/
 ├── CMakeLists.txt              # Build configuration
-├── src/
-│   ├── pjrt_plugin/
-│   │   ├── pjrt_api.cc         # PJRT C API entry point
-│   │   ├── mps_client.h/mm     # Metal client management
-│   │   ├── mps_device.h/mm     # Device abstraction
-│   │   ├── mps_buffer.h/mm     # Buffer management
-│   │   └── mps_executable.h/mm # HLO parsing & execution
-│   └── mps_backend/
-│       └── mps_ops.mm          # MPSGraph operation helpers
+├── src/pjrt_plugin/
+│   ├── pjrt_api.cc             # PJRT C API entry point
+│   ├── mps_client.h/mm         # Metal client management
+│   ├── mps_device.h/mm         # Device abstraction
+│   ├── mps_buffer.h/mm         # Buffer management
+│   ├── mps_executable.h/mm     # StableHLO compilation & execution
+│   └── stablehlo_parser.h/cc   # MLIR-based StableHLO parsing
 ├── python/
 │   └── jax_plugins/
 │       └── mps/

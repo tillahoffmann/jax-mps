@@ -70,7 +70,6 @@ set(PJRT_SOURCES
     src/pjrt_plugin/mps_buffer.mm
     src/pjrt_plugin/mps_executable.mm
     src/pjrt_plugin/stablehlo_parser.cc
-    src/mps_backend/mps_ops.mm
 )
 
 add_library(pjrt_plugin_mps SHARED ${PJRT_SOURCES})
