@@ -14,9 +14,8 @@ wheels/
 *.o
 *.a
 
-# Third-party builds (MLIR, StableHLO)
-third_party/stablehlo/llvm-build/
-third_party/stablehlo/stablehlo-build/
+# Third-party (cloned separately, not tracked)
+third_party/stablehlo/
 
 # IDE
 .vscode/
