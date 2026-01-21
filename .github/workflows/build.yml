@@ -20,7 +20,7 @@ jobs:
         id: cache-deps
         uses: actions/cache@v4
         with:
-          path: .jax-mps-deps
+          path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           restore-keys: |
             mlir-stablehlo-macos14-
@@ -38,15 +38,15 @@ jobs:
       - name: Verify deps installation
         run: |
           echo "Checking MLIR installation..."
-          ls -la .jax-mps-deps/lib/cmake/mlir/ | head -5
+          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -5
           echo "Checking StableHLO installation..."
-          ls -la .jax-mps-deps/include/stablehlo/dialect/ | head -5
+          ls -la ${{ github.workspace }}/.jax-mps-deps/include/stablehlo/dialect/ | head -5
 
       - name: Upload deps artifact
         uses: actions/upload-artifact@v4
         with:
           name: mlir-stablehlo-deps
-          path: .jax-mps-deps
+          path: ${{ github.workspace }}/.jax-mps-deps
           retention-days: 7
           include-hidden-files: true
 
@@ -70,12 +70,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: mlir-stablehlo-deps
-          path: .jax-mps-deps
+          path: ${{ github.workspace }}/.jax-mps-deps
 
       - name: Verify deps downloaded
         run: |
           echo "MLIR cmake config:"
-          ls -la .jax-mps-deps/lib/cmake/mlir/ | head -3
+          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -3
 
       - name: Install build dependencies
         run: |
