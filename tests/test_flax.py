@@ -4,7 +4,6 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from numpy.testing import assert_allclose
 
 
@@ -59,7 +58,3 @@ def test_logistic_regression_cpu_vs_mps(jax_setup):
         atol=1e-4,
         err_msg="Logistic regression output differs between CPU and MPS",
     )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

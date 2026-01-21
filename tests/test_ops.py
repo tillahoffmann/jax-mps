@@ -393,7 +393,3 @@ def test_jit_binary_op(jax_setup, name, op_fn):
 
     # Verify correctness
     assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
