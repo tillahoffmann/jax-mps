@@ -54,7 +54,9 @@ struct StableHLOOp {
     TensorType result_type;
 
     // For constants
-    std::vector<float> constant_data;
+    std::vector<float> constant_data;  // Dense array constant data
+    float constant_scalar = 0.0f;      // Scalar constant value (when is_scalar_constant is true)
+    bool is_scalar_constant = false;   // True if constant is a scalar or splat
 
     // For dot_general
     std::vector<int64_t> lhs_batching_dims;

@@ -207,6 +207,9 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
                     break;
                 case mps::OpKind::Constant:
                     op.name = "constant";
+                    op.constant_data = shlo_op.constant_data;
+                    op.constant_scalar = shlo_op.constant_scalar;
+                    op.is_scalar_constant = shlo_op.is_scalar_constant;
                     break;
                 case mps::OpKind::Unknown:
                     // Unknown ops are not allowed - fail at compile time

@@ -217,6 +217,51 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
             }
         }
 
+        // Handle constant operations - extract the actual constant value
+        if (auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op)) {
+            auto value = constantOp.getValue();
+            if (auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(value)) {
+                // Check if it's a splat (single value broadcast to all elements)
+                if (denseAttr.isSplat()) {
+                    auto elemType = denseAttr.getElementType();
+                    if (elemType.isF32()) {
+                        shloOp.constant_scalar = denseAttr.getSplatValue<float>();
+                        shloOp.is_scalar_constant = true;
+                    } else if (elemType.isF64()) {
+                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<double>());
+                        shloOp.is_scalar_constant = true;
+                    } else if (elemType.isF16()) {
+                        // F16 values come as APFloat, convert to float
+                        auto apVal = denseAttr.getSplatValue<llvm::APFloat>();
+                        shloOp.constant_scalar = apVal.convertToFloat();
+                        shloOp.is_scalar_constant = true;
+                    } else if (elemType.isInteger(32)) {
+                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<int32_t>());
+                        shloOp.is_scalar_constant = true;
+                    } else if (elemType.isInteger(64)) {
+                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<int64_t>());
+                        shloOp.is_scalar_constant = true;
+                    }
+                } else {
+                    // Non-splat dense constant - extract all values
+                    auto elemType = denseAttr.getElementType();
+                    if (elemType.isF32()) {
+                        for (float val : denseAttr.getValues<float>()) {
+                            shloOp.constant_data.push_back(val);
+                        }
+                    } else if (elemType.isF64()) {
+                        for (double val : denseAttr.getValues<double>()) {
+                            shloOp.constant_data.push_back(static_cast<float>(val));
+                        }
+                    } else if (elemType.isInteger(32)) {
+                        for (int32_t val : denseAttr.getValues<int32_t>()) {
+                            shloOp.constant_data.push_back(static_cast<float>(val));
+                        }
+                    }
+                }
+            }
+        }
+
         result.ops.push_back(std::move(shloOp));
     });
 

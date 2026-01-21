@@ -24,6 +24,11 @@ struct HloOp {
     std::vector<int64_t> shape;  // Output shape
     std::vector<int64_t> broadcast_dims;  // For broadcast_in_dim
     std::vector<int64_t> permutation;     // For transpose
+
+    // For constant operations
+    std::vector<float> constant_data;     // Dense constant values
+    float constant_scalar = 0.0f;         // Scalar constant value
+    bool is_scalar_constant = false;      // True if constant is scalar/splat
 };
 
 // Parsed HLO computation
