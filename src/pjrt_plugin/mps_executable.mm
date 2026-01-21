@@ -3,28 +3,13 @@
 #import "pjrt_plugin/mps_device.h"
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/stablehlo_parser.h"
+#import "pjrt_plugin/ops/registry.h"
 
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <Foundation/Foundation.h>
-#import <unordered_map>
 
 namespace jax_mps {
-
-// Map PJRT dtype to MPSDataType
-static MPSDataType PjrtDtypeToMps(int dtype) {
-    // Using same enum values as in mps_buffer.mm
-    switch (dtype) {
-        case 11: return MPSDataTypeFloat32;  // PJRT_F32
-        case 10: return MPSDataTypeFloat16;  // PJRT_F16
-        case 16: return MPSDataTypeBFloat16; // PJRT_BF16
-        case 4:  return MPSDataTypeInt32;    // PJRT_S32
-        case 5:  return MPSDataTypeInt64;    // PJRT_S64
-        case 8:  return MPSDataTypeUInt32;   // PJRT_U32
-        case 1:  return MPSDataTypeBool;     // PJRT_PRED
-        default: return MPSDataTypeFloat32;
-    }
-}
 
 // Map StableHLO element type string to PJRT dtype
 static int StablehloTypeToDtype(const std::string& type) {
@@ -188,108 +173,6 @@ MpsExecutable::~MpsExecutable() {
     }
 }
 
-// ============================================================================
-// Operation Dispatch Table
-// ============================================================================
-// Table-driven operation dispatch for MPSGraph operations.
-// Each handler takes the graph, tensors dict, operation info, and output shape,
-// and returns the resulting MPSGraphTensor.
-
-using TensorDict = NSMutableDictionary<NSString*, MPSGraphTensor*>*;
-using OpHandler = MPSGraphTensor* (*)(MPSGraph*, TensorDict, const HloOp&, NSArray<NSNumber*>*);
-
-// Helper to get tensor by name
-static inline MPSGraphTensor* GetTensor(TensorDict tensors, const std::string& name) {
-    return tensors[[NSString stringWithUTF8String:name.c_str()]];
-}
-
-// Binary operation handlers
-static MPSGraphTensor* HandleAdd(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g additionWithPrimaryTensor:GetTensor(t, op.inputs[0])
-                        secondaryTensor:GetTensor(t, op.inputs[1])
-                                   name:nil];
-}
-
-static MPSGraphTensor* HandleMultiply(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g multiplicationWithPrimaryTensor:GetTensor(t, op.inputs[0])
-                              secondaryTensor:GetTensor(t, op.inputs[1])
-                                         name:nil];
-}
-
-static MPSGraphTensor* HandleSubtract(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g subtractionWithPrimaryTensor:GetTensor(t, op.inputs[0])
-                           secondaryTensor:GetTensor(t, op.inputs[1])
-                                      name:nil];
-}
-
-static MPSGraphTensor* HandleDivide(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g divisionWithPrimaryTensor:GetTensor(t, op.inputs[0])
-                        secondaryTensor:GetTensor(t, op.inputs[1])
-                                   name:nil];
-}
-
-static MPSGraphTensor* HandleDot(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g matrixMultiplicationWithPrimaryTensor:GetTensor(t, op.inputs[0])
-                                    secondaryTensor:GetTensor(t, op.inputs[1])
-                                               name:nil];
-}
-
-// Unary operation handlers
-static MPSGraphTensor* HandleTanh(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g tanhWithTensor:GetTensor(t, op.inputs[0]) name:nil];
-}
-
-static MPSGraphTensor* HandleExp(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g exponentWithTensor:GetTensor(t, op.inputs[0]) name:nil];
-}
-
-static MPSGraphTensor* HandleLog(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g logarithmWithTensor:GetTensor(t, op.inputs[0]) name:nil];
-}
-
-static MPSGraphTensor* HandleNegate(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g negativeWithTensor:GetTensor(t, op.inputs[0]) name:nil];
-}
-
-static MPSGraphTensor* HandleAbs(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g absoluteWithTensor:GetTensor(t, op.inputs[0]) name:nil];
-}
-
-// Shape operation handlers
-static MPSGraphTensor* HandleBroadcast(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
-    return [g broadcastTensor:GetTensor(t, op.inputs[0]) toShape:shape name:nil];
-}
-
-static MPSGraphTensor* HandleReshape(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
-    return [g reshapeTensor:GetTensor(t, op.inputs[0]) withShape:shape name:nil];
-}
-
-static MPSGraphTensor* HandleConvert(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
-    return [g castTensor:GetTensor(t, op.inputs[0]) toType:PjrtDtypeToMps(op.dtype) name:nil];
-}
-
-// Dispatch table mapping operation names to handlers
-static const std::unordered_map<std::string, OpHandler> kOpHandlers = {
-    // Binary ops
-    {"add", HandleAdd},
-    {"multiply", HandleMultiply},
-    {"subtract", HandleSubtract},
-    {"divide", HandleDivide},
-    {"dot", HandleDot},
-    {"dot_general", HandleDot},
-    // Unary ops
-    {"tanh", HandleTanh},
-    {"exp", HandleExp},
-    {"log", HandleLog},
-    {"negate", HandleNegate},
-    {"abs", HandleAbs},
-    // Shape ops
-    {"broadcast", HandleBroadcast},
-    {"broadcast_in_dim", HandleBroadcast},
-    {"reshape", HandleReshape},
-    {"convert", HandleConvert},
-};
-
 std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
     const std::vector<MpsBuffer*>& inputs,
     MpsDevice* device) {
@@ -347,10 +230,10 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
                 [output_shape addObject:@(dim)];
             }
 
-            // Look up handler in dispatch table
-            auto it = kOpHandlers.find(op.name);
-            if (it != kOpHandlers.end()) {
-                MPSGraphTensor* out = it->second(graph, tensors, op, output_shape);
+            // Look up handler in registry
+            OpHandler handler = OpRegistry::Find(op.name);
+            if (handler) {
+                MPSGraphTensor* out = handler(graph, tensors, op, output_shape);
                 tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
                 result_tensor = out;
             } else {
