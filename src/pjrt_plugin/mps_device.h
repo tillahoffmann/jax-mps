@@ -13,17 +13,31 @@ public:
     ~MpsDevice();
 
     // Device identification
-    int id() const { return id_; }
-    int local_hardware_id() const { return id_; }
-    const std::string& device_kind() const { return device_kind_; }
-    const std::string& debug_string() const { return debug_string_; }
-    const std::string& to_string() const { return debug_string_; }
+    int id() const {
+        return id_;
+    }
+    int local_hardware_id() const {
+        return id_;
+    }
+    const std::string& device_kind() const {
+        return device_kind_;
+    }
+    const std::string& debug_string() const {
+        return debug_string_;
+    }
+    const std::string& to_string() const {
+        return debug_string_;
+    }
 
     // Owning client
-    MpsClient* client() const { return client_; }
+    MpsClient* client() const {
+        return client_;
+    }
 
     // Device is always addressable in single-process mode
-    bool IsAddressable() const { return true; }
+    bool IsAddressable() const {
+        return true;
+    }
 
 private:
     MpsClient* client_;

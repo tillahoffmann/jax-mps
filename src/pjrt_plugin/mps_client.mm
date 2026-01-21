@@ -1,20 +1,18 @@
 #import "pjrt_plugin/mps_client.h"
-#import "pjrt_plugin/mps_device.h"
-#import "pjrt_plugin/mps_buffer.h"
-#import "pjrt_plugin/mps_executable.h"
-#import "pjrt_plugin/stablehlo_parser.h"
 
+#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
-#import <Foundation/Foundation.h>
+
+#import "pjrt_plugin/mps_buffer.h"
+#import "pjrt_plugin/mps_device.h"
+#import "pjrt_plugin/mps_executable.h"
+#import "pjrt_plugin/stablehlo_parser.h"
 
 namespace jax_mps {
 
 MpsClient::MpsClient()
-    : platform_name_("mps")
-    , platform_version_("0.1.0")
-    , metal_device_(nullptr) {
-}
+    : platform_name_("mps"), platform_version_("0.1.0"), metal_device_(nullptr) {}
 
 MpsClient::~MpsClient() {
     devices_.clear();
@@ -44,11 +42,9 @@ bool MpsClient::Initialize() {
 
     // Create device wrapper
     NSString* name = [device name];
-    auto mps_device = std::make_unique<MpsDevice>(
-        this,
-        0,  // device id
-        [name UTF8String]
-    );
+    auto mps_device = std::make_unique<MpsDevice>(this,
+                                                  0,  // device id
+                                                  [name UTF8String]);
     devices_.push_back(std::move(mps_device));
 
     NSLog(@"Initialized MPS client with device: %@", name);
@@ -83,12 +79,9 @@ MpsDevice* MpsClient::LookupDevice(int device_id) {
     return nullptr;
 }
 
-std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(
-    const void* data,
-    int dtype,
-    const std::vector<int64_t>& dims,
-    MpsDevice* device) {
-
+std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int dtype,
+                                                           const std::vector<int64_t>& dims,
+                                                           MpsDevice* device) {
     if (!metal_device_ || !data) {
         return nullptr;
     }
@@ -111,18 +104,12 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(
         return nullptr;
     }
 
-    return std::make_unique<MpsBuffer>(
-        device ? device : devices_[0].get(),
-        (__bridge void*)buffer,
-        dtype,
-        dims
-    );
+    return std::make_unique<MpsBuffer>(device ? device : devices_[0].get(), (__bridge void*)buffer,
+                                       dtype, dims);
 }
 
-std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(
-    const mps::StableHLOModule& module,
-    MpsDevice* device) {
-
+std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(const mps::StableHLOModule& module,
+                                                           MpsDevice* device) {
     // Create executable from StableHLO module
     auto exec = std::make_unique<MpsExecutable>(this, module);
     if (!exec->IsValid()) {

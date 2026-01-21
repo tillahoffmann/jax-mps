@@ -30,9 +30,15 @@ public:
     ~MpsClient();
 
     // Client info
-    const std::string& platform_name() const { return platform_name_; }
-    const std::string& platform_version() const { return platform_version_; }
-    int process_index() const { return 0; }  // Single process
+    const std::string& platform_name() const {
+        return platform_name_;
+    }
+    const std::string& platform_version() const {
+        return platform_version_;
+    }
+    int process_index() const {
+        return 0;
+    }  // Single process
 
     // Device management
     int device_count() const;
@@ -42,19 +48,19 @@ public:
     MpsDevice* LookupDevice(int device_id);
 
     // Buffer operations
-    std::unique_ptr<MpsBuffer> BufferFromHostBuffer(
-        const void* data,
-        int dtype,  // PJRT dtype enum
-        const std::vector<int64_t>& dims,
-        MpsDevice* device);
+    std::unique_ptr<MpsBuffer> BufferFromHostBuffer(const void* data,
+                                                    int dtype,  // PJRT dtype enum
+                                                    const std::vector<int64_t>& dims,
+                                                    MpsDevice* device);
 
     // Compilation
-    std::unique_ptr<MpsExecutable> CompileStableHLO(
-        const mps::StableHLOModule& module,
-        MpsDevice* device);
+    std::unique_ptr<MpsExecutable> CompileStableHLO(const mps::StableHLOModule& module,
+                                                    MpsDevice* device);
 
     // Internal: get Metal device
-    void* metal_device() const { return metal_device_; }
+    void* metal_device() const {
+        return metal_device_;
+    }
 
 private:
     MpsClient();

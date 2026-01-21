@@ -1,0 +1,27 @@
+BasedOnStyle: Google
+
+# Line width
+ColumnLimit: 100
+
+# Indentation
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+
+# Braces
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Includes
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
+
+# Pointers/References
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Other
+SpaceAfterCStyleCast: false
+SpacesInContainerLiterals: false

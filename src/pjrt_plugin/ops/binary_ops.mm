@@ -1,7 +1,7 @@
 // Binary operations: add, subtract, multiply, divide, maximum, minimum, dot
 
-#import "pjrt_plugin/ops/registry.h"
 #import "pjrt_plugin/mps_executable.h"
+#import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 

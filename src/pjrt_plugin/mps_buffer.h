@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 #include <functional>
+#include <vector>
 
 namespace jax_mps {
 
@@ -13,25 +13,34 @@ class MpsBuffer {
 public:
     MpsBuffer(MpsDevice* device,
               void* metal_buffer,  // id<MTLBuffer>
-              int dtype,
-              const std::vector<int64_t>& dims);
+              int dtype, const std::vector<int64_t>& dims);
     ~MpsBuffer();
 
     // Buffer info
-    MpsDevice* device() const { return device_; }
-    int dtype() const { return dtype_; }
-    const std::vector<int64_t>& dimensions() const { return dims_; }
+    MpsDevice* device() const {
+        return device_;
+    }
+    int dtype() const {
+        return dtype_;
+    }
+    const std::vector<int64_t>& dimensions() const {
+        return dims_;
+    }
     int64_t element_count() const;
     size_t byte_size() const;
 
     // Data access
-    void* metal_buffer() const { return metal_buffer_; }
+    void* metal_buffer() const {
+        return metal_buffer_;
+    }
 
     // Copy to host
     void ToHostBuffer(void* dst, std::function<void()> on_done);
 
     // Check if buffer is deleted
-    bool IsDeleted() const { return is_deleted_; }
+    bool IsDeleted() const {
+        return is_deleted_;
+    }
     void Delete();
 
 private:

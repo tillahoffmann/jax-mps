@@ -2,8 +2,8 @@
 #define STABLEHLO_PARSER_H
 
 #include <string>
-#include <vector>
 #include <variant>
+#include <vector>
 
 namespace mps {
 
@@ -49,7 +49,8 @@ enum class OpKind {
 struct StableHLOOp {
     OpKind kind;
     std::string name;  // Result name (e.g., "%0")
-    std::string op_name;  // Original operation name (e.g., "stablehlo.gather") - set for Unknown ops
+    std::string
+        op_name;  // Original operation name (e.g., "stablehlo.gather") - set for Unknown ops
     std::vector<Operand> operands;
     TensorType result_type;
 

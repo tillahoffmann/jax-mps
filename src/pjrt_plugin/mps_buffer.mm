@@ -1,8 +1,10 @@
 #import "pjrt_plugin/mps_buffer.h"
-#import "pjrt_plugin/mps_device.h"
-#import "pjrt_plugin/mps_client.h"
-#import <Metal/Metal.h>
+
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+
+#import "pjrt_plugin/mps_client.h"
+#import "pjrt_plugin/mps_device.h"
 
 namespace jax_mps {
 
@@ -56,14 +58,9 @@ size_t DtypeByteSize(int dtype) {
     }
 }
 
-MpsBuffer::MpsBuffer(MpsDevice* device,
-                     void* metal_buffer,
-                     int dtype,
+MpsBuffer::MpsBuffer(MpsDevice* device, void* metal_buffer, int dtype,
                      const std::vector<int64_t>& dims)
-    : device_(device)
-    , metal_buffer_(metal_buffer)
-    , dtype_(dtype)
-    , dims_(dims) {
+    : device_(device), metal_buffer_(metal_buffer), dtype_(dtype), dims_(dims) {
     // Retain the Metal buffer
     if (metal_buffer_) {
         CFRetain((__bridge CFTypeRef)metal_buffer_);
@@ -88,7 +85,8 @@ size_t MpsBuffer::byte_size() const {
 
 void MpsBuffer::ToHostBuffer(void* dst, std::function<void()> on_done) {
     if (is_deleted_ || !metal_buffer_) {
-        if (on_done) on_done();
+        if (on_done)
+            on_done();
         return;
     }
 
@@ -100,7 +98,8 @@ void MpsBuffer::ToHostBuffer(void* dst, std::function<void()> on_done) {
         memcpy(dst, contents, byte_size());
     }
 
-    if (on_done) on_done();
+    if (on_done)
+        on_done();
 }
 
 void MpsBuffer::Delete() {

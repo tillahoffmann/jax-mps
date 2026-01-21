@@ -1,8 +1,8 @@
 // Unary operations: tanh, exp, log, negate, abs
 // Also includes constant creation
 
-#import "pjrt_plugin/ops/registry.h"
 #import "pjrt_plugin/mps_executable.h"
+#import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 
@@ -13,7 +13,8 @@ REGISTER_UNARY_OP(negate, negative);
 REGISTER_UNARY_OP(abs, absolute);
 
 // Constant creation - creates a constant tensor from parsed StableHLO data
-static MPSGraphTensor* Handle_constant(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
+static MPSGraphTensor* Handle_constant(MPSGraph* g, TensorDict t, const HloOp& op,
+                                       NSArray<NSNumber*>* shape) {
     MPSDataType dtype = PjrtDtypeToMps(op.dtype);
     if (dtype == MPSDataTypeInvalid) {
         NSLog(@"ERROR: Invalid dtype %d for constant operation", op.dtype);

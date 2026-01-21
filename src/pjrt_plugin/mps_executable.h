@@ -17,18 +17,18 @@ class MpsDevice;
 
 // Parsed HLO operation
 struct HloOp {
-    std::string name;       // e.g., "add", "dot", "tanh"
-    std::string output;     // e.g., "%2"
-    std::vector<std::string> inputs;  // e.g., ["%0", "%1"]
-    int dtype;              // Output dtype
-    std::vector<int64_t> shape;  // Output shape
+    std::string name;                     // e.g., "add", "dot", "tanh"
+    std::string output;                   // e.g., "%2"
+    std::vector<std::string> inputs;      // e.g., ["%0", "%1"]
+    int dtype;                            // Output dtype
+    std::vector<int64_t> shape;           // Output shape
     std::vector<int64_t> broadcast_dims;  // For broadcast_in_dim
     std::vector<int64_t> permutation;     // For transpose
 
     // For constant operations
-    std::vector<float> constant_data;     // Dense constant values
-    float constant_scalar = 0.0f;         // Scalar constant value
-    bool is_scalar_constant = false;      // True if constant is scalar/splat
+    std::vector<float> constant_data;  // Dense constant values
+    float constant_scalar = 0.0f;      // Scalar constant value
+    bool is_scalar_constant = false;   // True if constant is scalar/splat
 };
 
 // Parsed HLO computation
@@ -44,7 +44,9 @@ struct ExecutionResult {
     std::vector<std::unique_ptr<MpsBuffer>> buffers;
     std::string error;
 
-    bool ok() const { return error.empty(); }
+    bool ok() const {
+        return error.empty();
+    }
     static ExecutionResult Error(const std::string& msg) {
         ExecutionResult r;
         r.error = msg;
@@ -60,19 +62,25 @@ public:
     ~MpsExecutable();
 
     // Check if compilation succeeded
-    bool IsValid() const { return valid_; }
+    bool IsValid() const {
+        return valid_;
+    }
 
     // Get compilation error (if !IsValid())
-    const std::string& error() const { return error_; }
+    const std::string& error() const {
+        return error_;
+    }
 
     // Execution - returns result with error info
-    ExecutionResult Execute(
-        const std::vector<MpsBuffer*>& inputs,
-        MpsDevice* device);
+    ExecutionResult Execute(const std::vector<MpsBuffer*>& inputs, MpsDevice* device);
 
     // Info
-    const std::string& name() const { return name_; }
-    int num_outputs() const { return num_outputs_; }
+    const std::string& name() const {
+        return name_;
+    }
+    int num_outputs() const {
+        return num_outputs_;
+    }
 
 private:
     void CompileFromStableHLO(const mps::StableHLOModule& module);
@@ -83,7 +91,7 @@ private:
     int num_outputs_ = 1;
     bool valid_ = false;
     HloComputation computation_;
-    void* mps_graph_;  // MPSGraph*
+    void* mps_graph_;       // MPSGraph*
     void* mps_executable_;  // MPSGraphExecutable*
 };
 

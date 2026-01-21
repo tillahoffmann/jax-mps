@@ -1,8 +1,9 @@
 #pragma once
 
+#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
-#import <Foundation/Foundation.h>
+
 #import <string>
 #import <unordered_map>
 
@@ -33,7 +34,8 @@ public:
         std::string result;
         bool first = true;
         for (const auto& pair : handlers) {
-            if (!first) result += ", ";
+            if (!first)
+                result += ", ";
             result += pair.first;
             first = false;
         }
@@ -57,35 +59,43 @@ inline MPSGraphTensor* GetTensor(TensorDict tensors, const std::string& name) {
     static bool _reg_##op_name = ::jax_mps::OpRegistry::Register(#op_name, handler_fn)
 
 // Convenience macro for simple binary ops
-#define REGISTER_BINARY_OP(op_name, mps_method) \
-    static MPSGraphTensor* Handle_##op_name(MPSGraph* g, TensorDict t, \
-            const ::jax_mps::HloOp& op, NSArray<NSNumber*>*) { \
-        return [g mps_method##WithPrimaryTensor:GetTensor(t, op.inputs[0]) \
-                               secondaryTensor:GetTensor(t, op.inputs[1]) \
-                                          name:nil]; \
-    } \
+#define REGISTER_BINARY_OP(op_name, mps_method)                                                    \
+    static MPSGraphTensor* Handle_##op_name(MPSGraph* g, TensorDict t, const ::jax_mps::HloOp& op, \
+                                            NSArray<NSNumber*>*) {                                 \
+        return [g mps_method##WithPrimaryTensor:GetTensor(t, op.inputs[0])                         \
+                                secondaryTensor:GetTensor(t, op.inputs[1])                         \
+                                           name:nil];                                              \
+    }                                                                                              \
     REGISTER_OP(op_name, Handle_##op_name)
 
 // Convenience macro for simple unary ops
-#define REGISTER_UNARY_OP(op_name, mps_method) \
-    static MPSGraphTensor* Handle_##op_name(MPSGraph* g, TensorDict t, \
-            const ::jax_mps::HloOp& op, NSArray<NSNumber*>*) { \
-        return [g mps_method##WithTensor:GetTensor(t, op.inputs[0]) name:nil]; \
-    } \
+#define REGISTER_UNARY_OP(op_name, mps_method)                                                     \
+    static MPSGraphTensor* Handle_##op_name(MPSGraph* g, TensorDict t, const ::jax_mps::HloOp& op, \
+                                            NSArray<NSNumber*>*) {                                 \
+        return [g mps_method##WithTensor:GetTensor(t, op.inputs[0]) name:nil];                     \
+    }                                                                                              \
     REGISTER_OP(op_name, Handle_##op_name)
 
 // Map PJRT dtype to MPSDataType
 // Returns MPSDataTypeInvalid (0) for unknown types - caller must check
 inline MPSDataType PjrtDtypeToMps(int dtype) {
     switch (dtype) {
-        case 11: return MPSDataTypeFloat32;
-        case 10: return MPSDataTypeFloat16;
-        case 16: return MPSDataTypeBFloat16;
-        case 4:  return MPSDataTypeInt32;
-        case 5:  return MPSDataTypeInt64;
-        case 8:  return MPSDataTypeUInt32;
-        case 1:  return MPSDataTypeBool;
-        default: return MPSDataTypeInvalid;
+        case 11:
+            return MPSDataTypeFloat32;
+        case 10:
+            return MPSDataTypeFloat16;
+        case 16:
+            return MPSDataTypeBFloat16;
+        case 4:
+            return MPSDataTypeInt32;
+        case 5:
+            return MPSDataTypeInt64;
+        case 8:
+            return MPSDataTypeUInt32;
+        case 1:
+            return MPSDataTypeBool;
+        default:
+            return MPSDataTypeInvalid;
     }
 }
 

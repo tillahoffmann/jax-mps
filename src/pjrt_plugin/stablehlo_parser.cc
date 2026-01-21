@@ -3,26 +3,24 @@
 
 #include "pjrt_plugin/stablehlo_parser.h"
 
+#include <sstream>
+#include <unordered_map>
+
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
+#include "mlir/Bytecode/BytecodeReader.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Support/LogicalResult.h"
-#include "mlir/Bytecode/BytecodeReader.h"
-#include "mlir/Bytecode/BytecodeWriter.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-
-#include "stablehlo/dialect/StablehloOps.h"
-#include "stablehlo/dialect/VhloOps.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/Serialization.h"
-
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/raw_ostream.h"
-
-#include <sstream>
-#include <unordered_map>
+#include "stablehlo/dialect/StablehloOps.h"
+#include "stablehlo/dialect/VhloOps.h"
 
 namespace mps {
 
@@ -43,15 +41,24 @@ void registerDialects(mlir::MLIRContext& context) {
 
 // Convert MLIR element type to string
 std::string elementTypeToString(mlir::Type type) {
-    if (type.isF32()) return "f32";
-    if (type.isF64()) return "f64";
-    if (type.isF16()) return "f16";
-    if (type.isBF16()) return "bf16";
-    if (type.isInteger(32)) return "i32";
-    if (type.isInteger(64)) return "i64";
-    if (type.isInteger(1)) return "i1";
-    if (type.isInteger(8)) return "i8";
-    if (type.isInteger(16)) return "i16";
+    if (type.isF32())
+        return "f32";
+    if (type.isF64())
+        return "f64";
+    if (type.isF16())
+        return "f16";
+    if (type.isBF16())
+        return "bf16";
+    if (type.isInteger(32))
+        return "i32";
+    if (type.isInteger(64))
+        return "i64";
+    if (type.isInteger(1))
+        return "i1";
+    if (type.isInteger(8))
+        return "i8";
+    if (type.isInteger(16))
+        return "i16";
 
     // Default fallback
     std::string str;
@@ -81,28 +88,50 @@ std::pair<OpKind, std::string> getOpKindWithName(mlir::Operation* op) {
     llvm::StringRef name = op->getName().getStringRef();
     std::string name_str = name.str();
 
-    if (name == "stablehlo.add") return {OpKind::Add, name_str};
-    if (name == "stablehlo.multiply") return {OpKind::Multiply, name_str};
-    if (name == "stablehlo.subtract") return {OpKind::Subtract, name_str};
-    if (name == "stablehlo.divide") return {OpKind::Divide, name_str};
-    if (name == "stablehlo.maximum") return {OpKind::Maximum, name_str};
-    if (name == "stablehlo.minimum") return {OpKind::Minimum, name_str};
-    if (name == "stablehlo.tanh") return {OpKind::Tanh, name_str};
-    if (name == "stablehlo.exponential") return {OpKind::Exp, name_str};
-    if (name == "stablehlo.log") return {OpKind::Log, name_str};
-    if (name == "stablehlo.negate") return {OpKind::Negate, name_str};
-    if (name == "stablehlo.abs") return {OpKind::Abs, name_str};
-    if (name == "stablehlo.dot") return {OpKind::Dot, name_str};
-    if (name == "stablehlo.dot_general") return {OpKind::DotGeneral, name_str};
-    if (name == "stablehlo.reshape") return {OpKind::Reshape, name_str};
-    if (name == "stablehlo.transpose") return {OpKind::Transpose, name_str};
-    if (name == "stablehlo.broadcast") return {OpKind::Broadcast, name_str};
-    if (name == "stablehlo.broadcast_in_dim") return {OpKind::BroadcastInDim, name_str};
-    if (name == "stablehlo.reduce") return {OpKind::Reduce, name_str};
-    if (name == "stablehlo.convert") return {OpKind::Convert, name_str};
-    if (name == "stablehlo.constant") return {OpKind::Constant, name_str};
-    if (name == "func.return" || name == "return") return {OpKind::Return, name_str};
-    if (name == "func.call" || name == "call") return {OpKind::Call, name_str};
+    if (name == "stablehlo.add")
+        return {OpKind::Add, name_str};
+    if (name == "stablehlo.multiply")
+        return {OpKind::Multiply, name_str};
+    if (name == "stablehlo.subtract")
+        return {OpKind::Subtract, name_str};
+    if (name == "stablehlo.divide")
+        return {OpKind::Divide, name_str};
+    if (name == "stablehlo.maximum")
+        return {OpKind::Maximum, name_str};
+    if (name == "stablehlo.minimum")
+        return {OpKind::Minimum, name_str};
+    if (name == "stablehlo.tanh")
+        return {OpKind::Tanh, name_str};
+    if (name == "stablehlo.exponential")
+        return {OpKind::Exp, name_str};
+    if (name == "stablehlo.log")
+        return {OpKind::Log, name_str};
+    if (name == "stablehlo.negate")
+        return {OpKind::Negate, name_str};
+    if (name == "stablehlo.abs")
+        return {OpKind::Abs, name_str};
+    if (name == "stablehlo.dot")
+        return {OpKind::Dot, name_str};
+    if (name == "stablehlo.dot_general")
+        return {OpKind::DotGeneral, name_str};
+    if (name == "stablehlo.reshape")
+        return {OpKind::Reshape, name_str};
+    if (name == "stablehlo.transpose")
+        return {OpKind::Transpose, name_str};
+    if (name == "stablehlo.broadcast")
+        return {OpKind::Broadcast, name_str};
+    if (name == "stablehlo.broadcast_in_dim")
+        return {OpKind::BroadcastInDim, name_str};
+    if (name == "stablehlo.reduce")
+        return {OpKind::Reduce, name_str};
+    if (name == "stablehlo.convert")
+        return {OpKind::Convert, name_str};
+    if (name == "stablehlo.constant")
+        return {OpKind::Constant, name_str};
+    if (name == "func.return" || name == "return")
+        return {OpKind::Return, name_str};
+    if (name == "func.call" || name == "call")
+        return {OpKind::Call, name_str};
 
     return {OpKind::Unknown, name_str};
 }
@@ -133,7 +162,8 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
     int opCounter = 0;
     funcOp.walk([&](mlir::Operation* op) {
         // Skip the function op itself
-        if (mlir::isa<mlir::func::FuncOp>(op)) return;
+        if (mlir::isa<mlir::func::FuncOp>(op))
+            return;
 
         StableHLOOp shloOp;
         auto [kind, op_name] = getOpKindWithName(op);
@@ -182,8 +212,8 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
 
         // Get result type
         if (op->getNumResults() > 0) {
-            if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(
-                    op->getResult(0).getType())) {
+            if (auto tensorType =
+                    mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType())) {
                 shloOp.result_type = convertTensorType(tensorType);
             }
         }
@@ -228,7 +258,8 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
                         shloOp.constant_scalar = denseAttr.getSplatValue<float>();
                         shloOp.is_scalar_constant = true;
                     } else if (elemType.isF64()) {
-                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<double>());
+                        shloOp.constant_scalar =
+                            static_cast<float>(denseAttr.getSplatValue<double>());
                         shloOp.is_scalar_constant = true;
                     } else if (elemType.isF16()) {
                         // F16 values come as APFloat, convert to float
@@ -236,10 +267,12 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
                         shloOp.constant_scalar = apVal.convertToFloat();
                         shloOp.is_scalar_constant = true;
                     } else if (elemType.isInteger(32)) {
-                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<int32_t>());
+                        shloOp.constant_scalar =
+                            static_cast<float>(denseAttr.getSplatValue<int32_t>());
                         shloOp.is_scalar_constant = true;
                     } else if (elemType.isInteger(64)) {
-                        shloOp.constant_scalar = static_cast<float>(denseAttr.getSplatValue<int64_t>());
+                        shloOp.constant_scalar =
+                            static_cast<float>(denseAttr.getSplatValue<int64_t>());
                         shloOp.is_scalar_constant = true;
                     }
                 } else {
@@ -296,10 +329,9 @@ bool parseStableHLOBytecode(const char* data, size_t size, StableHLOModule& modu
     registerDialects(context);
 
     // Create memory buffer from data
-    auto buffer = llvm::MemoryBuffer::getMemBuffer(
-        llvm::StringRef(data, size),
-        /*BufferName=*/"stablehlo_bytecode",
-        /*RequiresNullTerminator=*/false);
+    auto buffer = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(data, size),
+                                                   /*BufferName=*/"stablehlo_bytecode",
+                                                   /*RequiresNullTerminator=*/false);
 
     // Try to deserialize as portable artifact first (handles VHLO versioning)
     mlir::OwningOpRef<mlir::ModuleOp> moduleOp =
@@ -340,10 +372,8 @@ std::string bytecodeToText(const char* data, size_t size) {
     registerDialects(context);
 
     // Create memory buffer
-    auto buffer = llvm::MemoryBuffer::getMemBuffer(
-        llvm::StringRef(data, size),
-        "stablehlo_bytecode",
-        false);
+    auto buffer =
+        llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(data, size), "stablehlo_bytecode", false);
 
     // Deserialize
     mlir::OwningOpRef<mlir::ModuleOp> moduleOp =
@@ -352,8 +382,8 @@ std::string bytecodeToText(const char* data, size_t size) {
     if (!moduleOp) {
         // Try regular parsing
         llvm::SourceMgr sourceMgr;
-        auto bufferCopy = llvm::MemoryBuffer::getMemBuffer(
-            llvm::StringRef(data, size), "stablehlo_bytecode", false);
+        auto bufferCopy = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(data, size),
+                                                           "stablehlo_bytecode", false);
         sourceMgr.AddNewSourceBuffer(std::move(bufferCopy), llvm::SMLoc());
         moduleOp = mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
     }

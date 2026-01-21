@@ -5,26 +5,31 @@
 #define MPS_DEBUG 0
 
 #if MPS_DEBUG
-#define MPS_LOG(...) do { fprintf(stderr, "[MPS]" __VA_ARGS__); } while(0)
+#define MPS_LOG(...)                          \
+    do {                                      \
+        fprintf(stderr, "[MPS]" __VA_ARGS__); \
+    } while (0)
 #else
-#define MPS_LOG(...) do {} while(0)
+#define MPS_LOG(...) \
+    do {             \
+    } while (0)
 #endif
 
 #include <xla/pjrt/c/pjrt_c_api.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "device_assignment.pb.h"
+#include "pjrt_plugin/mps_buffer.h"
 #include "pjrt_plugin/mps_client.h"
 #include "pjrt_plugin/mps_device.h"
-#include "pjrt_plugin/mps_buffer.h"
 #include "pjrt_plugin/mps_executable.h"
 #include "pjrt_plugin/stablehlo_parser.h"
-#include "device_assignment.pb.h"
 
 // ============================================================================
 // Opaque wrapper types
@@ -95,7 +100,8 @@ static const char* const kPlatformVersion = "0.1.0";
 static PJRT_Client* g_default_client = nullptr;
 
 static PJRT_Client* GetOrCreateDefaultClient() {
-    if (g_default_client) return g_default_client;
+    if (g_default_client)
+        return g_default_client;
 
     MPS_LOG(" Creating default client\n");
     auto mps_client = jax_mps::MpsClient::Create();
@@ -146,7 +152,8 @@ struct PJRT_Error {
     PJRT_Error_Code code;
 };
 
-static PJRT_Error* MakeError(const std::string& msg, PJRT_Error_Code code = PJRT_Error_Code_INTERNAL) {
+static PJRT_Error* MakeError(const std::string& msg,
+                             PJRT_Error_Code code = PJRT_Error_Code_INTERNAL) {
     auto* error = new PJRT_Error();
     error->message = msg;
     error->code = code;
@@ -270,7 +277,8 @@ PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
         MPS_LOG(" PJRT_Client_Devices: no client, returning 0\n");
         return nullptr;
     }
-    MPS_LOG(" PJRT_Client_Devices: %zu devices, data=%p\n", client->devices.size(), (void*)client->devices.data());
+    MPS_LOG(" PJRT_Client_Devices: %zu devices, data=%p\n", client->devices.size(),
+            (void*)client->devices.data());
     args->devices = client->devices.data();
     args->num_devices = client->devices.size();
     MPS_LOG(" PJRT_Client_Devices returning\n");
@@ -348,11 +356,8 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
 
     if (format_str == "mlir") {
         // MLIR bytecode format (StableHLO portable artifact)
-        parsed = mps::parseStableHLOBytecode(
-            args->program->code,
-            args->program->code_size,
-            stablehlo_module
-        );
+        parsed = mps::parseStableHLOBytecode(args->program->code, args->program->code_size,
+                                             stablehlo_module);
     } else if (format_str == "hlo" || format_str == "hlo_with_config") {
         // Text HLO format (legacy)
         std::string program_str(args->program->code, args->program->code_size);
@@ -362,18 +367,21 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     }
 
     if (!parsed) {
-        return MakeError("Failed to parse StableHLO program. "
-                         "The program may be malformed or use an unsupported format.");
+        return MakeError(
+            "Failed to parse StableHLO program. "
+            "The program may be malformed or use an unsupported format.");
     }
 
     // Check for unsupported operations discovered during parsing
     if (!stablehlo_module.unsupported_ops.empty()) {
         std::string unsupported_list;
         for (size_t i = 0; i < stablehlo_module.unsupported_ops.size(); i++) {
-            if (i > 0) unsupported_list += ", ";
+            if (i > 0)
+                unsupported_list += ", ";
             unsupported_list += stablehlo_module.unsupported_ops[i];
         }
-        return MakeError("Program contains unsupported StableHLO operations: " + unsupported_list + ". "
+        return MakeError("Program contains unsupported StableHLO operations: " + unsupported_list +
+                         ". "
                          "The MPS backend does not yet implement these operations.");
     }
 
@@ -422,12 +430,9 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
 
     std::vector<int64_t> dims(args->dims, args->dims + args->num_dims);
 
-    auto mps_buffer = client->client->BufferFromHostBuffer(
-        args->data,
-        static_cast<int>(args->type),
-        dims,
-        args->device ? args->device->device : nullptr
-    );
+    auto mps_buffer =
+        client->client->BufferFromHostBuffer(args->data, static_cast<int>(args->type), dims,
+                                             args->device ? args->device->device : nullptr);
 
     if (!mps_buffer) {
         return MakeError("Failed to create buffer");
@@ -454,7 +459,8 @@ PJRT_Error* MPS_DeviceDescription_Id(PJRT_DeviceDescription_Id_Args* args) {
     MPS_LOG(" PJRT_DeviceDescription_Id called\n");
     if (args->device_description && args->device_description->device) {
         args->id = args->device_description->device->device
-            ? args->device_description->device->device->id() : 0;
+                       ? args->device_description->device->device->id()
+                       : 0;
     } else {
         args->id = 0;
     }
@@ -517,8 +523,8 @@ PJRT_Error* MPS_Device_IsAddressable(PJRT_Device_IsAddressable_Args* args) {
 
 PJRT_Error* MPS_Device_LocalHardwareId(PJRT_Device_LocalHardwareId_Args* args) {
     MPS_LOG(" PJRT_Device_LocalHardwareId called, device=%p\n", (void*)args->device);
-    args->local_hardware_id = args->device && args->device->device
-        ? args->device->device->local_hardware_id() : 0;
+    args->local_hardware_id =
+        args->device && args->device->device ? args->device->device->local_hardware_id() : 0;
     MPS_LOG(" PJRT_Device_LocalHardwareId returning %d\n", args->local_hardware_id);
     return nullptr;
 }
@@ -626,12 +632,14 @@ PJRT_Error* MPS_Executable_NumPartitions(PJRT_Executable_NumPartitions_Args* arg
 PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
     MPS_LOG(" PJRT_Executable_NumOutputs called\n");
     args->num_outputs = args->executable && args->executable->executable
-        ? args->executable->executable->num_outputs() : 1;
+                            ? args->executable->executable->num_outputs()
+                            : 1;
     MPS_LOG(" PJRT_Executable_NumOutputs: %zu\n", args->num_outputs);
     return nullptr;
 }
 
-PJRT_Error* MPS_Executable_SizeOfGeneratedCodeInBytes(PJRT_Executable_SizeOfGeneratedCodeInBytes_Args* args) {
+PJRT_Error* MPS_Executable_SizeOfGeneratedCodeInBytes(
+    PJRT_Executable_SizeOfGeneratedCodeInBytes_Args* args) {
     args->size_in_bytes = 0;
     return nullptr;
 }
@@ -719,12 +727,14 @@ PJRT_Error* MPS_LoadedExecutable_GetExecutable(PJRT_LoadedExecutable_GetExecutab
     return nullptr;
 }
 
-PJRT_Error* MPS_LoadedExecutable_AddressableDevices(PJRT_LoadedExecutable_AddressableDevices_Args* args) {
+PJRT_Error* MPS_LoadedExecutable_AddressableDevices(
+    PJRT_LoadedExecutable_AddressableDevices_Args* args) {
     MPS_LOG(" PJRT_LoadedExecutable_AddressableDevices called\n");
     MPS_LOG("   args->executable=%p\n", (void*)args->executable);
 
     // Return devices from the LoadedExecutable's client
-    if (args->executable && args->executable->client && !args->executable->client->devices.empty()) {
+    if (args->executable && args->executable->client &&
+        !args->executable->client->devices.empty()) {
         args->addressable_devices = args->executable->client->devices.data();
         args->num_addressable_devices = args->executable->client->devices.size();
         MPS_LOG("   Returning %zu devices\n", args->num_addressable_devices);
@@ -763,8 +773,8 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     }
 
     PJRT_Client* client = args->executable->client;
-    jax_mps::MpsDevice* device = client && !client->devices.empty()
-        ? client->devices[0]->device : nullptr;
+    jax_mps::MpsDevice* device =
+        client && !client->devices.empty() ? client->devices[0]->device : nullptr;
 
     auto exec_result = args->executable->executable->executable->Execute(inputs, device);
 
@@ -812,7 +822,8 @@ static void MpsDeviceAssignmentDeleter(PJRT_DeviceAssignmentSerialized* da) {
     delete reinterpret_cast<MpsDeviceAssignmentSerialized*>(da);
 }
 
-PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(PJRT_LoadedExecutable_GetDeviceAssignment_Args* args) {
+PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(
+    PJRT_LoadedExecutable_GetDeviceAssignment_Args* args) {
     MPS_LOG(" PJRT_LoadedExecutable_GetDeviceAssignment called\n");
 
     // Create DeviceAssignment proto: 1 replica, 1 computation, device 0
@@ -827,7 +838,8 @@ PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(PJRT_LoadedExecutable_GetDe
 
     args->serialized_bytes = serialized->data.data();
     args->serialized_bytes_size = serialized->data.size();
-    args->serialized_device_assignment = reinterpret_cast<PJRT_DeviceAssignmentSerialized*>(serialized);
+    args->serialized_device_assignment =
+        reinterpret_cast<PJRT_DeviceAssignmentSerialized*>(serialized);
     args->serialized_device_assignment_deleter = MpsDeviceAssignmentDeleter;
 
     MPS_LOG(" PJRT_LoadedExecutable_GetDeviceAssignment returning %zu bytes\n",
@@ -846,8 +858,8 @@ PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args) {
 
 PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
     args->type = args->buffer && args->buffer->buffer
-        ? static_cast<PJRT_Buffer_Type>(args->buffer->buffer->dtype())
-        : PJRT_Buffer_Type_F32;
+                     ? static_cast<PJRT_Buffer_Type>(args->buffer->buffer->dtype())
+                     : PJRT_Buffer_Type_F32;
     return nullptr;
 }
 
@@ -887,8 +899,8 @@ PJRT_Error* MPS_Buffer_GetMemoryLayout(PJRT_Buffer_GetMemoryLayout_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_OnDeviceSizeInBytes(PJRT_Buffer_OnDeviceSizeInBytes_Args* args) {
-    args->on_device_size_in_bytes = args->buffer && args->buffer->buffer
-        ? args->buffer->buffer->byte_size() : 0;
+    args->on_device_size_in_bytes =
+        args->buffer && args->buffer->buffer ? args->buffer->buffer->byte_size() : 0;
     return nullptr;
 }
 
@@ -920,8 +932,8 @@ PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args) {
-    args->is_deleted = args->buffer && args->buffer->buffer
-        ? args->buffer->buffer->IsDeleted() : true;
+    args->is_deleted =
+        args->buffer && args->buffer->buffer ? args->buffer->buffer->IsDeleted() : true;
     return nullptr;
 }
 
@@ -958,15 +970,18 @@ PJRT_Error* MPS_Buffer_UnsafePointer(PJRT_Buffer_UnsafePointer_Args* args) {
     return nullptr;
 }
 
-PJRT_Error* MPS_Buffer_IncreaseExternalReferenceCount(PJRT_Buffer_IncreaseExternalReferenceCount_Args* args) {
+PJRT_Error* MPS_Buffer_IncreaseExternalReferenceCount(
+    PJRT_Buffer_IncreaseExternalReferenceCount_Args* args) {
     return nullptr;
 }
 
-PJRT_Error* MPS_Buffer_DecreaseExternalReferenceCount(PJRT_Buffer_DecreaseExternalReferenceCount_Args* args) {
+PJRT_Error* MPS_Buffer_DecreaseExternalReferenceCount(
+    PJRT_Buffer_DecreaseExternalReferenceCount_Args* args) {
     return nullptr;
 }
 
-PJRT_Error* MPS_Buffer_OpaqueDeviceMemoryDataPointer(PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* args) {
+PJRT_Error* MPS_Buffer_OpaqueDeviceMemoryDataPointer(
+    PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* args) {
     args->device_memory_ptr = 0;
     return nullptr;
 }
@@ -1031,20 +1046,23 @@ PJRT_Error* MPS_TopologyDescription_PlatformName(PJRT_TopologyDescription_Platfo
     return nullptr;
 }
 
-PJRT_Error* MPS_TopologyDescription_PlatformVersion(PJRT_TopologyDescription_PlatformVersion_Args* args) {
+PJRT_Error* MPS_TopologyDescription_PlatformVersion(
+    PJRT_TopologyDescription_PlatformVersion_Args* args) {
     args->platform_version = kPlatformVersion;
     args->platform_version_size = strlen(kPlatformVersion);
     return nullptr;
 }
 
-PJRT_Error* MPS_TopologyDescription_GetDeviceDescriptions(PJRT_TopologyDescription_GetDeviceDescriptions_Args* args) {
+PJRT_Error* MPS_TopologyDescription_GetDeviceDescriptions(
+    PJRT_TopologyDescription_GetDeviceDescriptions_Args* args) {
     args->descriptions = nullptr;
     args->num_descriptions = 0;
     return nullptr;
 }
 
 PJRT_Error* MPS_TopologyDescription_Serialize(PJRT_TopologyDescription_Serialize_Args* args) {
-    return MakeError("TopologyDescription_Serialize not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+    return MakeError("TopologyDescription_Serialize not implemented",
+                     PJRT_Error_Code_UNIMPLEMENTED);
 }
 
 PJRT_Error* MPS_TopologyDescription_Attributes(PJRT_TopologyDescription_Attributes_Args* args) {
@@ -1069,12 +1087,13 @@ static const PJRT_Api pjrt_api = {
     .struct_size = PJRT_Api_STRUCT_SIZE,
     .extension_start = nullptr,
 
-    .pjrt_api_version = {
-        .struct_size = PJRT_Api_Version_STRUCT_SIZE,
-        .extension_start = nullptr,
-        .major_version = PJRT_API_MAJOR,
-        .minor_version = PJRT_API_MINOR,
-    },
+    .pjrt_api_version =
+        {
+            .struct_size = PJRT_Api_Version_STRUCT_SIZE,
+            .extension_start = nullptr,
+            .major_version = PJRT_API_MAJOR,
+            .minor_version = PJRT_API_MINOR,
+        },
 
     .PJRT_Error_Destroy = MPS_Error_Destroy,
     .PJRT_Error_Message = MPS_Error_Message,
@@ -1222,9 +1241,7 @@ static const PJRT_Api pjrt_api = {
 
 extern "C" {
 
-__attribute__((visibility("default")))
-const PJRT_Api* GetPjrtApi() {
+__attribute__((visibility("default"))) const PJRT_Api* GetPjrtApi() {
     return &pjrt_api;
 }
-
 }

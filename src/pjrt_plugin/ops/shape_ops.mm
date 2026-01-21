@@ -1,11 +1,12 @@
 // Shape operations: broadcast, reshape, convert
 
-#import "pjrt_plugin/ops/registry.h"
 #import "pjrt_plugin/mps_executable.h"
+#import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 
-static MPSGraphTensor* Handle_broadcast(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
+static MPSGraphTensor* Handle_broadcast(MPSGraph* g, TensorDict t, const HloOp& op,
+                                        NSArray<NSNumber*>* shape) {
     return [g broadcastTensor:GetTensor(t, op.inputs[0]) toShape:shape name:nil];
 }
 REGISTER_OP(broadcast, Handle_broadcast);
@@ -14,7 +15,8 @@ REGISTER_OP(broadcast, Handle_broadcast);
 // When broadcasting (5,) to (1,5) with broadcast_dimensions=(1,), we need to:
 // 1. Reshape (5,) to (1,5) by inserting dims according to broadcast_dimensions
 // 2. Then broadcast to final shape
-static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* outputShape) {
+static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, TensorDict t, const HloOp& op,
+                                               NSArray<NSNumber*>* outputShape) {
     MPSGraphTensor* input = GetTensor(t, op.inputs[0]);
 
     NSArray<NSNumber*>* inputShape = input.shape;
@@ -53,12 +55,14 @@ static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, TensorDict t, const 
 }
 REGISTER_OP(broadcast_in_dim, Handle_broadcast_in_dim);
 
-static MPSGraphTensor* Handle_reshape(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
+static MPSGraphTensor* Handle_reshape(MPSGraph* g, TensorDict t, const HloOp& op,
+                                      NSArray<NSNumber*>* shape) {
     return [g reshapeTensor:GetTensor(t, op.inputs[0]) withShape:shape name:nil];
 }
 REGISTER_OP(reshape, Handle_reshape);
 
-static MPSGraphTensor* Handle_convert(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_convert(MPSGraph* g, TensorDict t, const HloOp& op,
+                                      NSArray<NSNumber*>*) {
     return [g castTensor:GetTensor(t, op.inputs[0]) toType:PjrtDtypeToMps(op.dtype) name:nil];
 }
 REGISTER_OP(convert, Handle_convert);

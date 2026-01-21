@@ -1,6 +1,8 @@
 #import "pjrt_plugin/mps_device.h"
-#import "pjrt_plugin/mps_client.h"
+
 #import <Metal/Metal.h>
+
+#import "pjrt_plugin/mps_client.h"
 
 namespace jax_mps {
 
