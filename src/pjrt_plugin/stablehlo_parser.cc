@@ -1,547 +1,294 @@
+// MLIR-based StableHLO parser
+// Uses proper MLIR/StableHLO libraries for robust parsing
+
 #include "pjrt_plugin/stablehlo_parser.h"
 
-#include <cstring>
-#include <cstdio>
-#include <cstdlib>
-#include <regex>
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Support/LogicalResult.h"
+#include "mlir/Bytecode/BytecodeReader.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+
+#include "stablehlo/dialect/StablehloOps.h"
+#include "stablehlo/dialect/VhloOps.h"
+#include "stablehlo/dialect/ChloOps.h"
+#include "stablehlo/dialect/Serialization.h"
+
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <sstream>
-#include <fstream>
-#include <unistd.h>
-#include <unordered_map>
-#include <dlfcn.h>  // For dladdr to find library path
 
 namespace mps {
 
 namespace {
 
-// Parse a tensor type string like "tensor<2x3xf32>"
-TensorType parseTensorTypeString(const std::string& str) {
+// Register all dialects needed for StableHLO parsing
+void registerDialects(mlir::MLIRContext& context) {
+    mlir::DialectRegistry registry;
+    registry.insert<mlir::func::FuncDialect>();
+    registry.insert<mlir::stablehlo::StablehloDialect>();
+    registry.insert<mlir::vhlo::VhloDialect>();
+    registry.insert<mlir::chlo::ChloDialect>();
+    context.appendDialectRegistry(registry);
+    context.loadAllAvailableDialects();
+}
+
+// Convert MLIR element type to string
+std::string elementTypeToString(mlir::Type type) {
+    if (type.isF32()) return "f32";
+    if (type.isF64()) return "f64";
+    if (type.isF16()) return "f16";
+    if (type.isBF16()) return "bf16";
+    if (type.isInteger(32)) return "i32";
+    if (type.isInteger(64)) return "i64";
+    if (type.isInteger(1)) return "i1";
+    if (type.isInteger(8)) return "i8";
+    if (type.isInteger(16)) return "i16";
+
+    // Default fallback
+    std::string str;
+    llvm::raw_string_ostream os(str);
+    type.print(os);
+    return str;
+}
+
+// Convert MLIR ranked tensor type to TensorType
+TensorType convertTensorType(mlir::RankedTensorType tensorType) {
     TensorType result;
 
-    // Match tensor<...xf32> or tensor<f32>
-    std::regex tensor_regex(R"(tensor<([^>]*)>)");
-    std::smatch match;
-    if (!std::regex_search(str, match, tensor_regex)) {
-        return result;
+    // Get shape
+    for (int64_t dim : tensorType.getShape()) {
+        result.shape.push_back(dim);
     }
 
-    std::string inner = match[1].str();
-
-    // Find the element type (last part after 'x' or the whole thing)
-    size_t last_x = inner.rfind('x');
-    std::string elem_type;
-    std::string shape_str;
-
-    if (last_x != std::string::npos) {
-        elem_type = inner.substr(last_x + 1);
-        shape_str = inner.substr(0, last_x);
-    } else {
-        elem_type = inner;
-        shape_str = "";
-    }
-
-    result.element_type = elem_type;
-
-    // Parse shape dimensions
-    if (!shape_str.empty()) {
-        std::stringstream ss(shape_str);
-        std::string dim;
-        while (std::getline(ss, dim, 'x')) {
-            if (dim == "?") {
-                result.shape.push_back(-1);  // Dynamic dimension
-            } else {
-                result.shape.push_back(std::stoll(dim));
-            }
-        }
-    }
+    // Get element type
+    result.element_type = elementTypeToString(tensorType.getElementType());
 
     return result;
 }
 
-// Operation name to OpKind lookup table
-static const std::unordered_map<std::string, OpKind> kOpKindMap = {
-    {"stablehlo.add", OpKind::Add},
-    {"stablehlo.multiply", OpKind::Multiply},
-    {"stablehlo.subtract", OpKind::Subtract},
-    {"stablehlo.divide", OpKind::Divide},
-    {"stablehlo.tanh", OpKind::Tanh},
-    {"stablehlo.exponential", OpKind::Exp},
-    {"stablehlo.log", OpKind::Log},
-    {"stablehlo.negate", OpKind::Negate},
-    {"stablehlo.abs", OpKind::Abs},
-    {"stablehlo.dot", OpKind::Dot},
-    {"stablehlo.dot_general", OpKind::DotGeneral},
-    {"stablehlo.reshape", OpKind::Reshape},
-    {"stablehlo.transpose", OpKind::Transpose},
-    {"stablehlo.broadcast", OpKind::Broadcast},
-    {"stablehlo.broadcast_in_dim", OpKind::BroadcastInDim},
-    {"stablehlo.reduce", OpKind::Reduce},
-    {"stablehlo.convert", OpKind::Convert},
-    {"stablehlo.constant", OpKind::Constant},
-    {"func.return", OpKind::Return},
-    {"return", OpKind::Return},
-    {"func.call", OpKind::Call},
-    {"call", OpKind::Call},
-};
+// Map StableHLO operation to OpKind
+OpKind getOpKind(mlir::Operation* op) {
+    llvm::StringRef name = op->getName().getStringRef();
 
-OpKind parseOpKind(const std::string& op_name) {
-    auto it = kOpKindMap.find(op_name);
-    return (it != kOpKindMap.end()) ? it->second : OpKind::Unknown;
+    if (name == "stablehlo.add") return OpKind::Add;
+    if (name == "stablehlo.multiply") return OpKind::Multiply;
+    if (name == "stablehlo.subtract") return OpKind::Subtract;
+    if (name == "stablehlo.divide") return OpKind::Divide;
+    if (name == "stablehlo.tanh") return OpKind::Tanh;
+    if (name == "stablehlo.exponential") return OpKind::Exp;
+    if (name == "stablehlo.log") return OpKind::Log;
+    if (name == "stablehlo.negate") return OpKind::Negate;
+    if (name == "stablehlo.abs") return OpKind::Abs;
+    if (name == "stablehlo.dot") return OpKind::Dot;
+    if (name == "stablehlo.dot_general") return OpKind::DotGeneral;
+    if (name == "stablehlo.reshape") return OpKind::Reshape;
+    if (name == "stablehlo.transpose") return OpKind::Transpose;
+    if (name == "stablehlo.broadcast") return OpKind::Broadcast;
+    if (name == "stablehlo.broadcast_in_dim") return OpKind::BroadcastInDim;
+    if (name == "stablehlo.reduce") return OpKind::Reduce;
+    if (name == "stablehlo.convert") return OpKind::Convert;
+    if (name == "stablehlo.constant") return OpKind::Constant;
+    if (name == "func.return" || name == "return") return OpKind::Return;
+    if (name == "func.call" || name == "call") return OpKind::Call;
+
+    return OpKind::Unknown;
 }
 
-// Simple text-based parser for MLIR/StableHLO
-// This parses the text form that we get from deserializing the bytecode
-class TextParser {
-public:
-    explicit TextParser(const std::string& text) : text_(text), pos_(0) {}
+// Parse a function from MLIR
+bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
+    result.name = funcOp.getName().str();
 
-    bool parse(StableHLOModule& module) {
-        // Skip to module
-        if (!skipTo("module")) return false;
-
-        // Find all functions
-        while (skipTo("func.func")) {
-            StableHLOFunction func;
-            if (parseFunction(func)) {
-                if (func.name == "main" || func.name == "@main") {
-                    module.entry_function = func.name;
-                }
-                module.functions.push_back(std::move(func));
-            }
+    // Parse argument types
+    for (mlir::Type argType : funcOp.getArgumentTypes()) {
+        if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(argType)) {
+            result.arg_types.push_back(convertTensorType(tensorType));
         }
-
-        return !module.functions.empty();
     }
 
-private:
-    bool parseFunction(StableHLOFunction& func) {
-        // Parse function signature: @name(%arg0: tensor<...>, ...) -> (tensor<...>)
-        skipWhitespace();
+    // Parse result types
+    for (mlir::Type resultType : funcOp.getResultTypes()) {
+        if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
+            result.result_types.push_back(convertTensorType(tensorType));
+        }
+    }
 
-        // Get visibility (public/private)
-        if (peek() == 'p') {
-            if (text_.substr(pos_, 6) == "public") {
-                pos_ += 6;
-                skipWhitespace();
-            } else if (text_.substr(pos_, 7) == "private") {
-                pos_ += 7;
-                skipWhitespace();
-            }
+    // Parse operations
+    int opCounter = 0;
+    funcOp.walk([&](mlir::Operation* op) {
+        // Skip the function op itself
+        if (mlir::isa<mlir::func::FuncOp>(op)) return;
+
+        StableHLOOp shloOp;
+        shloOp.kind = getOpKind(op);
+
+        // Generate result name
+        if (op->getNumResults() > 0) {
+            shloOp.name = "%" + std::to_string(opCounter++);
         }
 
-        // Get function name
-        if (peek() != '@') return false;
-        pos_++;  // skip @
-
-        std::string name;
-        while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '_')) {
-            name += text_[pos_++];
-        }
-        func.name = name;
-
-        // Parse arguments
-        skipWhitespace();
-        if (peek() != '(') return false;
-        pos_++;  // skip (
-
-        while (peek() != ')') {
-            skipWhitespace();
-            // Skip %argN:
-            if (peek() == '%') {
-                while (pos_ < text_.size() && text_[pos_] != ':') pos_++;
-                pos_++;  // skip :
-                skipWhitespace();
-            }
-
-            // Parse tensor type
-            std::string type_str;
-            int depth = 0;
-            while (pos_ < text_.size()) {
-                char c = text_[pos_];
-                if (c == '<') depth++;
-                if (c == '>') depth--;
-                if ((c == ',' || c == ')') && depth == 0) break;
-                type_str += c;
-                pos_++;
-            }
-
-            // Remove attributes like {jax.arg_info = ...}
-            size_t brace = type_str.find('{');
-            if (brace != std::string::npos) {
-                type_str = type_str.substr(0, brace);
-            }
-
-            // Trim whitespace
-            while (!type_str.empty() && isspace(type_str.back())) {
-                type_str.pop_back();
-            }
-
-            if (!type_str.empty()) {
-                func.arg_types.push_back(parseTensorTypeString(type_str));
-            }
-
-            if (peek() == ',') pos_++;
-            skipWhitespace();
-        }
-        pos_++;  // skip )
-
-        // Parse return type
-        skipWhitespace();
-        if (text_.substr(pos_, 2) == "->") {
-            pos_ += 2;
-            skipWhitespace();
-
-            // Parse return types (may be wrapped in parentheses)
-            if (peek() == '(') {
-                pos_++;
-                while (peek() != ')') {
-                    skipWhitespace();
-                    std::string type_str;
-                    int depth = 0;
-                    while (pos_ < text_.size()) {
-                        char c = text_[pos_];
-                        if (c == '<') depth++;
-                        if (c == '>') depth--;
-                        if ((c == ',' || c == ')') && depth == 0) break;
-                        type_str += c;
-                        pos_++;
-                    }
-
-                    // Remove attributes
-                    size_t brace = type_str.find('{');
-                    if (brace != std::string::npos) {
-                        type_str = type_str.substr(0, brace);
-                    }
-                    while (!type_str.empty() && isspace(type_str.back())) {
-                        type_str.pop_back();
-                    }
-
-                    if (!type_str.empty()) {
-                        func.result_types.push_back(parseTensorTypeString(type_str));
-                    }
-
-                    if (peek() == ',') pos_++;
-                    skipWhitespace();
-                }
-                pos_++;  // skip )
+        // Get operands
+        for (mlir::Value operand : op->getOperands()) {
+            Operand opnd;
+            // Try to get a meaningful name
+            if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(operand)) {
+                opnd.name = "%arg" + std::to_string(blockArg.getArgNumber());
+            } else if (auto defOp = operand.getDefiningOp()) {
+                // Use operation result index
+                opnd.name = "%" + std::to_string(opCounter - 1);
             } else {
-                // Single return type
-                std::string type_str;
-                int depth = 0;
-                while (pos_ < text_.size()) {
-                    char c = text_[pos_];
-                    if (c == '<') depth++;
-                    if (c == '>') depth--;
-                    if ((c == '{' || isspace(c)) && depth == 0) break;
-                    type_str += c;
-                    pos_++;
-                }
-                if (!type_str.empty()) {
-                    func.result_types.push_back(parseTensorTypeString(type_str));
-                }
+                opnd.name = "%unknown";
+            }
+            shloOp.operands.push_back(opnd);
+        }
+
+        // Get result type
+        if (op->getNumResults() > 0) {
+            if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(
+                    op->getResult(0).getType())) {
+                shloOp.result_type = convertTensorType(tensorType);
             }
         }
 
-        // Find function body
-        if (!skipTo("{")) return false;
-        pos_++;  // skip {
-
-        // Parse operations until closing brace
-        int brace_depth = 1;
-        while (brace_depth > 0 && pos_ < text_.size()) {
-            skipWhitespace();
-
-            // Check for nested braces
-            if (peek() == '{') {
-                brace_depth++;
-                pos_++;
-                continue;
+        // Handle specific operation attributes
+        if (auto dotGeneral = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op)) {
+            auto dimNumbers = dotGeneral.getDotDimensionNumbers();
+            for (int64_t d : dimNumbers.getLhsBatchingDimensions()) {
+                shloOp.lhs_batching_dims.push_back(d);
             }
-            if (peek() == '}') {
-                brace_depth--;
-                pos_++;
-                continue;
+            for (int64_t d : dimNumbers.getRhsBatchingDimensions()) {
+                shloOp.rhs_batching_dims.push_back(d);
             }
-
-            // Try to parse an operation
-            StableHLOOp op;
-            if (parseOp(op)) {
-                func.ops.push_back(std::move(op));
-            } else {
-                // Skip to next line
-                while (pos_ < text_.size() && text_[pos_] != '\n') pos_++;
-                if (pos_ < text_.size()) pos_++;
+            for (int64_t d : dimNumbers.getLhsContractingDimensions()) {
+                shloOp.lhs_contracting_dims.push_back(d);
+            }
+            for (int64_t d : dimNumbers.getRhsContractingDimensions()) {
+                shloOp.rhs_contracting_dims.push_back(d);
             }
         }
 
-        return true;
+        if (auto broadcast = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(op)) {
+            for (int64_t d : broadcast.getBroadcastDimensions()) {
+                shloOp.broadcast_dimensions.push_back(d);
+            }
+        }
+
+        if (auto transpose = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op)) {
+            for (int64_t d : transpose.getPermutation()) {
+                shloOp.permutation.push_back(d);
+            }
+        }
+
+        result.ops.push_back(std::move(shloOp));
+    });
+
+    return true;
+}
+
+// Parse module from MLIR module op
+bool parseModule(mlir::ModuleOp moduleOp, StableHLOModule& module) {
+    moduleOp.walk([&](mlir::func::FuncOp funcOp) {
+        StableHLOFunction func;
+        if (parseFunction(funcOp, func)) {
+            // Set entry function (usually "main")
+            if (func.name == "main") {
+                module.entry_function = func.name;
+            }
+            module.functions.push_back(std::move(func));
+        }
+    });
+
+    // Default to first function if no "main"
+    if (module.entry_function.empty() && !module.functions.empty()) {
+        module.entry_function = module.functions[0].name;
     }
 
-    bool parseOp(StableHLOOp& op) {
-        skipWhitespace();
-
-        // Check for result assignment: %name = op
-        std::string result_name;
-        if (peek() == '%') {
-            pos_++;
-            while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '_')) {
-                result_name += text_[pos_++];
-            }
-            skipWhitespace();
-            if (peek() != '=') {
-                // This might be a return statement with operands
-                pos_ -= result_name.size() + 1;
-                result_name.clear();
-            } else {
-                pos_++;  // skip =
-                skipWhitespace();
-            }
-        }
-
-        // Parse operation name
-        std::string op_name;
-        while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '.' || text_[pos_] == '_')) {
-            op_name += text_[pos_++];
-        }
-
-        if (op_name.empty()) return false;
-
-        op.kind = parseOpKind(op_name);
-        op.name = result_name.empty() ? "" : "%" + result_name;
-
-        // Parse operands
-        skipWhitespace();
-        while (peek() == '%') {
-            pos_++;
-            std::string operand_name;
-            while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '_')) {
-                operand_name += text_[pos_++];
-            }
-            op.operands.push_back({"%" + operand_name});
-            skipWhitespace();
-            if (peek() == ',') {
-                pos_++;
-                skipWhitespace();
-            }
-        }
-
-        // Parse call target for func.call
-        if (op.kind == OpKind::Call && peek() == '@') {
-            pos_++;
-            std::string call_target;
-            while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '_')) {
-                call_target += text_[pos_++];
-            }
-            // Store call target (we'd need to extend the struct, but for now skip)
-            skipWhitespace();
-            if (peek() == '(') {
-                pos_++;
-                while (peek() == '%') {
-                    pos_++;
-                    std::string operand_name;
-                    while (pos_ < text_.size() && (isalnum(text_[pos_]) || text_[pos_] == '_')) {
-                        operand_name += text_[pos_++];
-                    }
-                    op.operands.push_back({"%" + operand_name});
-                    skipWhitespace();
-                    if (peek() == ',') {
-                        pos_++;
-                        skipWhitespace();
-                    }
-                }
-                if (peek() == ')') pos_++;
-            }
-        }
-
-        // Skip to result type (after ':')
-        while (pos_ < text_.size() && text_[pos_] != ':' && text_[pos_] != '\n') {
-            pos_++;
-        }
-
-        if (peek() == ':') {
-            pos_++;
-            skipWhitespace();
-
-            // Parse result type
-            std::string type_str;
-            int depth = 0;
-            while (pos_ < text_.size()) {
-                char c = text_[pos_];
-                if (c == '<' || c == '(') depth++;
-                if (c == '>' || c == ')') depth--;
-                if (c == '\n' && depth == 0) break;
-                type_str += c;
-                pos_++;
-            }
-
-            // Extract the result type (after '->' if present)
-            size_t arrow = type_str.find("->");
-            if (arrow != std::string::npos) {
-                type_str = type_str.substr(arrow + 2);
-            }
-
-            // Trim and parse
-            while (!type_str.empty() && isspace(type_str.front())) {
-                type_str.erase(0, 1);
-            }
-            while (!type_str.empty() && isspace(type_str.back())) {
-                type_str.pop_back();
-            }
-
-            // Handle tuple types by taking first element
-            if (type_str.front() == '(') {
-                type_str = type_str.substr(1);
-                size_t comma = type_str.find(',');
-                size_t paren = type_str.find(')');
-                if (comma != std::string::npos && comma < paren) {
-                    type_str = type_str.substr(0, comma);
-                } else if (paren != std::string::npos) {
-                    type_str = type_str.substr(0, paren);
-                }
-            }
-
-            op.result_type = parseTensorTypeString(type_str);
-        }
-
-        return true;
-    }
-
-    void skipWhitespace() {
-        while (pos_ < text_.size() && isspace(text_[pos_])) {
-            pos_++;
-        }
-    }
-
-    bool skipTo(const std::string& pattern) {
-        size_t found = text_.find(pattern, pos_);
-        if (found == std::string::npos) return false;
-        pos_ = found + pattern.size();
-        return true;
-    }
-
-    char peek() const {
-        return pos_ < text_.size() ? text_[pos_] : '\0';
-    }
-
-    const std::string& text_;
-    size_t pos_;
-};
+    return !module.functions.empty();
+}
 
 }  // namespace
 
-// Check if data looks like MLIR text (starts with "module" or similar text)
-static bool looksLikeText(const char* data, size_t size) {
-    if (size < 6) return false;
-    // Check for common MLIR text starts
-    return (strncmp(data, "module", 6) == 0 ||
-            strncmp(data, "func", 4) == 0 ||
-            strncmp(data, "// ", 3) == 0 ||
-            strncmp(data, "#", 1) == 0);
-}
-
-std::string bytecodeToText(const char* data, size_t size) {
-    // Check if it's already text format
-    if (looksLikeText(data, size)) {
-        return std::string(data, size);
-    }
-
-    std::string result;
-
-    // Write bytecode to temporary file
-    char temp_input[] = "/tmp/stablehlo_input_XXXXXX";
-    int input_fd = mkstemp(temp_input);
-    if (input_fd < 0) {
-        fprintf(stderr, "[MPS] Failed to create temp input file\n");
-        return result;
-    }
-
-    ssize_t written = write(input_fd, data, size);
-    close(input_fd);
-
-    if (written != static_cast<ssize_t>(size)) {
-        fprintf(stderr, "[MPS] Failed to write bytecode to temp file\n");
-        unlink(temp_input);
-        return result;
-    }
-
-    // Create temp output file
-    char temp_output[] = "/tmp/stablehlo_output_XXXXXX";
-    int output_fd = mkstemp(temp_output);
-    if (output_fd < 0) {
-        fprintf(stderr, "[MPS] Failed to create temp output file\n");
-        unlink(temp_input);
-        return result;
-    }
-    close(output_fd);
-
-    // Find stablehlo-translate relative to our library location
-    // First try environment variable, then relative paths, then common locations
-    std::string stablehlo_translate;
-
-    // Check environment variable first
-    const char* env_path = getenv("STABLEHLO_TRANSLATE");
-    if (env_path && access(env_path, X_OK) == 0) {
-        stablehlo_translate = env_path;
-    } else {
-        // Try to find relative to the library using dladdr
-        Dl_info dl_info;
-        if (dladdr((void*)bytecodeToText, &dl_info) && dl_info.dli_fname) {
-            std::string lib_dir = dl_info.dli_fname;
-            size_t last_slash = lib_dir.rfind('/');
-            if (last_slash != std::string::npos) {
-                lib_dir = lib_dir.substr(0, last_slash);
-                // Try relative to build/lib (common structure)
-                std::string candidate = lib_dir + "/../third_party/stablehlo/stablehlo-build/bin/stablehlo-translate";
-                if (access(candidate.c_str(), X_OK) == 0) {
-                    stablehlo_translate = candidate;
-                }
-            }
-        }
-    }
-
-    // If not found, bytecode parsing will fail and we'll use identity fallback
-    if (stablehlo_translate.empty()) {
-        // Bytecode conversion unavailable - this is expected if stablehlo tools aren't built
-        unlink(temp_input);
-        unlink(temp_output);
-        return result;
-    }
-
-    std::string cmd = stablehlo_translate + " --deserialize < " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
-    int ret = system(cmd.c_str());
-
-    // Read output
-    std::ifstream output_file(temp_output);
-    if (output_file.is_open()) {
-        std::stringstream buffer;
-        buffer << output_file.rdbuf();
-        result = buffer.str();
-        output_file.close();
-    }
-
-    // Cleanup
-    unlink(temp_input);
-    unlink(temp_output);
-
-    return result;
-}
-
 bool parseStableHLOBytecode(const char* data, size_t size, StableHLOModule& module) {
-    // First convert bytecode to text
-    std::string text = bytecodeToText(data, size);
+    mlir::MLIRContext context;
+    registerDialects(context);
 
-    if (text.empty()) {
-        // Silently fail - caller will use identity fallback
+    // Create memory buffer from data
+    auto buffer = llvm::MemoryBuffer::getMemBuffer(
+        llvm::StringRef(data, size),
+        /*BufferName=*/"stablehlo_bytecode",
+        /*RequiresNullTerminator=*/false);
+
+    // Try to deserialize as portable artifact first (handles VHLO versioning)
+    mlir::OwningOpRef<mlir::ModuleOp> moduleOp =
+        mlir::stablehlo::deserializePortableArtifact(buffer->getBuffer(), &context);
+
+    if (!moduleOp) {
+        // Fall back to regular bytecode reading
+        llvm::SourceMgr sourceMgr;
+        sourceMgr.AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
+
+        moduleOp = mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+    }
+
+    if (!moduleOp) {
         return false;
     }
 
-    // Parse the text
-    return parseStableHLOText(text, module);
+    return parseModule(*moduleOp, module);
 }
 
 bool parseStableHLOText(const std::string& text, StableHLOModule& module) {
-    TextParser parser(text);
-    return parser.parse(module);
+    mlir::MLIRContext context;
+    registerDialects(context);
+
+    // Parse text format
+    mlir::OwningOpRef<mlir::ModuleOp> moduleOp =
+        mlir::parseSourceString<mlir::ModuleOp>(text, &context);
+
+    if (!moduleOp) {
+        return false;
+    }
+
+    return parseModule(*moduleOp, module);
+}
+
+std::string bytecodeToText(const char* data, size_t size) {
+    mlir::MLIRContext context;
+    registerDialects(context);
+
+    // Create memory buffer
+    auto buffer = llvm::MemoryBuffer::getMemBuffer(
+        llvm::StringRef(data, size),
+        "stablehlo_bytecode",
+        false);
+
+    // Deserialize
+    mlir::OwningOpRef<mlir::ModuleOp> moduleOp =
+        mlir::stablehlo::deserializePortableArtifact(buffer->getBuffer(), &context);
+
+    if (!moduleOp) {
+        // Try regular parsing
+        llvm::SourceMgr sourceMgr;
+        auto bufferCopy = llvm::MemoryBuffer::getMemBuffer(
+            llvm::StringRef(data, size), "stablehlo_bytecode", false);
+        sourceMgr.AddNewSourceBuffer(std::move(bufferCopy), llvm::SMLoc());
+        moduleOp = mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+    }
+
+    if (!moduleOp) {
+        return "";
+    }
+
+    // Print to string
+    std::string result;
+    llvm::raw_string_ostream os(result);
+    moduleOp->print(os);
+    return result;
 }
 
 }  // namespace mps

@@ -464,45 +464,6 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
         func.arg_types.push_back({{2}, "f32"});
         func.result_types.push_back({{2}, "f32"});
         stablehlo_module.functions.push_back(func);
-    } else {
-        // Verbose debug logging disabled for clean output
-        #if 0
-        MPS_LOG(" Parsed %zu functions, entry: %s\n",
-                stablehlo_module.functions.size(),
-                stablehlo_module.entry_function.c_str()); fflush(stderr);
-
-        // Print operations for debugging
-        for (const auto& fn : stablehlo_module.functions) {
-            MPS_LOG("   Function %s: %zu ops\n", fn.name.c_str(), fn.ops.size()); fflush(stderr);
-            for (const auto& op : fn.ops) {
-                const char* op_name = "unknown";
-                switch (op.kind) {
-                    case mps::OpKind::Add: op_name = "add"; break;
-                    case mps::OpKind::Multiply: op_name = "multiply"; break;
-                    case mps::OpKind::Subtract: op_name = "subtract"; break;
-                    case mps::OpKind::Divide: op_name = "divide"; break;
-                    case mps::OpKind::Tanh: op_name = "tanh"; break;
-                    case mps::OpKind::Exp: op_name = "exp"; break;
-                    case mps::OpKind::Log: op_name = "log"; break;
-                    case mps::OpKind::Negate: op_name = "negate"; break;
-                    case mps::OpKind::Abs: op_name = "abs"; break;
-                    case mps::OpKind::Dot: op_name = "dot"; break;
-                    case mps::OpKind::DotGeneral: op_name = "dot_general"; break;
-                    case mps::OpKind::Reshape: op_name = "reshape"; break;
-                    case mps::OpKind::Transpose: op_name = "transpose"; break;
-                    case mps::OpKind::Broadcast: op_name = "broadcast"; break;
-                    case mps::OpKind::BroadcastInDim: op_name = "broadcast_in_dim"; break;
-                    case mps::OpKind::Reduce: op_name = "reduce"; break;
-                    case mps::OpKind::Convert: op_name = "convert"; break;
-                    case mps::OpKind::Constant: op_name = "constant"; break;
-                    case mps::OpKind::Return: op_name = "return"; break;
-                    case mps::OpKind::Call: op_name = "call"; break;
-                    case mps::OpKind::Unknown: op_name = "unknown"; break;
-                }
-                MPS_LOG("     Op: %s -> %s\n", op_name, op.name.c_str()); fflush(stderr);
-            }
-        }
-        #endif
     }
 
     // Compile the StableHLO module to MPS executable

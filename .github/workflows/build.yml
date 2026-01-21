@@ -90,7 +90,6 @@ jobs:
         run: python -m build --wheel
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/${{ env.DEPS_DIR }}
-          CMAKE_ARGS: "-DJAX_MPS_USE_MLIR=ON"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

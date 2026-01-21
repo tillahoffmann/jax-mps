@@ -35,24 +35,11 @@ This project implements a PJRT (Portable JAX Runtime) plugin that:
 
 ## Building
 
-### Option 1: Lightweight Build (Quick Start)
-
-Uses a hand-rolled StableHLO parser. Good for development and testing.
-
-```bash
-cmake -B build -DJAX_MPS_USE_MLIR=OFF
-cmake --build build
-```
-
-### Option 2: Full Build with MLIR (Recommended)
-
-Uses proper MLIR/StableHLO libraries for robust parsing. Requires building dependencies first.
-
 ```bash
 # Install build tools
 brew install cmake ninja
 
-# Build and install LLVM/MLIR + StableHLO (one-time setup, ~30 min)
+# Build and install LLVM/MLIR + StableHLO (one-time setup)
 ./scripts/setup_deps.sh
 
 # Build jax-mps
@@ -147,12 +134,7 @@ PJRT (Portable JAX Runtime) is JAX's abstraction for hardware backends. Our plug
 
 ### HLO Parsing
 
-We implement a simple text-based HLO parser that recognizes patterns like:
-```
-%add = f32[2,3] add(%p0, %p1)
-```
-
-For production use, this should be replaced with proper protobuf-based HLO parsing.
+We use MLIR and StableHLO libraries to parse the portable StableHLO bytecode format that JAX emits.
 
 ### MPSGraph Execution
 
@@ -184,10 +166,9 @@ Small operations have GPU overhead that exceeds the computation benefit.
 
 This is an experimental project. Contributions welcome:
 1. Add more operations in `mps_executable.mm`
-2. Improve HLO parsing
-3. Add proper error handling
-4. Implement async execution
-5. Add tests
+2. Add proper error handling
+3. Implement async execution
+4. Add tests
 
 ## References
 

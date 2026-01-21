@@ -47,9 +47,6 @@ build.verbose = true
 wheel.packages = ["python/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
-[tool.scikit-build.cmake.define]
-JAX_MPS_USE_MLIR = "OFF"
-
 [tool.cibuildwheel]
 # Only build for macOS ARM64
 build = ["cp310-macosx_arm64", "cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
