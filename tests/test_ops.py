@@ -272,7 +272,7 @@ def test_broadcast(jax_setup, input_shape, output_shape):
 def test_convert(jax_setup, from_dtype, to_dtype):
     """Test type conversion produces correct results on MPS."""
     jax = jax_setup["jax"]
-    jnp = jax_setup["jnp"]
+    jax_setup["jnp"]
     cpu = jax_setup["cpu"]
     mps = jax_setup["mps"]
 

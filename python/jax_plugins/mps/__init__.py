@@ -1,7 +1,6 @@
 """JAX MPS Plugin - Metal Performance Shaders backend for JAX."""
 
 import os
-import sys
 from pathlib import Path
 
 
@@ -46,6 +45,7 @@ def initialize():
     # StableHLO parser doesn't support yet (JAX 0.9+ enables it by default)
     try:
         import jax
+
         jax.config.update("jax_use_shardy_partitioner", False)
     except Exception:
         pass
@@ -62,7 +62,7 @@ def initialize():
                 library_path=library_path,
                 options=None,
             )
-    except Exception as e:
+    except Exception:
         # Silently fail - don't spam user's console
         pass
 
