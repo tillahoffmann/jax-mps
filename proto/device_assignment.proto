@@ -1,0 +1,17 @@
+// DeviceAssignmentProto extracted from xla/xla_data.proto
+// Source: https://github.com/openxla/xla/blob/main/xla/xla_data.proto
+// License: Apache-2.0
+
+syntax = "proto3";
+
+package xla;
+
+message DeviceAssignmentProto {
+  int32 replica_count = 1;
+  int32 computation_count = 2;
+
+  message ComputationDevice {
+    repeated int64 replica_device_ids = 1;
+  }
+  repeated ComputationDevice computation_devices = 3;
+}

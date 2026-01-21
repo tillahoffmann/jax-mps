@@ -18,6 +18,14 @@ find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 # Use vendored XLA PJRT headers
 set(XLA_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
+# Find Protobuf and Abseil (protobuf depends on abseil)
+find_package(Protobuf REQUIRED)
+find_package(absl REQUIRED)
+message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
+
+# Generate C++ from proto files
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS proto/device_assignment.proto)
+
 # Find MLIR and LLVM packages
 find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
@@ -70,6 +78,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/mps_buffer.mm
     src/pjrt_plugin/mps_executable.mm
     src/pjrt_plugin/stablehlo_parser.cc
+    ${PROTO_SRCS}
 )
 
 add_library(pjrt_plugin_mps SHARED ${PJRT_SOURCES})
@@ -80,6 +89,8 @@ target_include_directories(pjrt_plugin_mps PRIVATE
     ${LLVM_INCLUDE_DIRS}
     ${MLIR_INCLUDE_DIRS}
     ${STABLEHLO_INCLUDE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}  # For generated proto headers
+    ${Protobuf_INCLUDE_DIRS}
 )
 
 # Core MLIR libraries (order matters for static linking)
@@ -140,6 +151,10 @@ target_link_libraries(pjrt_plugin_mps PRIVATE
     ${FOUNDATION_FRAMEWORK}
     ${STABLEHLO_LIBS}
     ${MLIR_LIBS}
+    protobuf::libprotobuf
+    absl::log
+    absl::log_internal_check_op
+    absl::log_internal_message
 )
 
 # For wheel distribution: ensure RPATH is set correctly
