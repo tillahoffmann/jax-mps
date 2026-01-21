@@ -1,0 +1,201 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  build-deps:
+    name: Build MLIR/StableHLO
+    runs-on: macos-14  # Apple Silicon runner
+    timeout-minutes: 180  # LLVM build can take ~2-3 hours
+    env:
+      DEPS_DIR: .jax-mps-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MLIR/StableHLO
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          restore-keys: |
+            mlir-stablehlo-macos14-
+          save-always: true  # Save cache even if job fails after build
+
+      - name: Install build tools
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: brew install cmake ninja
+
+      - name: Build dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: ./scripts/setup_deps.sh --prefix "${{ github.workspace }}/${{ env.DEPS_DIR }}"
+        env:
+          JOBS: 4
+
+      - name: Verify deps installation
+        run: |
+          echo "Checking MLIR installation..."
+          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/lib/cmake/mlir/" | head -5
+          echo "Checking StableHLO installation..."
+          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/include/stablehlo/dialect/" | head -5
+
+      - name: Upload deps artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-stablehlo-deps
+          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          retention-days: 7
+
+  build-wheel:
+    name: Build wheel (Python ${{ matrix.python }})
+    needs: build-deps
+    runs-on: macos-14
+    env:
+      DEPS_DIR: .jax-mps-deps
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download deps artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mlir-stablehlo-deps
+          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+
+      - name: Verify deps downloaded
+        run: |
+          echo "MLIR cmake config:"
+          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/lib/cmake/mlir/" | head -3
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build scikit-build-core cmake ninja
+
+      - name: Build wheel
+        run: python -m build --wheel
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          CMAKE_ARGS: "-DJAX_MPS_USE_MLIR=ON"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python }}
+          path: dist/*.whl
+
+  test:
+    name: Test wheel (Python ${{ matrix.python }})
+    needs: build-wheel
+    runs-on: macos-14
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python }}
+          path: dist/
+
+      - name: Install wheel and dependencies
+        run: |
+          pip install dist/*.whl
+          pip install pytest numpy
+
+      - name: Verify JAX backends
+        run: |
+          python -c "
+          import jax
+          print('JAX version:', jax.__version__)
+          print('Available devices:', jax.devices())
+
+          # Check if MPS backend is available
+          try:
+              mps_devices = jax.devices('mps')
+              print('MPS devices:', mps_devices)
+              if not mps_devices:
+                  print('WARNING: No MPS devices found')
+          except Exception as e:
+              print('MPS backend status:', e)
+          "
+
+      - name: Run basic JAX operations
+        run: |
+          python -c "
+          import jax
+          import jax.numpy as jnp
+
+          # Basic operations
+          x = jnp.array([1.0, 2.0, 3.0])
+          y = jnp.array([4.0, 5.0, 6.0])
+          print('x + y =', x + y)
+
+          # Matrix multiplication
+          a = jnp.ones((100, 100))
+          b = jnp.ones((100, 100))
+          c = jnp.matmul(a, b)
+          print('matmul result shape:', c.shape)
+          print('matmul result sum:', float(c.sum()))
+
+          # Verify correctness (100x100 ones * 100x100 ones = 100x100 hundreds)
+          assert float(c.sum()) == 100 * 100 * 100, 'matmul result incorrect'
+          print('Basic operations: PASSED')
+          "
+
+      - name: Run benchmark (GPU test)
+        run: |
+          echo "Running benchmark to verify GPU acceleration..."
+          python benchmark.py
+        continue-on-error: true  # Don't fail if GPU not available in VM
+
+      - name: Run pytest
+        run: pytest tests/ -v
+
+  release:
+    name: Release
+    needs: [build-wheel, test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
