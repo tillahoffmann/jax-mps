@@ -13,8 +13,6 @@ jobs:
     name: Build MLIR/StableHLO
     runs-on: macos-14  # Apple Silicon runner
     timeout-minutes: 180  # LLVM build can take ~2-3 hours
-    env:
-      DEPS_DIR: .jax-mps-deps
     steps:
       - uses: actions/checkout@v4
 
@@ -22,11 +20,10 @@ jobs:
         id: cache-deps
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          path: .jax-mps-deps
           key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           restore-keys: |
             mlir-stablehlo-macos14-
-          save-always: true  # Save cache even if job fails after build
 
       - name: Install build tools
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -34,30 +31,29 @@ jobs:
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
-        run: ./scripts/setup_deps.sh --prefix "${{ github.workspace }}/${{ env.DEPS_DIR }}"
+        run: ./scripts/setup_deps.sh --prefix "${{ github.workspace }}/.jax-mps-deps"
         env:
           JOBS: 4
 
       - name: Verify deps installation
         run: |
           echo "Checking MLIR installation..."
-          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/lib/cmake/mlir/" | head -5
+          ls -la .jax-mps-deps/lib/cmake/mlir/ | head -5
           echo "Checking StableHLO installation..."
-          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/include/stablehlo/dialect/" | head -5
+          ls -la .jax-mps-deps/include/stablehlo/dialect/ | head -5
 
       - name: Upload deps artifact
         uses: actions/upload-artifact@v4
         with:
           name: mlir-stablehlo-deps
-          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          path: .jax-mps-deps
           retention-days: 7
+          include-hidden-files: true
 
   build-wheel:
     name: Build wheel (Python ${{ matrix.python }})
     needs: build-deps
     runs-on: macos-14
-    env:
-      DEPS_DIR: .jax-mps-deps
     strategy:
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13"]
@@ -74,12 +70,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: mlir-stablehlo-deps
-          path: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          path: .jax-mps-deps
 
       - name: Verify deps downloaded
         run: |
           echo "MLIR cmake config:"
-          ls -la "${{ github.workspace }}/${{ env.DEPS_DIR }}/lib/cmake/mlir/" | head -3
+          ls -la .jax-mps-deps/lib/cmake/mlir/ | head -3
 
       - name: Install build dependencies
         run: |
@@ -89,7 +85,7 @@ jobs:
       - name: Build wheel
         run: python -m build --wheel
         env:
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/${{ env.DEPS_DIR }}
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
