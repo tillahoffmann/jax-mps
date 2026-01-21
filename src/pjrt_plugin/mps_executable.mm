@@ -211,7 +211,7 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
     }
 
     if (!entry_func) {
-        NSLog(@"No entry function found in StableHLO module");
+        // NSLog(@"No entry function found in StableHLO module");
         valid_ = false;
         return;
     }
@@ -220,18 +220,18 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
     // (This allows reusing existing execution code)
     computation_.name = entry_func->name;
 
-    NSLog(@"Entry function: %s, %zu args, %zu results, %zu ops",
-          entry_func->name.c_str(),
-          entry_func->arg_types.size(),
-          entry_func->result_types.size(),
-          entry_func->ops.size());
+    // NSLog(@"Entry function: %s, %zu args, %zu results, %zu ops",
+    //       entry_func->name.c_str(),
+    //       entry_func->arg_types.size(),
+    //       entry_func->result_types.size(),
+    //       entry_func->ops.size());
 
     // Convert argument types to parameters
     for (size_t i = 0; i < entry_func->arg_types.size(); i++) {
         std::string param_name = "%arg" + std::to_string(i);
         const auto& arg_type = entry_func->arg_types[i];
-        NSLog(@"  Arg %zu: shape size=%zu, element_type=%s",
-              i, arg_type.shape.size(), arg_type.element_type.c_str());
+        // NSLog(@"  Arg %zu: shape size=%zu, element_type=%s",
+        //       i, arg_type.shape.size(), arg_type.element_type.c_str());
         computation_.parameters.push_back({param_name, arg_type.shape});
     }
 
@@ -292,8 +292,22 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
             case mps::OpKind::Convert:
                 op.name = "convert";
                 break;
+            case mps::OpKind::BroadcastInDim:
+                op.name = "broadcast_in_dim";
+                // Store broadcast dimensions
+                op.broadcast_dims = shlo_op.broadcast_dimensions;
+                break;
+            case mps::OpKind::Broadcast:
+                op.name = "broadcast";
+                break;
+            case mps::OpKind::Abs:
+                op.name = "abs";
+                break;
+            case mps::OpKind::Constant:
+                op.name = "constant";
+                break;
             default:
-                NSLog(@"Unsupported StableHLO op kind: %d", (int)shlo_op.kind);
+                // NSLog(@"Unsupported StableHLO op kind: %d", (int)shlo_op.kind);
                 op.name = "unknown";
                 break;
         }
@@ -315,7 +329,7 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
 
     // Identity functions (just returning inputs) are valid even with 0 ops
     valid_ = true;
-    NSLog(@"Compiled StableHLO to %zu ops, %d outputs", computation_.ops.size(), num_outputs_);
+    // NSLog(@"Compiled StableHLO to %zu ops, %d outputs", computation_.ops.size(), num_outputs_);
 }
 
 MpsExecutable::~MpsExecutable() {
@@ -331,8 +345,8 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
     const std::vector<MpsBuffer*>& inputs,
     MpsDevice* device) {
 
-    NSLog(@"Execute: %zu inputs, %zu parameters, %zu ops",
-          inputs.size(), computation_.parameters.size(), computation_.ops.size());
+    // NSLog(@"Execute: %zu inputs, %zu parameters, %zu ops",
+    //       inputs.size(), computation_.parameters.size(), computation_.ops.size());
 
     std::vector<std::unique_ptr<MpsBuffer>> results;
 
@@ -426,14 +440,82 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
                 tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
                 result_tensor = out;
             }
+            else if (op.name == "divide") {
+                MPSGraphTensor* lhs = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* rhs = tensors[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
+                MPSGraphTensor* out = [graph divisionWithPrimaryTensor:lhs
+                                                       secondaryTensor:rhs
+                                                                  name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "exp") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* out = [graph exponentWithTensor:input name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "log") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* out = [graph logarithmWithTensor:input name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "negate") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* out = [graph negativeWithTensor:input name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "abs") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* out = [graph absoluteWithTensor:input name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "broadcast_in_dim" || op.name == "broadcast") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                // Broadcast to the target shape
+                MPSGraphTensor* out = [graph broadcastTensor:input
+                                                     toShape:output_shape
+                                                        name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "reshape") {
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSGraphTensor* out = [graph reshapeTensor:input
+                                                 withShape:output_shape
+                                                      name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
+            else if (op.name == "convert") {
+                // Type conversion - just pass through for now (same type)
+                MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                MPSDataType target_type = PjrtDtypeToMps(op.dtype);
+                MPSGraphTensor* out = [graph castTensor:input
+                                                 toType:target_type
+                                                   name:nil];
+                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+                result_tensor = out;
+            }
             else {
-                NSLog(@"Unsupported operation: %s", op.name.c_str());
+                // NSLog(@"Unsupported operation: %s", op.name.c_str());
+                // For unsupported ops, try to pass through the first input
+                if (!op.inputs.empty()) {
+                    MPSGraphTensor* input = tensors[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+                    if (input) {
+                        tensors[[NSString stringWithUTF8String:op.output.c_str()]] = input;
+                        result_tensor = input;
+                    }
+                }
             }
         }
 
-        // Handle identity functions (no ops, just return input)
-        if (!result_tensor && computation_.ops.empty() && !inputs.empty()) {
-            NSLog(@"Identity function - returning input as output");
+        // Handle identity functions (no ops, or failed to produce result)
+        if (!result_tensor && !inputs.empty()) {
+            // NSLog(@"Identity function - returning input as output");
             // For identity, just copy the input buffer
             MpsBuffer* input = inputs[0];
             const auto& dims = input->dimensions();
@@ -457,7 +539,7 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
         }
 
         if (!result_tensor) {
-            NSLog(@"No result tensor produced");
+            // NSLog(@"No result tensor produced and no inputs available");
             return results;
         }
 

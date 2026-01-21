@@ -21,6 +21,8 @@ struct HloOp {
     std::vector<std::string> inputs;  // e.g., ["%0", "%1"]
     int dtype;              // Output dtype
     std::vector<int64_t> shape;  // Output shape
+    std::vector<int64_t> broadcast_dims;  // For broadcast_in_dim
+    std::vector<int64_t> permutation;     // For transpose
 };
 
 // Parsed HLO computation

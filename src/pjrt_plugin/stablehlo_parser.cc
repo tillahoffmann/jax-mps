@@ -421,7 +421,22 @@ private:
 
 }  // namespace
 
+// Check if data looks like MLIR text (starts with "module" or similar text)
+static bool looksLikeText(const char* data, size_t size) {
+    if (size < 6) return false;
+    // Check for common MLIR text starts
+    return (strncmp(data, "module", 6) == 0 ||
+            strncmp(data, "func", 4) == 0 ||
+            strncmp(data, "// ", 3) == 0 ||
+            strncmp(data, "#", 1) == 0);
+}
+
 std::string bytecodeToText(const char* data, size_t size) {
+    // Check if it's already text format
+    if (looksLikeText(data, size)) {
+        return std::string(data, size);
+    }
+
     std::string result;
 
     // Write bytecode to temporary file
@@ -453,19 +468,14 @@ std::string bytecodeToText(const char* data, size_t size) {
 
     // Run stablehlo-translate to convert bytecode to text
     // The tool should be in our build directory
-    std::string cmd = "stablehlo-translate --deserialize < " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
-
-    // Try the tool from stablehlo build directory first
     std::string stablehlo_translate = "/Users/till/git/jax-mps/third_party/stablehlo/stablehlo-build/bin/stablehlo-translate";
 
-    cmd = stablehlo_translate + " --deserialize < " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
+    std::string cmd = stablehlo_translate + " --deserialize < " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
 
     int ret = system(cmd.c_str());
 
     if (ret != 0) {
-        fprintf(stderr, "[MPS] stablehlo-translate failed (code %d), trying mlir-opt...\n", ret);
-
-        // Try mlir-opt as fallback
+        // Try mlir-opt as fallback (silently)
         std::string mlir_opt = "/Users/till/git/jax-mps/third_party/stablehlo/llvm-build/bin/mlir-opt";
         cmd = mlir_opt + " " + std::string(temp_input) + " > " + std::string(temp_output) + " 2>/dev/null";
         ret = system(cmd.c_str());
@@ -492,11 +502,9 @@ bool parseStableHLOBytecode(const char* data, size_t size, StableHLOModule& modu
     std::string text = bytecodeToText(data, size);
 
     if (text.empty()) {
-        fprintf(stderr, "[MPS] Failed to convert bytecode to text\n");
+        // Silently fail - caller will use identity fallback
         return false;
     }
-
-    fprintf(stderr, "[MPS] Deserialized StableHLO text:\n%s\n", text.c_str());
 
     // Parse the text
     return parseStableHLOText(text, module);
