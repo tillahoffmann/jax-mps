@@ -1,0 +1,73 @@
+#pragma once
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace mps {
+struct StableHLOModule;
+}
+
+namespace jax_mps {
+
+class MpsClient;
+class MpsDevice;
+class MpsBuffer;
+
+// Parsed HLO operation
+struct HloOp {
+    std::string name;       // e.g., "add", "dot", "tanh"
+    std::string output;     // e.g., "%2"
+    std::vector<std::string> inputs;  // e.g., ["%0", "%1"]
+    int dtype;              // Output dtype
+    std::vector<int64_t> shape;  // Output shape
+};
+
+// Parsed HLO computation
+struct HloComputation {
+    std::string name;
+    std::vector<std::pair<std::string, std::vector<int64_t>>> parameters;  // name -> shape
+    std::vector<HloOp> ops;
+    std::string root_name;  // Which op is the root/output
+};
+
+// Compiled executable for Metal
+class MpsExecutable {
+public:
+    // Legacy constructor from HLO text
+    MpsExecutable(MpsClient* client, const HloComputation& computation);
+
+    // New constructor from StableHLO module
+    MpsExecutable(MpsClient* client, const mps::StableHLOModule& module);
+
+    ~MpsExecutable();
+
+    // Check if compilation succeeded
+    bool IsValid() const { return valid_; }
+
+    // Execution
+    std::vector<std::unique_ptr<MpsBuffer>> Execute(
+        const std::vector<MpsBuffer*>& inputs,
+        MpsDevice* device);
+
+    // Info
+    const std::string& name() const { return name_; }
+    int num_outputs() const { return num_outputs_; }
+
+private:
+    void CompileFromHLO(const HloComputation& computation);
+    void CompileFromStableHLO(const mps::StableHLOModule& module);
+
+    MpsClient* client_;
+    std::string name_;
+    int num_outputs_ = 1;
+    bool valid_ = false;
+    HloComputation computation_;  // Keep for backward compatibility
+    void* mps_graph_;  // MPSGraph*
+    void* mps_executable_;  // MPSGraphExecutable*
+};
+
+// Parse HLO text into computation
+HloComputation ParseHloText(const std::string& hlo_text);
+
+}  // namespace jax_mps

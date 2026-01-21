@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Build artifacts
+*.dylib
+*.o
+*.a
+
+# Third-party builds (MLIR, StableHLO)
+third_party/stablehlo/llvm-build/
+third_party/stablehlo/stablehlo-build/
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+
+# macOS
+.DS_Store

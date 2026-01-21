@@ -1,0 +1,37 @@
+[project]
+name = "jax-mps"
+version = "0.1.0"
+description = "JAX backend for Apple Metal Performance Shaders (MPS)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.20",
+]
+keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/till/jax-mps"
+Repository = "https://github.com/till/jax-mps"
+
+[project.entry-points."jax_plugins"]
+mps = "jax_plugins.mps"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["jax_plugins*"]
+
+[tool.setuptools.package-data]
+"jax_plugins.mps" = ["lib/*.dylib"]
