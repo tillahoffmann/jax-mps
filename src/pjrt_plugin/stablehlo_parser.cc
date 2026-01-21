@@ -22,6 +22,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <sstream>
+#include <unordered_map>
 
 namespace mps {
 
@@ -121,6 +122,8 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
     }
 
     // Parse operations
+    // Track mapping from MLIR Value to result name
+    std::unordered_map<void*, std::string> valueToName;
     int opCounter = 0;
     funcOp.walk([&](mlir::Operation* op) {
         // Skip the function op itself
@@ -129,9 +132,11 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
         StableHLOOp shloOp;
         shloOp.kind = getOpKind(op);
 
-        // Generate result name
+        // Generate result name and track it
         if (op->getNumResults() > 0) {
             shloOp.name = "%" + std::to_string(opCounter++);
+            // Map this operation's result to its name
+            valueToName[op->getResult(0).getAsOpaquePointer()] = shloOp.name;
         }
 
         // Get operands
@@ -140,11 +145,14 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
             // Try to get a meaningful name
             if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(operand)) {
                 opnd.name = "%arg" + std::to_string(blockArg.getArgNumber());
-            } else if (auto defOp = operand.getDefiningOp()) {
-                // Use operation result index
-                opnd.name = "%" + std::to_string(opCounter - 1);
             } else {
-                opnd.name = "%unknown";
+                // Look up the operand's name from our mapping
+                auto it = valueToName.find(operand.getAsOpaquePointer());
+                if (it != valueToName.end()) {
+                    opnd.name = it->second;
+                } else {
+                    opnd.name = "%unknown";
+                }
             }
             shloOp.operands.push_back(opnd);
         }
