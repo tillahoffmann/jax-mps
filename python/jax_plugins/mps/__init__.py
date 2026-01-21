@@ -42,6 +42,14 @@ def initialize():
         # Don't print warning during JAX startup - it's noisy
         return
 
+    # Disable shardy partitioner - it produces sdy dialect ops that our
+    # StableHLO parser doesn't support yet (JAX 0.9+ enables it by default)
+    try:
+        import jax
+        jax.config.update("jax_use_shardy_partitioner", False)
+    except Exception:
+        pass
+
     # Register the plugin using JAX's xla_bridge API
     try:
         from jax._src import xla_bridge as xb

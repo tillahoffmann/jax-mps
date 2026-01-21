@@ -36,6 +36,8 @@ void registerDialects(mlir::MLIRContext& context) {
     registry.insert<mlir::chlo::ChloDialect>();
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
+    // Allow unknown dialects (e.g., sdy/Shardy for sharding) to pass through
+    context.allowUnregisteredDialects();
 }
 
 // Convert MLIR element type to string

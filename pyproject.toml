@@ -59,3 +59,13 @@ environment = { CMAKE_PREFIX_PATH = "$HOME/.local/jax-mps-deps" }
 
 # Before building, ensure deps are built
 before-all = "./scripts/setup_deps.sh"
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+
