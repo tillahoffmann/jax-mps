@@ -99,7 +99,25 @@ fi
 
 # Build StableHLO
 STABLEHLO_BUILD_DIR="$BUILD_DIR/stablehlo-build"
-if [ ! -f "$PREFIX/lib/cmake/stablehlo/StablehloConfig.cmake" ]; then
+if [ ! -f "$PREFIX/lib/libStablehloOps.a" ]; then
+    echo "=== Patching StableHLO (disable lit tests) ==="
+    # StableHLO's test CMakeLists require LLVM FileCheck which we don't install
+    # Wrap the lit test setup in if(TARGET FileCheck) to skip when not available
+    for f in "$STABLEHLO_DIR/stablehlo/tests/CMakeLists.txt" \
+             "$STABLEHLO_DIR/stablehlo/testdata/CMakeLists.txt" \
+             "$STABLEHLO_DIR/stablehlo/conversions/linalg/tests/CMakeLists.txt" \
+             "$STABLEHLO_DIR/stablehlo/conversions/tosa/tests/CMakeLists.txt"; do
+        if [ -f "$f" ] && ! grep -q "if(TARGET FileCheck)" "$f"; then
+            python3 -c "
+import re, sys
+content = open('$f').read()
+pattern = r'(configure_lit_site_cfg\([^)]+\)\s*add_lit_testsuite\([^)]+\)\s*add_dependencies\([^)]+\))'
+def wrap(m): return 'if(TARGET FileCheck)\n' + m.group(1) + '\nendif()'
+print(re.sub(pattern, wrap, content, flags=re.DOTALL))
+" > "$f.tmp" && mv "$f.tmp" "$f"
+        fi
+    done
+
     echo "=== Building StableHLO ==="
     cmake -G Ninja -B "$STABLEHLO_BUILD_DIR" -S "$STABLEHLO_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
@@ -111,6 +129,16 @@ if [ ! -f "$PREFIX/lib/cmake/stablehlo/StablehloConfig.cmake" ]; then
 
     cmake --build "$STABLEHLO_BUILD_DIR" -j "$JOBS"
     cmake --install "$STABLEHLO_BUILD_DIR"
+
+    # StableHLO doesn't install headers by default, do it manually
+    echo "=== Installing StableHLO headers ==="
+    mkdir -p "$PREFIX/include/stablehlo/dialect"
+    mkdir -p "$PREFIX/include/stablehlo/api"
+    cp "$STABLEHLO_DIR/stablehlo/dialect/"*.h "$PREFIX/include/stablehlo/dialect/"
+    cp "$STABLEHLO_DIR/stablehlo/api/"*.h "$PREFIX/include/stablehlo/api/"
+    # Copy generated tablegen headers
+    cp "$STABLEHLO_BUILD_DIR/stablehlo/dialect/"*.inc "$PREFIX/include/stablehlo/dialect/" 2>/dev/null || true
+
     echo "StableHLO installed to $PREFIX"
 else
     echo "=== StableHLO already installed ==="

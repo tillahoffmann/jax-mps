@@ -10,6 +10,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Bytecode/BytecodeReader.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/dialect/VhloOps.h"
@@ -100,27 +101,27 @@ OpKind getOpKind(mlir::Operation* op) {
 }
 
 // Parse a function from MLIR
-bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& func) {
-    func.name = funcOp.getName().str();
+bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
+    result.name = funcOp.getName().str();
 
     // Parse argument types
     for (mlir::Type argType : funcOp.getArgumentTypes()) {
-        if (auto tensorType = argType.dyn_cast<mlir::RankedTensorType>()) {
-            func.arg_types.push_back(convertTensorType(tensorType));
+        if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(argType)) {
+            result.arg_types.push_back(convertTensorType(tensorType));
         }
     }
 
     // Parse result types
     for (mlir::Type resultType : funcOp.getResultTypes()) {
-        if (auto tensorType = resultType.dyn_cast<mlir::RankedTensorType>()) {
-            func.result_types.push_back(convertTensorType(tensorType));
+        if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
+            result.result_types.push_back(convertTensorType(tensorType));
         }
     }
 
     // Parse operations
     int opCounter = 0;
     funcOp.walk([&](mlir::Operation* op) {
-        // Skip the function op itself and block arguments
+        // Skip the function op itself
         if (mlir::isa<mlir::func::FuncOp>(op)) return;
 
         StableHLOOp shloOp;
@@ -135,7 +136,7 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& func) {
         for (mlir::Value operand : op->getOperands()) {
             Operand opnd;
             // Try to get a meaningful name
-            if (auto blockArg = operand.dyn_cast<mlir::BlockArgument>()) {
+            if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(operand)) {
                 opnd.name = "%arg" + std::to_string(blockArg.getArgNumber());
             } else if (auto defOp = operand.getDefiningOp()) {
                 // Use operation result index
@@ -148,7 +149,8 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& func) {
 
         // Get result type
         if (op->getNumResults() > 0) {
-            if (auto tensorType = op->getResult(0).getType().dyn_cast<mlir::RankedTensorType>()) {
+            if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(
+                    op->getResult(0).getType())) {
                 shloOp.result_type = convertTensorType(tensorType);
             }
         }
@@ -182,7 +184,7 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& func) {
             }
         }
 
-        func.ops.push_back(std::move(shloOp));
+        result.ops.push_back(std::move(shloOp));
     });
 
     return true;

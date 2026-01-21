@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "JAX backend for Apple Metal Performance Shaders (MPS)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
 dependencies = [
     "jax>=0.4.20",
+    "jaxlib>=0.4.20",
 ]
 keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
 classifiers = [
@@ -15,6 +17,10 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -26,12 +32,33 @@ Repository = "https://github.com/till/jax-mps"
 mps = "jax_plugins.mps"
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.8", "cmake>=3.20", "ninja"]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools.packages.find]
-where = ["python"]
-include = ["jax_plugins*"]
+[tool.scikit-build]
+# Build directory
+build-dir = "build/{wheel_tag}"
 
-[tool.setuptools.package-data]
-"jax_plugins.mps" = ["lib/*.dylib"]
+# CMake configuration
+cmake.build-type = "Release"
+build.verbose = true
+
+# Install the built library to the package
+wheel.packages = ["python/jax_plugins"]
+wheel.install-dir = "jax_plugins/mps"
+
+[tool.scikit-build.cmake.define]
+JAX_MPS_USE_MLIR = "OFF"
+
+[tool.cibuildwheel]
+# Only build for macOS ARM64
+build = ["cp310-macosx_arm64", "cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
+skip = ["*-musllinux*", "*-manylinux*", "*win*", "*i686*", "*x86_64*"]
+
+# macOS specific
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+environment = { CMAKE_PREFIX_PATH = "$HOME/.local/jax-mps-deps" }
+
+# Before building, ensure deps are built
+before-all = "./scripts/setup_deps.sh"
