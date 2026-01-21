@@ -62,6 +62,7 @@ before-all = "./scripts/setup_deps.sh"
 
 [dependency-groups]
 dev = [
+    "flax>=0.10.7",
     "pre-commit>=4.5.1",
     "pytest",
     "ruff>=0.14.13",
