@@ -5,7 +5,7 @@
 #define MPS_DEBUG 0
 
 #if MPS_DEBUG
-#define MPS_LOG(...) do { fprintf(stderr, "[MPS]" __VA_ARGS__); fflush(stderr); } while(0)
+#define MPS_LOG(...) do { fprintf(stderr, "[MPS]" __VA_ARGS__); } while(0)
 #else
 #define MPS_LOG(...) do {} while(0)
 #endif
@@ -88,7 +88,10 @@ struct PJRT_Event {
 // Global state
 // ============================================================================
 
-static bool g_initialized = false;
+// Platform constants
+static const char* const kPlatformName = "mps";
+static const char* const kPlatformVersion = "0.1.0";
+
 static PJRT_Client* g_default_client = nullptr;
 
 static PJRT_Client* GetOrCreateDefaultClient() {
@@ -129,7 +132,7 @@ static PJRT_Client* GetOrCreateDefaultClient() {
     g_default_client->topology = new PJRT_TopologyDescription();
     g_default_client->topology->client = g_default_client;
 
-    MPS_LOG(" Created client with %zu devices\n", g_default_client->devices.size()); fflush(stderr);
+    MPS_LOG(" Created client with %zu devices\n", g_default_client->devices.size());
 
     return g_default_client;
 }
@@ -172,7 +175,6 @@ PJRT_Error* MPS_Error_GetCode(PJRT_Error_GetCode_Args* args) {
 
 PJRT_Error* MPS_Plugin_Initialize(PJRT_Plugin_Initialize_Args* args) {
     MPS_LOG(" PJRT_Plugin_Initialize\n");
-    g_initialized = true;
     return nullptr;
 }
 
@@ -218,14 +220,14 @@ PJRT_Error* MPS_Event_OnReady(PJRT_Event_OnReady_Args* args) {
 // ============================================================================
 
 PJRT_Error* MPS_Client_Create(PJRT_Client_Create_Args* args) {
-    MPS_LOG(" PJRT_Client_Create called, args=%p\n", (void*)args); fflush(stderr);
+    MPS_LOG(" PJRT_Client_Create called, args=%p\n", (void*)args);
 
     PJRT_Client* client = GetOrCreateDefaultClient();
     if (!client) {
         return MakeError("Failed to create MPS client");
     }
 
-    MPS_LOG(" PJRT_Client_Create setting client=%p\n", (void*)client); fflush(stderr);
+    MPS_LOG(" PJRT_Client_Create setting client=%p\n", (void*)client);
     args->client = client;
     MPS_LOG(" PJRT_Client_Create returning nullptr (success)\n");
     return nullptr;
@@ -238,9 +240,8 @@ PJRT_Error* MPS_Client_Destroy(PJRT_Client_Destroy_Args* args) {
 
 PJRT_Error* MPS_Client_PlatformName(PJRT_Client_PlatformName_Args* args) {
     MPS_LOG(" PJRT_Client_PlatformName called\n");
-    static const char* name = "mps";
-    args->platform_name = name;
-    args->platform_name_size = 3;
+    args->platform_name = kPlatformName;
+    args->platform_name_size = strlen(kPlatformName);
     return nullptr;
 }
 
@@ -252,14 +253,13 @@ PJRT_Error* MPS_Client_ProcessIndex(PJRT_Client_ProcessIndex_Args* args) {
 
 PJRT_Error* MPS_Client_PlatformVersion(PJRT_Client_PlatformVersion_Args* args) {
     MPS_LOG(" PJRT_Client_PlatformVersion called\n");
-    static const char* version = "0.1.0";
-    args->platform_version = version;
-    args->platform_version_size = 5;
+    args->platform_version = kPlatformVersion;
+    args->platform_version_size = strlen(kPlatformVersion);
     return nullptr;
 }
 
 PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
-    MPS_LOG(" PJRT_Client_Devices called, client=%p\n", (void*)args->client); fflush(stderr);
+    MPS_LOG(" PJRT_Client_Devices called, client=%p\n", (void*)args->client);
     PJRT_Client* client = args->client;
     if (!client) {
         client = GetOrCreateDefaultClient();
@@ -270,7 +270,7 @@ PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
         MPS_LOG(" PJRT_Client_Devices: no client, returning 0\n");
         return nullptr;
     }
-    MPS_LOG(" PJRT_Client_Devices: %zu devices, data=%p\n", client->devices.size(), (void*)client->devices.data()); fflush(stderr);
+    MPS_LOG(" PJRT_Client_Devices: %zu devices, data=%p\n", client->devices.size(), (void*)client->devices.data());
     args->devices = client->devices.data();
     args->num_devices = client->devices.size();
     MPS_LOG(" PJRT_Client_Devices returning\n");
@@ -290,16 +290,16 @@ PJRT_Error* MPS_Client_AddressableDevices(PJRT_Client_AddressableDevices_Args* a
     }
     args->addressable_devices = client->devices.data();
     args->num_addressable_devices = client->devices.size();
-    MPS_LOG(" PJRT_Client_AddressableDevices returning %zu\n", client->devices.size()); fflush(stderr);
+    MPS_LOG(" PJRT_Client_AddressableDevices returning %zu\n", client->devices.size());
     return nullptr;
 }
 
 PJRT_Error* MPS_Client_LookupDevice(PJRT_Client_LookupDevice_Args* args) {
-    MPS_LOG(" PJRT_Client_LookupDevice called, id=%d\n", (int)args->id); fflush(stderr);
+    MPS_LOG(" PJRT_Client_LookupDevice called, id=%d\n", (int)args->id);
     PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
     if (client && args->id < client->devices.size()) {
         args->device = client->devices[args->id];
-        MPS_LOG(" Returning device %p\n", (void*)args->device); fflush(stderr);
+        MPS_LOG(" Returning device %p\n", (void*)args->device);
     } else {
         args->device = nullptr;
     }
@@ -339,8 +339,8 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
 
     // Get the program from the args
     std::string format_str(args->program->format, args->program->format_size);
-    MPS_LOG(" Program format: %s (size=%zu)\n", format_str.c_str(), args->program->format_size); fflush(stderr);
-    MPS_LOG(" Program code size: %zu\n", args->program->code_size); fflush(stderr);
+    MPS_LOG(" Program format: %s (size=%zu)\n", format_str.c_str(), args->program->format_size);
+    MPS_LOG(" Program code size: %zu\n", args->program->code_size);
 
     // Parse the StableHLO bytecode
     mps::StableHLOModule stablehlo_module;
@@ -498,10 +498,10 @@ PJRT_Error* MPS_DeviceDescription_ToString(PJRT_DeviceDescription_ToString_Args*
 // ============================================================================
 
 PJRT_Error* MPS_Device_GetDescription(PJRT_Device_GetDescription_Args* args) {
-    MPS_LOG(" PJRT_Device_GetDescription called, device=%p\n", (void*)args->device); fflush(stderr);
+    MPS_LOG(" PJRT_Device_GetDescription called, device=%p\n", (void*)args->device);
     if (args->device) {
         args->device_description = args->device->description;
-        MPS_LOG(" Returning description=%p\n", (void*)args->device_description); fflush(stderr);
+        MPS_LOG(" Returning description=%p\n", (void*)args->device_description);
     } else {
         args->device_description = nullptr;
     }
@@ -509,17 +509,17 @@ PJRT_Error* MPS_Device_GetDescription(PJRT_Device_GetDescription_Args* args) {
 }
 
 PJRT_Error* MPS_Device_IsAddressable(PJRT_Device_IsAddressable_Args* args) {
-    MPS_LOG(" PJRT_Device_IsAddressable called, device=%p\n", (void*)args->device); fflush(stderr);
+    MPS_LOG(" PJRT_Device_IsAddressable called, device=%p\n", (void*)args->device);
     args->is_addressable = true;
     MPS_LOG(" PJRT_Device_IsAddressable returning\n");
     return nullptr;
 }
 
 PJRT_Error* MPS_Device_LocalHardwareId(PJRT_Device_LocalHardwareId_Args* args) {
-    MPS_LOG(" PJRT_Device_LocalHardwareId called, device=%p\n", (void*)args->device); fflush(stderr);
+    MPS_LOG(" PJRT_Device_LocalHardwareId called, device=%p\n", (void*)args->device);
     args->local_hardware_id = args->device && args->device->device
         ? args->device->device->local_hardware_id() : 0;
-    MPS_LOG(" PJRT_Device_LocalHardwareId returning %d\n", args->local_hardware_id); fflush(stderr);
+    MPS_LOG(" PJRT_Device_LocalHardwareId returning %d\n", args->local_hardware_id);
     return nullptr;
 }
 
@@ -538,10 +538,10 @@ PJRT_Error* MPS_Device_AddressableMemories(PJRT_Device_AddressableMemories_Args*
 }
 
 PJRT_Error* MPS_Device_DefaultMemory(PJRT_Device_DefaultMemory_Args* args) {
-    MPS_LOG(" PJRT_Device_DefaultMemory called, device=%p\n", (void*)args->device); fflush(stderr);
+    MPS_LOG(" PJRT_Device_DefaultMemory called, device=%p\n", (void*)args->device);
     if (args->device) {
         args->memory = args->device->default_memory;
-        MPS_LOG(" Returning memory=%p\n", (void*)args->memory); fflush(stderr);
+        MPS_LOG(" Returning memory=%p\n", (void*)args->memory);
     } else {
         args->memory = nullptr;
     }
@@ -627,7 +627,7 @@ PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
     MPS_LOG(" PJRT_Executable_NumOutputs called\n");
     args->num_outputs = args->executable && args->executable->executable
         ? args->executable->executable->num_outputs() : 1;
-    MPS_LOG(" PJRT_Executable_NumOutputs: %zu\n", args->num_outputs); fflush(stderr);
+    MPS_LOG(" PJRT_Executable_NumOutputs: %zu\n", args->num_outputs);
     return nullptr;
 }
 
@@ -706,28 +706,28 @@ PJRT_Error* MPS_LoadedExecutable_Destroy(PJRT_LoadedExecutable_Destroy_Args* arg
 
 PJRT_Error* MPS_LoadedExecutable_GetExecutable(PJRT_LoadedExecutable_GetExecutable_Args* args) {
     MPS_LOG(" PJRT_LoadedExecutable_GetExecutable called, loaded_exec=%p\n",
-            (void*)args->loaded_executable); fflush(stderr);
+            (void*)args->loaded_executable);
     if (args->loaded_executable) {
         MPS_LOG(" Getting executable from loaded, executable=%p\n",
-                (void*)args->loaded_executable->executable); fflush(stderr);
+                (void*)args->loaded_executable->executable);
         args->executable = args->loaded_executable->executable;
     } else {
         args->executable = nullptr;
     }
     MPS_LOG(" PJRT_LoadedExecutable_GetExecutable returning executable=%p\n",
-            (void*)args->executable); fflush(stderr);
+            (void*)args->executable);
     return nullptr;
 }
 
 PJRT_Error* MPS_LoadedExecutable_AddressableDevices(PJRT_LoadedExecutable_AddressableDevices_Args* args) {
     MPS_LOG(" PJRT_LoadedExecutable_AddressableDevices called\n");
-    MPS_LOG("   args->executable=%p\n", (void*)args->executable); fflush(stderr);
+    MPS_LOG("   args->executable=%p\n", (void*)args->executable);
 
     // Return devices from the LoadedExecutable's client
     if (args->executable && args->executable->client && !args->executable->client->devices.empty()) {
         args->addressable_devices = args->executable->client->devices.data();
         args->num_addressable_devices = args->executable->client->devices.size();
-        MPS_LOG("   Returning %zu devices\n", args->num_addressable_devices); fflush(stderr);
+        MPS_LOG("   Returning %zu devices\n", args->num_addressable_devices);
     } else {
         args->addressable_devices = nullptr;
         args->num_addressable_devices = 0;
@@ -1026,16 +1026,14 @@ PJRT_Error* MPS_TopologyDescription_Destroy(PJRT_TopologyDescription_Destroy_Arg
 }
 
 PJRT_Error* MPS_TopologyDescription_PlatformName(PJRT_TopologyDescription_PlatformName_Args* args) {
-    static const char* name = "mps";
-    args->platform_name = name;
-    args->platform_name_size = 3;
+    args->platform_name = kPlatformName;
+    args->platform_name_size = strlen(kPlatformName);
     return nullptr;
 }
 
 PJRT_Error* MPS_TopologyDescription_PlatformVersion(PJRT_TopologyDescription_PlatformVersion_Args* args) {
-    static const char* version = "0.1.0";
-    args->platform_version = version;
-    args->platform_version_size = 5;
+    args->platform_version = kPlatformVersion;
+    args->platform_version_size = strlen(kPlatformVersion);
     return nullptr;
 }
 

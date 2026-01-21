@@ -36,16 +36,6 @@ MpsExecutable::MpsExecutable(MpsClient* client, const mps::StableHLOModule& modu
     CompileFromStableHLO(module);
 }
 
-// Helper to find a function by name
-static const mps::StableHLOFunction* findFunction(const mps::StableHLOModule& module, const std::string& name) {
-    for (const auto& func : module.functions) {
-        if (func.name == name) {
-            return &func;
-        }
-    }
-    return nullptr;
-}
-
 void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
     // Find the entry function (usually "main")
     const mps::StableHLOFunction* entry_func = nullptr;
