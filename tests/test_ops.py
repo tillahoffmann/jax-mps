@@ -150,6 +150,77 @@ def test_dot(jax_setup, shape_a, shape_b):
     assert_allclose(np.array(result), expected, rtol=1e-4, atol=1e-4)
 
 
+# Maximum and Minimum operations
+@pytest.mark.parametrize(
+    "name,op_fn",
+    [
+        pytest.param("maximum", lambda jnp, a, b: jnp.maximum(a, b), id="maximum"),
+        pytest.param("minimum", lambda jnp, a, b: jnp.minimum(a, b), id="minimum"),
+    ],
+)
+def test_minmax_op(jax_setup, name, op_fn):
+    """Test maximum and minimum operations produce correct results on MPS."""
+    jax = jax_setup["jax"]
+    jnp = jax_setup["jnp"]
+    cpu = jax_setup["cpu"]
+    mps = jax_setup["mps"]
+
+    np.random.seed(42)
+    a_np = np.random.randn(32, 32).astype(np.float32)
+    b_np = np.random.randn(32, 32).astype(np.float32)
+
+    # Run on CPU for reference
+    a_cpu = jax.device_put(a_np, cpu)
+    b_cpu = jax.device_put(b_np, cpu)
+    expected = np.array(op_fn(jnp, a_cpu, b_cpu))
+
+    # Run on MPS
+    a_mps = jax.device_put(a_np, mps)
+    b_mps = jax.device_put(b_np, mps)
+    result = op_fn(jnp, a_mps, b_mps)
+
+    # Verify result is on MPS
+    assert_on_mps(result, mps)
+
+    # Verify correctness
+    assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
+
+
+# ReLU activation (uses maximum internally)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((32,), id="relu_1d"),
+        pytest.param((16, 16), id="relu_2d"),
+        pytest.param((4, 8, 8), id="relu_3d"),
+    ],
+)
+def test_relu(jax_setup, shape):
+    """Test ReLU activation produces correct results on MPS."""
+    jax = jax_setup["jax"]
+    jax_setup["jnp"]
+    cpu = jax_setup["cpu"]
+    mps = jax_setup["mps"]
+
+    np.random.seed(42)
+    # Use data with both positive and negative values
+    x_np = np.random.randn(*shape).astype(np.float32)
+
+    # Run on CPU for reference
+    x_cpu = jax.device_put(x_np, cpu)
+    expected = np.array(jax.nn.relu(x_cpu))
+
+    # Run on MPS
+    x_mps = jax.device_put(x_np, mps)
+    result = jax.nn.relu(x_mps)
+
+    # Verify result is on MPS
+    assert_on_mps(result, mps)
+
+    # Verify correctness
+    assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
+
+
 # Unary operations
 UNARY_OPS = [
     pytest.param("tanh", lambda jnp, x: jnp.tanh(x), id="tanh"),

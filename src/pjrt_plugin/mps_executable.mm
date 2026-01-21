@@ -5,6 +5,9 @@
 #import "pjrt_plugin/stablehlo_parser.h"
 #import "pjrt_plugin/ops/registry.h"
 
+#include <functional>
+#include <unordered_map>
+
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <Foundation/Foundation.h>
@@ -32,6 +35,16 @@ MpsExecutable::MpsExecutable(MpsClient* client, const mps::StableHLOModule& modu
     CompileFromStableHLO(module);
 }
 
+// Helper to find a function by name
+static const mps::StableHLOFunction* findFunction(const mps::StableHLOModule& module, const std::string& name) {
+    for (const auto& func : module.functions) {
+        if (func.name == name) {
+            return &func;
+        }
+    }
+    return nullptr;
+}
+
 void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
     // Find the entry function (usually "main")
     const mps::StableHLOFunction* entry_func = nullptr;
@@ -43,125 +56,183 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
     }
 
     if (!entry_func) {
-        // NSLog(@"No entry function found in StableHLO module");
         valid_ = false;
         return;
     }
 
     // Convert StableHLO function to HloComputation for now
-    // (This allows reusing existing execution code)
     computation_.name = entry_func->name;
-
-    // NSLog(@"Entry function: %s, %zu args, %zu results, %zu ops",
-    //       entry_func->name.c_str(),
-    //       entry_func->arg_types.size(),
-    //       entry_func->result_types.size(),
-    //       entry_func->ops.size());
 
     // Convert argument types to parameters
     for (size_t i = 0; i < entry_func->arg_types.size(); i++) {
         std::string param_name = "%arg" + std::to_string(i);
         const auto& arg_type = entry_func->arg_types[i];
-        // NSLog(@"  Arg %zu: shape size=%zu, element_type=%s",
-        //       i, arg_type.shape.size(), arg_type.element_type.c_str());
         computation_.parameters.push_back({param_name, arg_type.shape});
     }
 
-    // Convert operations
-    for (const auto& shlo_op : entry_func->ops) {
-        // Skip return ops
-        if (shlo_op.kind == mps::OpKind::Return) {
-            continue;
+    // Process operations with inlining support
+    // Track name mappings for call inlining (caller name -> callee name)
+    std::unordered_map<std::string, std::string> name_mapping;
+    int op_counter = 0;
+
+    // Lambda to process ops from a function (supports recursive inlining)
+    std::function<void(const mps::StableHLOFunction*, const std::vector<std::string>&)> processFunction;
+    processFunction = [&](const mps::StableHLOFunction* func, const std::vector<std::string>& arg_names) {
+        // Map function arguments to provided names
+        for (size_t i = 0; i < func->arg_types.size() && i < arg_names.size(); i++) {
+            name_mapping["%arg" + std::to_string(i)] = arg_names[i];
         }
 
-        // Skip call ops for now (inline the called function)
-        if (shlo_op.kind == mps::OpKind::Call) {
-            // For now, pass through the operands
-            continue;
+        for (const auto& shlo_op : func->ops) {
+            // Skip return ops
+            if (shlo_op.kind == mps::OpKind::Return) {
+                // Map the return value to the last op output
+                if (!shlo_op.operands.empty()) {
+                    std::string operand_name = shlo_op.operands[0].name;
+                    if (name_mapping.count(operand_name)) {
+                        operand_name = name_mapping[operand_name];
+                    }
+                    // The caller will use this as the result
+                    if (!computation_.ops.empty()) {
+                        computation_.root_name = computation_.ops.back().output;
+                    }
+                }
+                continue;
+            }
+
+            // Handle call ops by inlining the called function
+            if (shlo_op.kind == mps::OpKind::Call) {
+                // Get the called function name from the operands (first operand after args is usually the callee)
+                // For now, we look up all non-main functions and try to match by checking ops
+                // Simple heuristic: find a function that's not main
+                const mps::StableHLOFunction* callee = nullptr;
+                for (const auto& f : module.functions) {
+                    if (f.name != "main" && f.name != entry_func->name) {
+                        callee = &f;
+                        break;
+                    }
+                }
+
+                if (callee) {
+                    // Map caller's operands to callee's arguments
+                    std::vector<std::string> callee_args;
+                    for (const auto& operand : shlo_op.operands) {
+                        std::string operand_name = operand.name;
+                        if (name_mapping.count(operand_name)) {
+                            operand_name = name_mapping[operand_name];
+                        }
+                        callee_args.push_back(operand_name);
+                    }
+
+                    // Process the called function
+                    processFunction(callee, callee_args);
+
+                    // Map call result to the last produced op
+                    if (!computation_.ops.empty()) {
+                        name_mapping[shlo_op.name] = computation_.ops.back().output;
+                    }
+                }
+                continue;
+            }
+
+            HloOp op;
+            // Generate unique output name for this op
+            op.output = "%op" + std::to_string(op_counter++);
+            op.dtype = StablehloTypeToDtype(shlo_op.result_type.element_type);
+            op.shape = shlo_op.result_type.shape;
+
+            // Map original name to new name
+            name_mapping[shlo_op.name] = op.output;
+
+            // Map StableHLO op kind to HLO op name
+            switch (shlo_op.kind) {
+                case mps::OpKind::Add:
+                    op.name = "add";
+                    break;
+                case mps::OpKind::Multiply:
+                    op.name = "multiply";
+                    break;
+                case mps::OpKind::Subtract:
+                    op.name = "subtract";
+                    break;
+                case mps::OpKind::Divide:
+                    op.name = "divide";
+                    break;
+                case mps::OpKind::Maximum:
+                    op.name = "maximum";
+                    break;
+                case mps::OpKind::Minimum:
+                    op.name = "minimum";
+                    break;
+                case mps::OpKind::Tanh:
+                    op.name = "tanh";
+                    break;
+                case mps::OpKind::Exp:
+                    op.name = "exp";
+                    break;
+                case mps::OpKind::Log:
+                    op.name = "log";
+                    break;
+                case mps::OpKind::Negate:
+                    op.name = "negate";
+                    break;
+                case mps::OpKind::Dot:
+                case mps::OpKind::DotGeneral:
+                    op.name = "dot";
+                    break;
+                case mps::OpKind::Reshape:
+                    op.name = "reshape";
+                    break;
+                case mps::OpKind::Transpose:
+                    op.name = "transpose";
+                    break;
+                case mps::OpKind::Convert:
+                    op.name = "convert";
+                    break;
+                case mps::OpKind::BroadcastInDim:
+                    op.name = "broadcast_in_dim";
+                    op.broadcast_dims = shlo_op.broadcast_dimensions;
+                    break;
+                case mps::OpKind::Broadcast:
+                    op.name = "broadcast";
+                    break;
+                case mps::OpKind::Abs:
+                    op.name = "abs";
+                    break;
+                case mps::OpKind::Constant:
+                    op.name = "constant";
+                    break;
+                default:
+                    op.name = "unknown";
+                    break;
+            }
+
+            // Copy operands, applying name mapping
+            for (const auto& operand : shlo_op.operands) {
+                std::string operand_name = operand.name;
+                if (name_mapping.count(operand_name)) {
+                    operand_name = name_mapping[operand_name];
+                }
+                op.inputs.push_back(operand_name);
+            }
+
+            computation_.ops.push_back(op);
+            computation_.root_name = op.output;
         }
+    };
 
-        HloOp op;
-        op.output = shlo_op.name;
-        op.dtype = StablehloTypeToDtype(shlo_op.result_type.element_type);
-        op.shape = shlo_op.result_type.shape;
-
-        // Map StableHLO op kind to HLO op name
-        switch (shlo_op.kind) {
-            case mps::OpKind::Add:
-                op.name = "add";
-                break;
-            case mps::OpKind::Multiply:
-                op.name = "multiply";
-                break;
-            case mps::OpKind::Subtract:
-                op.name = "subtract";
-                break;
-            case mps::OpKind::Divide:
-                op.name = "divide";
-                break;
-            case mps::OpKind::Tanh:
-                op.name = "tanh";
-                break;
-            case mps::OpKind::Exp:
-                op.name = "exp";
-                break;
-            case mps::OpKind::Log:
-                op.name = "log";
-                break;
-            case mps::OpKind::Negate:
-                op.name = "negate";
-                break;
-            case mps::OpKind::Dot:
-            case mps::OpKind::DotGeneral:
-                op.name = "dot";
-                break;
-            case mps::OpKind::Reshape:
-                op.name = "reshape";
-                break;
-            case mps::OpKind::Transpose:
-                op.name = "transpose";
-                break;
-            case mps::OpKind::Convert:
-                op.name = "convert";
-                break;
-            case mps::OpKind::BroadcastInDim:
-                op.name = "broadcast_in_dim";
-                // Store broadcast dimensions
-                op.broadcast_dims = shlo_op.broadcast_dimensions;
-                break;
-            case mps::OpKind::Broadcast:
-                op.name = "broadcast";
-                break;
-            case mps::OpKind::Abs:
-                op.name = "abs";
-                break;
-            case mps::OpKind::Constant:
-                op.name = "constant";
-                break;
-            default:
-                // NSLog(@"Unsupported StableHLO op kind: %d", (int)shlo_op.kind);
-                op.name = "unknown";
-                break;
-        }
-
-        // Copy operands
-        for (const auto& operand : shlo_op.operands) {
-            op.inputs.push_back(operand.name);
-        }
-
-        computation_.ops.push_back(op);
-
-        // Track the last non-return op as root
-        computation_.root_name = op.output;
+    // Process the entry function with its arguments
+    std::vector<std::string> entry_args;
+    for (size_t i = 0; i < entry_func->arg_types.size(); i++) {
+        entry_args.push_back("%arg" + std::to_string(i));
     }
+    processFunction(entry_func, entry_args);
 
     // Set the number of outputs based on result types
     num_outputs_ = entry_func->result_types.size();
     if (num_outputs_ == 0) num_outputs_ = 1;
 
-    // Identity functions (just returning inputs) are valid even with 0 ops
     valid_ = true;
-    // NSLog(@"Compiled StableHLO to %zu ops, %d outputs", computation_.ops.size(), num_outputs_);
 }
 
 MpsExecutable::~MpsExecutable() {

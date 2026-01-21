@@ -24,6 +24,8 @@ enum class OpKind {
     Multiply,
     Subtract,
     Divide,
+    Maximum,
+    Minimum,
     Tanh,
     Exp,
     Log,

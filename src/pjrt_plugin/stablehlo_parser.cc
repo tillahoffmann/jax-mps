@@ -83,6 +83,8 @@ OpKind getOpKind(mlir::Operation* op) {
     if (name == "stablehlo.multiply") return OpKind::Multiply;
     if (name == "stablehlo.subtract") return OpKind::Subtract;
     if (name == "stablehlo.divide") return OpKind::Divide;
+    if (name == "stablehlo.maximum") return OpKind::Maximum;
+    if (name == "stablehlo.minimum") return OpKind::Minimum;
     if (name == "stablehlo.tanh") return OpKind::Tanh;
     if (name == "stablehlo.exponential") return OpKind::Exp;
     if (name == "stablehlo.log") return OpKind::Log;
