@@ -50,31 +50,41 @@ for tool in cmake ninja git; do
     fi
 done
 
-# Clone StableHLO (includes reference to required LLVM version)
+# Clone StableHLO (shallow clone - just need latest main)
 STABLEHLO_DIR="$BUILD_DIR/stablehlo"
 if [ ! -d "$STABLEHLO_DIR" ]; then
-    echo "=== Cloning StableHLO ==="
-    git clone https://github.com/openxla/stablehlo.git "$STABLEHLO_DIR"
+    echo "=== Cloning StableHLO (shallow) ==="
+    git clone --depth 1 https://github.com/openxla/stablehlo.git "$STABLEHLO_DIR"
 else
     echo "=== Updating StableHLO ==="
-    cd "$STABLEHLO_DIR" && git fetch origin && git checkout main && git pull
+    cd "$STABLEHLO_DIR" && git fetch --depth 1 origin main && git checkout origin/main
 fi
 
 cd "$STABLEHLO_DIR"
 LLVM_COMMIT=$(cat build_tools/llvm_version.txt)
 echo "StableHLO requires LLVM commit: $LLVM_COMMIT"
 
-# Clone/update LLVM
+# Clone LLVM - fetch only the specific commit we need
 LLVM_DIR="$BUILD_DIR/llvm-project"
 if [ ! -d "$LLVM_DIR" ]; then
-    echo "=== Cloning LLVM (this may take a while) ==="
-    git clone --filter=blob:none https://github.com/llvm/llvm-project.git "$LLVM_DIR"
+    echo "=== Fetching LLVM commit $LLVM_COMMIT (minimal clone) ==="
+    mkdir -p "$LLVM_DIR"
+    cd "$LLVM_DIR"
+    git init
+    git remote add origin https://github.com/llvm/llvm-project.git
+    git fetch --depth 1 origin "$LLVM_COMMIT"
+    git checkout FETCH_HEAD
+else
+    echo "=== LLVM already cloned ==="
+    cd "$LLVM_DIR"
+    # Check if we have the right commit
+    CURRENT_COMMIT=$(git rev-parse HEAD)
+    if [ "$CURRENT_COMMIT" != "$LLVM_COMMIT" ]; then
+        echo "=== Fetching LLVM commit $LLVM_COMMIT ==="
+        git fetch --depth 1 origin "$LLVM_COMMIT"
+        git checkout FETCH_HEAD
+    fi
 fi
-
-echo "=== Checking out LLVM commit $LLVM_COMMIT ==="
-cd "$LLVM_DIR"
-git fetch origin "$LLVM_COMMIT"
-git checkout "$LLVM_COMMIT"
 
 # Build LLVM/MLIR
 LLVM_BUILD_DIR="$BUILD_DIR/llvm-build"
