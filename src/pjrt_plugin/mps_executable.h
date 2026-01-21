@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "pjrt_plugin/mps_buffer.h"
+
 namespace mps {
 struct StableHLOModule;
 }
@@ -12,7 +14,6 @@ namespace jax_mps {
 
 class MpsClient;
 class MpsDevice;
-class MpsBuffer;
 
 // Parsed HLO operation
 struct HloOp {
@@ -33,6 +34,19 @@ struct HloComputation {
     std::string root_name;  // Which op is the root/output
 };
 
+// Execution result - either success with buffers or an error
+struct ExecutionResult {
+    std::vector<std::unique_ptr<MpsBuffer>> buffers;
+    std::string error;
+
+    bool ok() const { return error.empty(); }
+    static ExecutionResult Error(const std::string& msg) {
+        ExecutionResult r;
+        r.error = msg;
+        return r;
+    }
+};
+
 // Compiled executable for Metal
 class MpsExecutable {
 public:
@@ -43,8 +57,11 @@ public:
     // Check if compilation succeeded
     bool IsValid() const { return valid_; }
 
-    // Execution
-    std::vector<std::unique_ptr<MpsBuffer>> Execute(
+    // Get compilation error (if !IsValid())
+    const std::string& error() const { return error_; }
+
+    // Execution - returns result with error info
+    ExecutionResult Execute(
         const std::vector<MpsBuffer*>& inputs,
         MpsDevice* device);
 
@@ -57,6 +74,7 @@ private:
 
     MpsClient* client_;
     std::string name_;
+    std::string error_;
     int num_outputs_ = 1;
     bool valid_ = false;
     HloComputation computation_;

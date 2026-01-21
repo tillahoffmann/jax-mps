@@ -15,6 +15,7 @@
 namespace jax_mps {
 
 // Map StableHLO element type string to PJRT dtype
+// Returns -1 for unknown types
 static int StablehloTypeToDtype(const std::string& type) {
     if (type == "f32") return 11;  // PJRT_F32
     if (type == "f16") return 10;  // PJRT_F16
@@ -24,7 +25,7 @@ static int StablehloTypeToDtype(const std::string& type) {
     if (type == "i64" || type == "si64") return 5;  // PJRT_S64
     if (type == "ui32") return 8;  // PJRT_U32
     if (type == "i1") return 1;    // PJRT_PRED
-    return 11;  // Default to f32
+    return -1;  // Unknown type - caller must handle
 }
 
 MpsExecutable::MpsExecutable(MpsClient* client, const mps::StableHLOModule& module)
@@ -139,6 +140,11 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
             // Generate unique output name for this op
             op.output = "%op" + std::to_string(op_counter++);
             op.dtype = StablehloTypeToDtype(shlo_op.result_type.element_type);
+            if (op.dtype < 0) {
+                error_ = "Unsupported element type: " + shlo_op.result_type.element_type;
+                valid_ = false;
+                return;
+            }
             op.shape = shlo_op.result_type.shape;
 
             // Map original name to new name
@@ -202,9 +208,18 @@ void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {
                 case mps::OpKind::Constant:
                     op.name = "constant";
                     break;
+                case mps::OpKind::Unknown:
+                    // Unknown ops are not allowed - fail at compile time
+                    error_ = "Unsupported StableHLO operation encountered during compilation. "
+                             "The MPS backend does not yet support this operation. "
+                             "Check the JAX MPS supported operations list.";
+                    valid_ = false;
+                    return;
                 default:
-                    op.name = "unknown";
-                    break;
+                    // This should not happen if OpKind enum is kept in sync
+                    error_ = "Internal error: unhandled OpKind in compilation";
+                    valid_ = false;
+                    return;
             }
 
             // Copy operands, applying name mapping
@@ -244,14 +259,16 @@ MpsExecutable::~MpsExecutable() {
     }
 }
 
-std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
+ExecutionResult MpsExecutable::Execute(
     const std::vector<MpsBuffer*>& inputs,
     MpsDevice* device) {
 
-    // NSLog(@"Execute: %zu inputs, %zu parameters, %zu ops",
-    //       inputs.size(), computation_.parameters.size(), computation_.ops.size());
+    ExecutionResult result;
 
-    std::vector<std::unique_ptr<MpsBuffer>> results;
+    // Check for compilation errors
+    if (!valid_) {
+        return ExecutionResult::Error("Cannot execute: compilation failed - " + error_);
+    }
 
     @autoreleasepool {
         // Create MPSGraph
@@ -265,9 +282,20 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
 
         id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)client_->metal_device();
 
+        // Validate input count
+        if (inputs.size() < computation_.parameters.size()) {
+            return ExecutionResult::Error(
+                "Input count mismatch: expected " + std::to_string(computation_.parameters.size()) +
+                " inputs, got " + std::to_string(inputs.size()));
+        }
+
         for (size_t i = 0; i < computation_.parameters.size() && i < inputs.size(); i++) {
             const auto& param = computation_.parameters[i];
             MpsBuffer* input = inputs[i];
+
+            if (!input) {
+                return ExecutionResult::Error("Null input buffer at index " + std::to_string(i));
+            }
 
             // Create shape array
             NSMutableArray<NSNumber*>* shape = [NSMutableArray array];
@@ -276,6 +304,11 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
             }
 
             MPSDataType mps_dtype = PjrtDtypeToMps(input->dtype());
+            if (mps_dtype == MPSDataTypeInvalid) {
+                return ExecutionResult::Error(
+                    "Unsupported data type (PJRT dtype " + std::to_string(input->dtype()) +
+                    ") for input at index " + std::to_string(i));
+            }
 
             // Create placeholder
             MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
@@ -286,6 +319,9 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
 
             // Create tensor data from input buffer
             id<MTLBuffer> mtl_buffer = (__bridge id<MTLBuffer>)input->metal_buffer();
+            if (!mtl_buffer) {
+                return ExecutionResult::Error("Input buffer at index " + std::to_string(i) + " has no Metal buffer");
+            }
             MPSGraphTensorData* tensor_data = [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buffer
                                                                                       shape:shape
                                                                                    dataType:mps_dtype];
@@ -303,36 +339,46 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
 
             // Look up handler in registry
             OpHandler handler = OpRegistry::Find(op.name);
-            if (handler) {
-                MPSGraphTensor* out = handler(graph, tensors, op, output_shape);
-                tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
-                result_tensor = out;
-            } else {
-                // Unsupported op: pass through first input as fallback
-                if (!op.inputs.empty()) {
-                    MPSGraphTensor* input = GetTensor(tensors, op.inputs[0]);
-                    if (input) {
-                        tensors[[NSString stringWithUTF8String:op.output.c_str()]] = input;
-                        result_tensor = input;
-                    }
-                }
+            if (!handler) {
+                // Get list of supported ops for error message
+                std::string supported = OpRegistry::ListRegistered();
+                return ExecutionResult::Error(
+                    "Unsupported operation: '" + op.name + "'. "
+                    "The MPS backend does not have a handler for this operation. "
+                    "Supported operations: " + supported);
             }
+
+            MPSGraphTensor* out = handler(graph, tensors, op, output_shape);
+            if (!out) {
+                return ExecutionResult::Error(
+                    "Operation '" + op.name + "' handler returned null. "
+                    "This may indicate missing inputs or an internal error.");
+            }
+            tensors[[NSString stringWithUTF8String:op.output.c_str()]] = out;
+            result_tensor = out;
         }
 
-        // Handle identity functions (no ops, or failed to produce result)
-        if (!result_tensor && !inputs.empty()) {
-            // NSLog(@"Identity function - returning input as output");
-            // For identity, just copy the input buffer
+        // Handle identity functions - computation with no ops that just passes through input
+        // This is a valid JAX pattern, not an error
+        if (!result_tensor && computation_.ops.empty() && !inputs.empty()) {
             MpsBuffer* input = inputs[0];
+            if (!input) {
+                return ExecutionResult::Error("Identity function with null input");
+            }
             const auto& dims = input->dimensions();
-
             size_t byte_size = input->byte_size();
             id<MTLBuffer> input_buffer = (__bridge id<MTLBuffer>)input->metal_buffer();
+            if (!input_buffer) {
+                return ExecutionResult::Error("Identity function input has no Metal buffer");
+            }
 
             // Create a new buffer with copied data
             id<MTLBuffer> output_buffer = [mtl_device newBufferWithBytes:input_buffer.contents
                                                                   length:byte_size
                                                                  options:MTLResourceStorageModeShared];
+            if (!output_buffer) {
+                return ExecutionResult::Error("Failed to allocate buffer for identity function");
+            }
 
             auto buffer = std::make_unique<MpsBuffer>(
                 device,
@@ -340,17 +386,22 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
                 input->dtype(),
                 dims
             );
-            results.push_back(std::move(buffer));
-            return results;
+            result.buffers.push_back(std::move(buffer));
+            return result;
         }
 
         if (!result_tensor) {
-            // NSLog(@"No result tensor produced and no inputs available");
-            return results;
+            return ExecutionResult::Error(
+                "No result tensor produced after executing " +
+                std::to_string(computation_.ops.size()) + " operations. "
+                "This indicates an internal error in the MPS graph construction.");
         }
 
         // Execute graph
         id<MTLCommandQueue> commandQueue = [mtl_device newCommandQueue];
+        if (!commandQueue) {
+            return ExecutionResult::Error("Failed to create Metal command queue");
+        }
 
         NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict =
             [graph runWithMTLCommandQueue:commandQueue
@@ -359,43 +410,50 @@ std::vector<std::unique_ptr<MpsBuffer>> MpsExecutable::Execute(
                          targetOperations:nil];
 
         MPSGraphTensorData* result_data = result_dict[result_tensor];
-        if (result_data) {
-            // Get result shape
-            std::vector<int64_t> result_shape;
-            for (NSNumber* dim in result_data.shape) {
-                result_shape.push_back([dim longLongValue]);
-            }
-
-            // Calculate byte size
-            size_t byte_size = 1;
-            for (int64_t dim : result_shape) {
-                byte_size *= dim;
-            }
-            byte_size *= DtypeByteSize(computation_.ops.back().dtype);
-
-            // Create output buffer with shared storage
-            id<MTLBuffer> output_buffer = [mtl_device newBufferWithLength:byte_size
-                                                                  options:MTLResourceStorageModeShared];
-
-            // Copy result data using MPSNDArray
-            // Get the underlying MPSNDArray and read its data
-            MPSNDArray* ndarray = [result_data mpsndarray];
-            if (ndarray) {
-                // Read data from the ndarray into our buffer
-                [ndarray readBytes:output_buffer.contents strideBytes:nil];
-            }
-
-            auto buffer = std::make_unique<MpsBuffer>(
-                device,
-                (__bridge void*)output_buffer,
-                computation_.ops.back().dtype,
-                result_shape
-            );
-            results.push_back(std::move(buffer));
+        if (!result_data) {
+            return ExecutionResult::Error(
+                "MPS graph execution produced no result. "
+                "This may indicate a Metal/MPS internal error.");
         }
+
+        // Get result shape
+        std::vector<int64_t> result_shape;
+        for (NSNumber* dim in result_data.shape) {
+            result_shape.push_back([dim longLongValue]);
+        }
+
+        // Calculate byte size
+        size_t byte_size = 1;
+        for (int64_t dim : result_shape) {
+            byte_size *= dim;
+        }
+        byte_size *= DtypeByteSize(computation_.ops.back().dtype);
+
+        // Create output buffer with shared storage
+        id<MTLBuffer> output_buffer = [mtl_device newBufferWithLength:byte_size
+                                                              options:MTLResourceStorageModeShared];
+        if (!output_buffer) {
+            return ExecutionResult::Error(
+                "Failed to allocate output buffer of size " + std::to_string(byte_size) + " bytes");
+        }
+
+        // Copy result data using MPSNDArray
+        MPSNDArray* ndarray = [result_data mpsndarray];
+        if (!ndarray) {
+            return ExecutionResult::Error("Failed to get MPSNDArray from result data");
+        }
+        [ndarray readBytes:output_buffer.contents strideBytes:nil];
+
+        auto buffer = std::make_unique<MpsBuffer>(
+            device,
+            (__bridge void*)output_buffer,
+            computation_.ops.back().dtype,
+            result_shape
+        );
+        result.buffers.push_back(std::move(buffer));
     }
 
-    return results;
+    return result;
 }
 
 }  // namespace jax_mps

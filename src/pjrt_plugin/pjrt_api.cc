@@ -362,13 +362,19 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     }
 
     if (!parsed) {
-        // Fallback to identity function (normal for some internal JAX operations)
-        stablehlo_module.entry_function = "main";
-        mps::StableHLOFunction func;
-        func.name = "main";
-        func.arg_types.push_back({{2}, "f32"});
-        func.result_types.push_back({{2}, "f32"});
-        stablehlo_module.functions.push_back(func);
+        return MakeError("Failed to parse StableHLO program. "
+                         "The program may be malformed or use an unsupported format.");
+    }
+
+    // Check for unsupported operations discovered during parsing
+    if (!stablehlo_module.unsupported_ops.empty()) {
+        std::string unsupported_list;
+        for (size_t i = 0; i < stablehlo_module.unsupported_ops.size(); i++) {
+            if (i > 0) unsupported_list += ", ";
+            unsupported_list += stablehlo_module.unsupported_ops[i];
+        }
+        return MakeError("Program contains unsupported StableHLO operations: " + unsupported_list + ". "
+                         "The MPS backend does not yet implement these operations.");
     }
 
     // Compile the StableHLO module to MPS executable
@@ -376,6 +382,11 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
 
     if (!mps_exec) {
         return MakeError("Failed to compile StableHLO to MPS");
+    }
+
+    // Check if compilation produced an error
+    if (!mps_exec->IsValid()) {
+        return MakeError("MPS compilation failed: " + mps_exec->error());
     }
 
     auto* executable = new PJRT_Executable();
@@ -755,13 +766,18 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     jax_mps::MpsDevice* device = client && !client->devices.empty()
         ? client->devices[0]->device : nullptr;
 
-    auto results = args->executable->executable->executable->Execute(inputs, device);
+    auto exec_result = args->executable->executable->executable->Execute(inputs, device);
+
+    // Check for execution errors
+    if (!exec_result.ok()) {
+        return MakeError("MPS execution failed: " + exec_result.error);
+    }
 
     // Write outputs to the pre-allocated output_lists
-    size_t num_outputs = results.size();
+    size_t num_outputs = exec_result.buffers.size();
     for (size_t i = 0; i < num_outputs; i++) {
         auto* buffer = new PJRT_Buffer();
-        buffer->buffer = std::move(results[i]);
+        buffer->buffer = std::move(exec_result.buffers[i]);
         buffer->client = client;
         args->output_lists[0][i] = buffer;
     }

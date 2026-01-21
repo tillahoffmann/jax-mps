@@ -49,7 +49,10 @@ size_t DtypeByteSize(int dtype) {
         case PJRT_C128:
             return 16;
         default:
-            return 4;  // Default to 32-bit
+            // Unknown dtype - return 0 to make failures obvious
+            // Caller should validate dtype before calling this
+            NSLog(@"ERROR: Unknown dtype %d in DtypeByteSize", dtype);
+            return 0;
     }
 }
 

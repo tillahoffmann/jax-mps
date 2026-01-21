@@ -12,16 +12,19 @@ REGISTER_UNARY_OP(log, logarithm);
 REGISTER_UNARY_OP(negate, negative);
 REGISTER_UNARY_OP(abs, absolute);
 
-// Constant creation - creates a zero tensor of the given shape
-// TODO: Parse actual constant values from StableHLO
+// Constant creation - NOT YET IMPLEMENTED
+// Returns nullptr to trigger a clear error message.
+// TODO: Parse actual constant values from StableHLO bytecode.
+// This requires extracting the constant data from the MLIR DenseElementsAttr.
 static MPSGraphTensor* Handle_constant(MPSGraph* g, TensorDict t, const HloOp& op, NSArray<NSNumber*>* shape) {
-    MPSDataType dtype = PjrtDtypeToMps(op.dtype);
-    // Create a constant tensor filled with zeros
-    // For scalar constants (empty shape), create a scalar
-    if (shape.count == 0) {
-        return [g constantWithScalar:0.0 dataType:dtype];
-    }
-    return [g constantWithScalar:0.0 shape:shape dataType:dtype];
+    // Returning nullptr will cause Execute to fail with:
+    // "Operation 'constant' handler returned null"
+    // This is correct behavior - we don't support constants yet and shouldn't
+    // silently return wrong values (zeros).
+    //
+    // Note: Many JAX programs use constants. Until this is implemented,
+    // programs using constants will fail with a clear error.
+    return nullptr;
 }
 REGISTER_OP(constant, Handle_constant);
 

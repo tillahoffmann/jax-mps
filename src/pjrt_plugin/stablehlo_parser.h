@@ -49,6 +49,7 @@ enum class OpKind {
 struct StableHLOOp {
     OpKind kind;
     std::string name;  // Result name (e.g., "%0")
+    std::string op_name;  // Original operation name (e.g., "stablehlo.gather") - set for Unknown ops
     std::vector<Operand> operands;
     TensorType result_type;
 
@@ -78,6 +79,9 @@ struct StableHLOFunction {
 struct StableHLOModule {
     std::vector<StableHLOFunction> functions;
     std::string entry_function;  // Usually "main"
+
+    // List of unsupported operations encountered during parsing
+    std::vector<std::string> unsupported_ops;
 };
 
 // Parse MLIR bytecode (StableHLO portable artifact) into a module

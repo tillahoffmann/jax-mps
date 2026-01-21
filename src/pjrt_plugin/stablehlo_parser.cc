@@ -76,37 +76,41 @@ TensorType convertTensorType(mlir::RankedTensorType tensorType) {
 }
 
 // Map StableHLO operation to OpKind
-OpKind getOpKind(mlir::Operation* op) {
+// Returns the op name string for use in error messages when Unknown
+std::pair<OpKind, std::string> getOpKindWithName(mlir::Operation* op) {
     llvm::StringRef name = op->getName().getStringRef();
+    std::string name_str = name.str();
 
-    if (name == "stablehlo.add") return OpKind::Add;
-    if (name == "stablehlo.multiply") return OpKind::Multiply;
-    if (name == "stablehlo.subtract") return OpKind::Subtract;
-    if (name == "stablehlo.divide") return OpKind::Divide;
-    if (name == "stablehlo.maximum") return OpKind::Maximum;
-    if (name == "stablehlo.minimum") return OpKind::Minimum;
-    if (name == "stablehlo.tanh") return OpKind::Tanh;
-    if (name == "stablehlo.exponential") return OpKind::Exp;
-    if (name == "stablehlo.log") return OpKind::Log;
-    if (name == "stablehlo.negate") return OpKind::Negate;
-    if (name == "stablehlo.abs") return OpKind::Abs;
-    if (name == "stablehlo.dot") return OpKind::Dot;
-    if (name == "stablehlo.dot_general") return OpKind::DotGeneral;
-    if (name == "stablehlo.reshape") return OpKind::Reshape;
-    if (name == "stablehlo.transpose") return OpKind::Transpose;
-    if (name == "stablehlo.broadcast") return OpKind::Broadcast;
-    if (name == "stablehlo.broadcast_in_dim") return OpKind::BroadcastInDim;
-    if (name == "stablehlo.reduce") return OpKind::Reduce;
-    if (name == "stablehlo.convert") return OpKind::Convert;
-    if (name == "stablehlo.constant") return OpKind::Constant;
-    if (name == "func.return" || name == "return") return OpKind::Return;
-    if (name == "func.call" || name == "call") return OpKind::Call;
+    if (name == "stablehlo.add") return {OpKind::Add, name_str};
+    if (name == "stablehlo.multiply") return {OpKind::Multiply, name_str};
+    if (name == "stablehlo.subtract") return {OpKind::Subtract, name_str};
+    if (name == "stablehlo.divide") return {OpKind::Divide, name_str};
+    if (name == "stablehlo.maximum") return {OpKind::Maximum, name_str};
+    if (name == "stablehlo.minimum") return {OpKind::Minimum, name_str};
+    if (name == "stablehlo.tanh") return {OpKind::Tanh, name_str};
+    if (name == "stablehlo.exponential") return {OpKind::Exp, name_str};
+    if (name == "stablehlo.log") return {OpKind::Log, name_str};
+    if (name == "stablehlo.negate") return {OpKind::Negate, name_str};
+    if (name == "stablehlo.abs") return {OpKind::Abs, name_str};
+    if (name == "stablehlo.dot") return {OpKind::Dot, name_str};
+    if (name == "stablehlo.dot_general") return {OpKind::DotGeneral, name_str};
+    if (name == "stablehlo.reshape") return {OpKind::Reshape, name_str};
+    if (name == "stablehlo.transpose") return {OpKind::Transpose, name_str};
+    if (name == "stablehlo.broadcast") return {OpKind::Broadcast, name_str};
+    if (name == "stablehlo.broadcast_in_dim") return {OpKind::BroadcastInDim, name_str};
+    if (name == "stablehlo.reduce") return {OpKind::Reduce, name_str};
+    if (name == "stablehlo.convert") return {OpKind::Convert, name_str};
+    if (name == "stablehlo.constant") return {OpKind::Constant, name_str};
+    if (name == "func.return" || name == "return") return {OpKind::Return, name_str};
+    if (name == "func.call" || name == "call") return {OpKind::Call, name_str};
 
-    return OpKind::Unknown;
+    return {OpKind::Unknown, name_str};
 }
 
 // Parse a function from MLIR
-bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
+// unsupported_ops collects the names of any unsupported operations encountered
+bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
+                   std::vector<std::string>& unsupported_ops) {
     result.name = funcOp.getName().str();
 
     // Parse argument types
@@ -132,7 +136,24 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
         if (mlir::isa<mlir::func::FuncOp>(op)) return;
 
         StableHLOOp shloOp;
-        shloOp.kind = getOpKind(op);
+        auto [kind, op_name] = getOpKindWithName(op);
+        shloOp.kind = kind;
+        shloOp.op_name = op_name;
+
+        // Track unsupported operations
+        if (kind == OpKind::Unknown) {
+            // Check if we've already recorded this op type
+            bool already_recorded = false;
+            for (const auto& recorded : unsupported_ops) {
+                if (recorded == op_name) {
+                    already_recorded = true;
+                    break;
+                }
+            }
+            if (!already_recorded) {
+                unsupported_ops.push_back(op_name);
+            }
+        }
 
         // Generate result name and track it
         if (op->getNumResults() > 0) {
@@ -206,7 +227,7 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result) {
 bool parseModule(mlir::ModuleOp moduleOp, StableHLOModule& module) {
     moduleOp.walk([&](mlir::func::FuncOp funcOp) {
         StableHLOFunction func;
-        if (parseFunction(funcOp, func)) {
+        if (parseFunction(funcOp, func, module.unsupported_ops)) {
             // Set entry function (usually "main")
             if (func.name == "main") {
                 module.entry_function = func.name;

@@ -27,6 +27,19 @@ public:
         return it != handlers.end() ? it->second : nullptr;
     }
 
+    // Returns comma-separated list of all registered operation names
+    static std::string ListRegistered() {
+        auto& handlers = GetMutableHandlers();
+        std::string result;
+        bool first = true;
+        for (const auto& pair : handlers) {
+            if (!first) result += ", ";
+            result += pair.first;
+            first = false;
+        }
+        return result;
+    }
+
 private:
     static std::unordered_map<std::string, OpHandler>& GetMutableHandlers() {
         static std::unordered_map<std::string, OpHandler> handlers;
@@ -62,6 +75,7 @@ inline MPSGraphTensor* GetTensor(TensorDict tensors, const std::string& name) {
     REGISTER_OP(op_name, Handle_##op_name)
 
 // Map PJRT dtype to MPSDataType
+// Returns MPSDataTypeInvalid (0) for unknown types - caller must check
 inline MPSDataType PjrtDtypeToMps(int dtype) {
     switch (dtype) {
         case 11: return MPSDataTypeFloat32;
@@ -71,7 +85,7 @@ inline MPSDataType PjrtDtypeToMps(int dtype) {
         case 5:  return MPSDataTypeInt64;
         case 8:  return MPSDataTypeUInt32;
         case 1:  return MPSDataTypeBool;
-        default: return MPSDataTypeFloat32;
+        default: return MPSDataTypeInvalid;
     }
 }
 
