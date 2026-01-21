@@ -7,8 +7,6 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <Foundation/Foundation.h>
-#import <regex>
-#import <sstream>
 #import <unordered_map>
 
 namespace jax_mps {
@@ -28,145 +26,6 @@ static MPSDataType PjrtDtypeToMps(int dtype) {
     }
 }
 
-// Parse shape string like "f32[2,3]" into dtype and dimensions
-static bool ParseShapeString(const std::string& shape_str, int& dtype, std::vector<int64_t>& dims) {
-    dims.clear();
-
-    // Extract type prefix
-    std::string type_str;
-    size_t bracket_pos = shape_str.find('[');
-    if (bracket_pos != std::string::npos) {
-        type_str = shape_str.substr(0, bracket_pos);
-    } else {
-        type_str = shape_str;
-    }
-
-    // Map type string to PJRT dtype
-    if (type_str == "f32") dtype = 11;
-    else if (type_str == "f16") dtype = 10;
-    else if (type_str == "bf16") dtype = 16;
-    else if (type_str == "s32" || type_str == "i32") dtype = 4;
-    else if (type_str == "s64" || type_str == "i64") dtype = 5;
-    else if (type_str == "u32") dtype = 8;
-    else if (type_str == "pred" || type_str == "bool") dtype = 1;
-    else dtype = 11;  // Default to f32
-
-    // Extract dimensions
-    if (bracket_pos != std::string::npos) {
-        size_t end_bracket = shape_str.find(']', bracket_pos);
-        if (end_bracket != std::string::npos) {
-            std::string dims_str = shape_str.substr(bracket_pos + 1, end_bracket - bracket_pos - 1);
-            if (!dims_str.empty()) {
-                std::stringstream ss(dims_str);
-                std::string dim;
-                while (std::getline(ss, dim, ',')) {
-                    dims.push_back(std::stoll(dim));
-                }
-            }
-        }
-    }
-
-    // Scalar if no dimensions
-    if (dims.empty()) {
-        dims.push_back(1);
-    }
-
-    return true;
-}
-
-// Simple HLO text parser
-// Example HLO:
-//   HloModule test
-//   ENTRY main {
-//     %p0 = f32[2,3] parameter(0)
-//     %p1 = f32[2,3] parameter(1)
-//     ROOT %add = f32[2,3] add(%p0, %p1)
-//   }
-HloComputation ParseHloText(const std::string& hlo_text) {
-    HloComputation comp;
-    comp.name = "main";
-
-    std::istringstream stream(hlo_text);
-    std::string line;
-
-    std::regex param_regex(R"(%(\w+)\s*=\s*(\S+)\s+parameter\((\d+)\))");
-    std::regex op_regex(R"(%(\w+)\s*=\s*(\S+)\s+(\w+)\(([^)]*)\))");
-    std::regex root_regex(R"(ROOT\s+%(\w+)\s*=\s*(\S+)\s+(\w+)\(([^)]*)\))");
-
-    while (std::getline(stream, line)) {
-        // Trim whitespace
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
-        line = line.substr(start);
-
-        std::smatch match;
-
-        // Check for parameter
-        if (std::regex_search(line, match, param_regex)) {
-            std::string name = "%" + match[1].str();
-            std::string shape_str = match[2].str();
-            int dtype;
-            std::vector<int64_t> dims;
-            ParseShapeString(shape_str, dtype, dims);
-            comp.parameters.push_back({name, dims});
-            continue;
-        }
-
-        // Check for ROOT operation
-        if (std::regex_search(line, match, root_regex)) {
-            HloOp op;
-            op.output = "%" + match[1].str();
-            std::string shape_str = match[2].str();
-            op.name = match[3].str();
-            std::string args_str = match[4].str();
-
-            ParseShapeString(shape_str, op.dtype, op.shape);
-
-            // Parse arguments
-            std::stringstream args_stream(args_str);
-            std::string arg;
-            while (std::getline(args_stream, arg, ',')) {
-                // Trim whitespace
-                size_t s = arg.find_first_not_of(" \t");
-                size_t e = arg.find_last_not_of(" \t");
-                if (s != std::string::npos) {
-                    op.inputs.push_back(arg.substr(s, e - s + 1));
-                }
-            }
-
-            comp.ops.push_back(op);
-            comp.root_name = op.output;
-            continue;
-        }
-
-        // Check for regular operation
-        if (std::regex_search(line, match, op_regex)) {
-            HloOp op;
-            op.output = "%" + match[1].str();
-            std::string shape_str = match[2].str();
-            op.name = match[3].str();
-            std::string args_str = match[4].str();
-
-            ParseShapeString(shape_str, op.dtype, op.shape);
-
-            // Parse arguments
-            std::stringstream args_stream(args_str);
-            std::string arg;
-            while (std::getline(args_stream, arg, ',')) {
-                size_t s = arg.find_first_not_of(" \t");
-                size_t e = arg.find_last_not_of(" \t");
-                if (s != std::string::npos) {
-                    op.inputs.push_back(arg.substr(s, e - s + 1));
-                }
-            }
-
-            comp.ops.push_back(op);
-        }
-    }
-
-    return comp;
-}
-
 // Map StableHLO element type string to PJRT dtype
 static int StablehloTypeToDtype(const std::string& type) {
     if (type == "f32") return 11;  // PJRT_F32
@@ -180,25 +39,12 @@ static int StablehloTypeToDtype(const std::string& type) {
     return 11;  // Default to f32
 }
 
-MpsExecutable::MpsExecutable(MpsClient* client, const HloComputation& computation)
-    : client_(client)
-    , name_(computation.name)
-    , mps_graph_(nullptr)
-    , mps_executable_(nullptr) {
-    CompileFromHLO(computation);
-}
-
 MpsExecutable::MpsExecutable(MpsClient* client, const mps::StableHLOModule& module)
     : client_(client)
     , name_(module.entry_function.empty() ? "main" : module.entry_function)
     , mps_graph_(nullptr)
     , mps_executable_(nullptr) {
     CompileFromStableHLO(module);
-}
-
-void MpsExecutable::CompileFromHLO(const HloComputation& computation) {
-    computation_ = computation;
-    valid_ = !computation_.ops.empty();
 }
 
 void MpsExecutable::CompileFromStableHLO(const mps::StableHLOModule& module) {

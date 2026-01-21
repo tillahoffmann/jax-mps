@@ -48,12 +48,7 @@ public:
         const std::vector<int64_t>& dims,
         MpsDevice* device);
 
-    // Compilation - legacy HLO text format
-    std::unique_ptr<MpsExecutable> Compile(
-        const std::string& hlo_text,
-        MpsDevice* device);
-
-    // Compilation - StableHLO module
+    // Compilation
     std::unique_ptr<MpsExecutable> CompileStableHLO(
         const mps::StableHLOModule& module,
         MpsDevice* device);

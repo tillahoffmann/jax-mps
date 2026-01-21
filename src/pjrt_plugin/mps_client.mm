@@ -119,20 +119,6 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(
     );
 }
 
-std::unique_ptr<MpsExecutable> MpsClient::Compile(
-    const std::string& hlo_text,
-    MpsDevice* device) {
-
-    // Parse HLO text
-    HloComputation computation = ParseHloText(hlo_text);
-    if (computation.ops.empty()) {
-        NSLog(@"Failed to parse HLO text");
-        return nullptr;
-    }
-
-    return std::make_unique<MpsExecutable>(this, computation);
-}
-
 std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(
     const mps::StableHLOModule& module,
     MpsDevice* device) {

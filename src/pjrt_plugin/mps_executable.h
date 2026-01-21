@@ -36,10 +36,6 @@ struct HloComputation {
 // Compiled executable for Metal
 class MpsExecutable {
 public:
-    // Legacy constructor from HLO text
-    MpsExecutable(MpsClient* client, const HloComputation& computation);
-
-    // New constructor from StableHLO module
     MpsExecutable(MpsClient* client, const mps::StableHLOModule& module);
 
     ~MpsExecutable();
@@ -57,19 +53,15 @@ public:
     int num_outputs() const { return num_outputs_; }
 
 private:
-    void CompileFromHLO(const HloComputation& computation);
     void CompileFromStableHLO(const mps::StableHLOModule& module);
 
     MpsClient* client_;
     std::string name_;
     int num_outputs_ = 1;
     bool valid_ = false;
-    HloComputation computation_;  // Keep for backward compatibility
+    HloComputation computation_;
     void* mps_graph_;  // MPSGraph*
     void* mps_executable_;  // MPSGraphExecutable*
 };
-
-// Parse HLO text into computation
-HloComputation ParseHloText(const std::string& hlo_text);
 
 }  // namespace jax_mps
