@@ -113,12 +113,12 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
                                        dtype, dims);
 }
 
-std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(const mps::StableHLOModule& module,
+std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(mps::ParsedModule module,
                                                            MpsDevice* device) {
-    // Create executable from StableHLO module
-    auto exec = std::make_unique<MpsExecutable>(this, module);
+    // Create executable from ParsedModule (takes ownership)
+    auto exec = std::make_unique<MpsExecutable>(this, std::move(module));
     if (!exec->IsValid()) {
-        NSLog(@"Failed to compile StableHLO module");
+        NSLog(@"Failed to compile StableHLO module: %s", exec->error().c_str());
         return nullptr;
     }
 

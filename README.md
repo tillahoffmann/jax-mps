@@ -56,9 +56,30 @@ Options:
 ```bash
 ./scripts/setup_deps.sh --prefix /custom/path  # Custom install location
 ./scripts/setup_deps.sh --jobs 4               # Limit parallel jobs
+./scripts/setup_deps.sh --force                # Force rebuild with pinned versions
 ```
 
 This will produce `build/lib/libpjrt_plugin_mps.dylib`.
+
+### Version Pinning
+
+The script pins LLVM and StableHLO to specific commits matching jaxlib 0.9.0 for bytecode compatibility. To update these versions for a different jaxlib release, trace the dependency chain:
+
+```bash
+# 1. Find XLA commit used by jaxlib
+curl -s https://raw.githubusercontent.com/jax-ml/jax/jax-v0.9.0/third_party/xla/revision.bzl
+# → XLA_COMMIT = "bb760b04..."
+
+# 2. Find LLVM commit used by that XLA version
+curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/llvm/workspace.bzl
+# → LLVM_COMMIT = "f6d0a512..."
+
+# 3. Find StableHLO commit used by that XLA version
+curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/stablehlo/workspace.bzl
+# → STABLEHLO_COMMIT = "127d2f23..."
+```
+
+Then update the `STABLEHLO_COMMIT` and `LLVM_COMMIT_OVERRIDE` variables in `setup_deps.sh`.
 
 ## Installation
 

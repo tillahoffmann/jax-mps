@@ -1,24 +1,41 @@
 // Unary operations: tanh, exp, log, negate, abs
-// Also includes constant creation
+// Also includes constant creation, compare, and select
 
-#import "pjrt_plugin/mps_executable.h"
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 
-REGISTER_UNARY_OP(tanh, tanh);
-REGISTER_UNARY_OP(exp, exponent);
-REGISTER_UNARY_OP(log, logarithm);
-REGISTER_UNARY_OP(negate, negative);
-REGISTER_UNARY_OP(abs, absolute);
-REGISTER_UNARY_OP(sqrt, squareRoot);
-REGISTER_UNARY_OP(erf, erf);
+// Helper to get output shape from operation's result type
+static NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIndex = 0) {
+    if (resultIndex >= op->getNumResults()) {
+        return nil;
+    }
+    auto resultType = op->getResult(resultIndex).getType();
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
+    if (!tensorType) {
+        return nil;
+    }
+
+    NSMutableArray<NSNumber*>* shape = [NSMutableArray array];
+    for (int64_t dim : tensorType.getShape()) {
+        [shape addObject:@(dim)];
+    }
+    return shape;
+}
+
+// Unary ops using macros
+REGISTER_MLIR_UNARY_OP("stablehlo.tanh", tanh, tanh);
+REGISTER_MLIR_UNARY_OP("stablehlo.exponential", exponent, exp);
+REGISTER_MLIR_UNARY_OP("stablehlo.log", logarithm, log);
+REGISTER_MLIR_UNARY_OP("stablehlo.negate", negative, negate);
+REGISTER_MLIR_UNARY_OP("stablehlo.abs", absolute, abs);
+REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
+REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
-// Note: No native log1p in MPSGraph, so we compute log(1 + x)
-static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, TensorDict t, const HloOp& op,
-                                           NSArray<NSNumber*>* shape) {
-    MPSGraphTensor* input = t[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
+static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                           NSArray<NSNumber*>*) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
 
@@ -26,42 +43,51 @@ static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, TensorDict t, const HloO
     MPSGraphTensor* onePlusX = [g additionWithPrimaryTensor:input secondaryTensor:one name:nil];
     return [g logarithmWithTensor:onePlusX name:nil];
 }
-REGISTER_OP(log_plus_one, Handle_log_plus_one);
+REGISTER_MPS_OP("stablehlo.log_plus_one", Handle_log_plus_one);
 
 // Compare operation
-static MPSGraphTensor* Handle_compare(MPSGraph* g, TensorDict t, const HloOp& op,
-                                      NSArray<NSNumber*>* shape) {
-    MPSGraphTensor* lhs = t[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-    MPSGraphTensor* rhs = t[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
+static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                      NSArray<NSNumber*>*) {
+    auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
+    if (!compareOp) {
+        NSLog(@"ERROR: Expected CompareOp");
+        return nullptr;
+    }
+
+    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
+    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
         return nullptr;
 
-    const std::string& dir = op.compare_direction;
-    if (dir == "LT") {
-        return [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    } else if (dir == "LE") {
-        return [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    } else if (dir == "GT") {
-        return [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    } else if (dir == "GE") {
-        return [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    } else if (dir == "EQ") {
-        return [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    } else if (dir == "NE") {
-        return [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+    auto direction = compareOp.getComparisonDirection();
+    using Dir = mlir::stablehlo::ComparisonDirection;
+
+    switch (direction) {
+        case Dir::LT:
+            return [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::LE:
+            return [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::GT:
+            return [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::GE:
+            return [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::EQ:
+            return [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::NE:
+            return [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        default:
+            NSLog(@"ERROR: Unknown compare direction");
+            return nullptr;
     }
-    NSLog(@"ERROR: Unknown compare direction: %s", dir.c_str());
-    return nullptr;
 }
-REGISTER_OP(compare, Handle_compare);
+REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
 
 // Select operation (conditional selection: pred ? true_val : false_val)
-static MPSGraphTensor* Handle_select(MPSGraph* g, TensorDict t, const HloOp& op,
-                                     NSArray<NSNumber*>* shape) {
-    // select(pred, on_true, on_false)
-    MPSGraphTensor* pred = t[[NSString stringWithUTF8String:op.inputs[0].c_str()]];
-    MPSGraphTensor* onTrue = t[[NSString stringWithUTF8String:op.inputs[1].c_str()]];
-    MPSGraphTensor* onFalse = t[[NSString stringWithUTF8String:op.inputs[2].c_str()]];
+static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                     NSArray<NSNumber*>*) {
+    MPSGraphTensor* pred = GetInputTensor(values, op, 0);
+    MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
+    MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
     if (!pred || !onTrue || !onFalse)
         return nullptr;
 
@@ -70,56 +96,77 @@ static MPSGraphTensor* Handle_select(MPSGraph* g, TensorDict t, const HloOp& op,
                    falsePredicateTensor:onFalse
                                    name:nil];
 }
-REGISTER_OP(select, Handle_select);
+REGISTER_MPS_OP("stablehlo.select", Handle_select);
 
-// Constant creation - creates a constant tensor from parsed StableHLO data
-static MPSGraphTensor* Handle_constant(MPSGraph* g, TensorDict t, const HloOp& op,
-                                       NSArray<NSNumber*>* shape) {
-    MPSDataType dtype = PjrtDtypeToMps(op.dtype);
-    if (dtype == MPSDataTypeInvalid) {
-        NSLog(@"ERROR: Invalid dtype %d for constant operation", op.dtype);
+// Clamp operation: clamp(min, x, max) = min(max(min, x), max)
+static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                    NSArray<NSNumber*>*) {
+    MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
+    MPSGraphTensor* operand = GetInputTensor(values, op, 1);
+    MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
+    if (!minVal || !operand || !maxVal)
+        return nullptr;
+
+    // clamp = min(max(minVal, operand), maxVal)
+    MPSGraphTensor* clamped = [g maximumWithPrimaryTensor:minVal secondaryTensor:operand name:nil];
+    return [g minimumWithPrimaryTensor:clamped secondaryTensor:maxVal name:nil];
+}
+REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
+
+// Constant creation - creates a constant tensor from MLIR constant op
+static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                       NSArray<NSNumber*>*) {
+    auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
+    if (!constantOp) {
+        NSLog(@"ERROR: Expected ConstantOp");
         return nullptr;
     }
 
-    // Handle scalar/splat constants (most common case, e.g., 0.0 for relu)
-    if (op.is_scalar_constant) {
-        double scalar_value;
-        if (op.uses_raw_data) {
-            // Integer scalar - use raw value
-            scalar_value = static_cast<double>(op.constant_scalar_raw);
+    MPSDataType dtype = GetResultMpsType(op);
+    if (dtype == MPSDataTypeInvalid) {
+        NSLog(@"ERROR: Invalid dtype for constant operation");
+        return nullptr;
+    }
+
+    NSArray<NSNumber*>* shape = GetOutputShape(op);
+    auto value = constantOp.getValue();
+
+    if (auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(value)) {
+        // Check if it's a splat (single value broadcast to all elements)
+        if (denseAttr.isSplat()) {
+            auto elemType = denseAttr.getElementType();
+            double scalarValue = 0.0;
+
+            if (elemType.isF32()) {
+                scalarValue = denseAttr.getSplatValue<float>();
+            } else if (elemType.isF64()) {
+                scalarValue = denseAttr.getSplatValue<double>();
+            } else if (elemType.isF16()) {
+                auto apVal = denseAttr.getSplatValue<llvm::APFloat>();
+                scalarValue = apVal.convertToFloat();
+            } else if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+                auto apInt = denseAttr.getSplatValue<llvm::APInt>();
+                scalarValue = static_cast<double>(apInt.getZExtValue());
+            }
+
+            if (shape.count == 0) {
+                // True scalar
+                return [g constantWithScalar:scalarValue dataType:dtype];
+            } else {
+                // Splat to shape
+                return [g constantWithScalar:scalarValue shape:shape dataType:dtype];
+            }
         } else {
-            scalar_value = static_cast<double>(op.constant_scalar);
-        }
-
-        if (shape.count == 0) {
-            // True scalar
-            return [g constantWithScalar:scalar_value dataType:dtype];
-        } else {
-            // Splat to shape
-            return [g constantWithScalar:scalar_value shape:shape dataType:dtype];
+            // Non-splat dense constant - use raw data
+            auto rawData = denseAttr.getRawData();
+            NSData* data = [NSData dataWithBytes:rawData.data() length:rawData.size()];
+            return [g constantWithData:data shape:shape dataType:dtype];
         }
     }
 
-    // Handle dense array constants with raw data
-    if (op.uses_raw_data && !op.constant_raw.empty()) {
-        NSData* data = [NSData dataWithBytes:op.constant_raw.data() length:op.constant_raw.size()];
-        return [g constantWithData:data shape:shape dataType:dtype];
-    }
-
-    // Handle dense array constants (float data)
-    if (!op.constant_data.empty()) {
-        // Create NSData from the constant values
-        NSData* data = [NSData dataWithBytes:op.constant_data.data()
-                                      length:op.constant_data.size() * sizeof(float)];
-        return [g constantWithData:data shape:shape dataType:dtype];
-    }
-
-    // No constant data available - this shouldn't happen if parser worked correctly
-    NSLog(@"ERROR: Constant operation has no data (is_scalar=%d, uses_raw=%d, data_size=%zu, "
-          @"raw_size=%zu)",
-          op.is_scalar_constant, op.uses_raw_data, op.constant_data.size(), op.constant_raw.size());
+    NSLog(@"ERROR: Constant operation has unsupported value type");
     return nullptr;
 }
-REGISTER_OP(constant, Handle_constant);
+REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
 
 }  // namespace jax_mps

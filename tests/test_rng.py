@@ -2,7 +2,6 @@
 
 import jax
 import numpy as np
-import pytest
 
 
 def test_rng_uniform_on_mps(jax_setup):
@@ -21,7 +20,6 @@ def test_rng_uniform_on_mps(jax_setup):
     assert np.all(result_np <= 1.0), f"Got values > 1: {result_np}"
 
 
-@pytest.mark.skip(reason="Return value handling issue with normal distribution")
 def test_rng_normal_on_mps(jax_setup):
     """Test that jax.random.normal works on MPS."""
     mps = jax_setup["mps"]

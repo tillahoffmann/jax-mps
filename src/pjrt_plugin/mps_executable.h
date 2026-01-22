@@ -4,62 +4,20 @@
 #include <string>
 #include <vector>
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "pjrt_plugin/mps_buffer.h"
 
 namespace mps {
-struct StableHLOModule;
+struct ParsedModule;
 }
 
 namespace jax_mps {
 
 class MpsClient;
 class MpsDevice;
-
-// Parsed HLO operation
-struct HloOp {
-    std::string name;                     // e.g., "add", "dot", "tanh"
-    std::string output;                   // e.g., "%2"
-    std::vector<std::string> inputs;      // e.g., ["%0", "%1"]
-    int dtype;                            // Output dtype
-    std::vector<int64_t> shape;           // Output shape
-    std::vector<int64_t> broadcast_dims;  // For broadcast_in_dim
-    std::vector<int64_t> permutation;     // For transpose
-    int64_t concatenate_dim = 0;          // For concatenate
-
-    // For slice
-    std::vector<int64_t> slice_starts;
-    std::vector<int64_t> slice_limits;
-    std::vector<int64_t> slice_strides;
-
-    // For dynamic_slice
-    std::vector<int64_t> slice_sizes;
-
-    // For iota
-    int64_t iota_dim = 0;
-
-    // For custom_call
-    std::string custom_call_target;
-
-    // For compare
-    std::string compare_direction;  // "LT", "LE", "GT", "GE", "EQ", "NE"
-
-    // For constant operations
-    std::vector<float> constant_data;   // Dense constant values (floats only)
-    std::vector<uint8_t> constant_raw;  // Raw byte data for non-float constants
-    float constant_scalar = 0.0f;       // Scalar constant value
-    uint64_t constant_scalar_raw = 0;   // Raw scalar value for integers
-    bool is_scalar_constant = false;    // True if constant is scalar/splat
-    bool uses_raw_data = false;         // True if constant_raw contains the data
-};
-
-// Parsed HLO computation
-struct HloComputation {
-    std::string name;
-    std::vector<std::pair<std::string, std::vector<int64_t>>> parameters;  // name -> shape
-    std::vector<HloOp> ops;
-    std::string root_name;                   // Which op is the root/output (legacy, last output)
-    std::vector<std::string> return_values;  // All return values for multi-output functions
-};
 
 // Execution result - either success with buffers or an error
 struct ExecutionResult {
@@ -77,9 +35,11 @@ struct ExecutionResult {
 };
 
 // Compiled executable for Metal
+// Owns the MLIR context and module, executing operations directly from MLIR
 class MpsExecutable {
 public:
-    MpsExecutable(MpsClient* client, const mps::StableHLOModule& module);
+    // Takes ownership of the ParsedModule
+    MpsExecutable(MpsClient* client, mps::ParsedModule module);
 
     ~MpsExecutable();
 
@@ -105,16 +65,16 @@ public:
     }
 
 private:
-    void CompileFromStableHLO(const mps::StableHLOModule& module);
-
     MpsClient* client_;
     std::string name_;
     std::string error_;
     int num_outputs_ = 1;
     bool valid_ = false;
-    HloComputation computation_;
-    void* mps_graph_;       // MPSGraph*
-    void* mps_executable_;  // MPSGraphExecutable*
+
+    // MLIR ownership - keeps the module alive for execution
+    std::unique_ptr<mlir::MLIRContext> context_;
+    mlir::OwningOpRef<mlir::ModuleOp> module_;
+    mlir::func::FuncOp entry_func_;
 };
 
 }  // namespace jax_mps
