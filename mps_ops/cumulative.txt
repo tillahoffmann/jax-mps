@@ -1,0 +1,6 @@
+# CUMULATIVE OPERATIONS (MPSGraphCumulativeOps.h)
+
+cumulativeSumWithTensor:axis:exclusive:reverse:name:
+cumulativeProductWithTensor:axis:exclusive:reverse:name:
+cumulativeMinimumWithTensor:axis:exclusive:reverse:name:
+cumulativeMaximumWithTensor:axis:exclusive:reverse:name:

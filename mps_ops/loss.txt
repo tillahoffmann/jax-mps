@@ -1,0 +1,4 @@
+# LOSS OPERATIONS (MPSGraphLossOps.h)
+
+softMaxCrossEntropyWithSourceTensor:labelsTensor:axis:reductionType:name:
+softMaxCrossEntropyGradientWithIncomingGradientTensor:sourceTensor:labelsTensor:axis:reductionType:name:

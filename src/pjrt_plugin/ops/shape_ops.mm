@@ -4,24 +4,6 @@
 
 namespace jax_mps {
 
-// Helper to get output shape from operation's result type
-static NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIndex = 0) {
-    if (resultIndex >= op->getNumResults()) {
-        return nil;
-    }
-    auto resultType = op->getResult(resultIndex).getType();
-    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
-    if (!tensorType) {
-        return nil;
-    }
-
-    NSMutableArray<NSNumber*>* shape = [NSMutableArray array];
-    for (int64_t dim : tensorType.getShape()) {
-        [shape addObject:@(dim)];
-    }
-    return shape;
-}
-
 static MPSGraphTensor* Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values,
                                         NSArray<NSNumber*>* shape) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);

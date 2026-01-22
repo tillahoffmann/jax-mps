@@ -1,0 +1,18 @@
+# RANDOM OPERATIONS (MPSGraphRandomOps.h)
+
+randomPhiloxStateTensorWithSeed:name:
+randomPhiloxStateTensorWithCounterLow:counterHigh:key:name:
+randomTensorWithShape:descriptor:name:
+randomTensorWithShapeTensor:descriptor:name:
+randomTensorWithShape:descriptor:seed:name:
+randomTensorWithShapeTensor:descriptor:seed:name:
+randomTensorWithShape:descriptor:stateTensor:name:
+randomTensorWithShapeTensor:descriptor:stateTensor:name:
+randomUniformTensorWithShape:name:
+randomUniformTensorWithShapeTensor:name:
+randomUniformTensorWithShape:seed:name:
+randomUniformTensorWithShapeTensor:seed:name:
+randomUniformTensorWithShape:stateTensor:name:
+randomUniformTensorWithShapeTensor:stateTensor:name:
+dropoutTensor:rate:name:
+dropoutTensor:rateTensor:name:

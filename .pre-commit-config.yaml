@@ -12,3 +12,18 @@ repos:
       - id: clang-format
         types_or: [c++, c, objective-c++]
         files: \.(cc|mm|h)$
+
+  - repo: local
+    hooks:
+      - id: build
+        name: build
+        entry: bash -c 'uv pip install -e . -q'
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: pytest
+        entry: bash -c 'CI=true uv run pytest -q'
+        language: system
+        pass_filenames: false
+        always_run: true

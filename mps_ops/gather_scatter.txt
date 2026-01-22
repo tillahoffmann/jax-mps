@@ -1,0 +1,14 @@
+# GATHER/SCATTER OPERATIONS (MPSGraphGatherOps.h, MPSGraphScatterNDOps.h)
+
+gatherNDWithUpdatesTensor:indicesTensor:batchDimensions:name:
+gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:name:
+gatherAlongAxis:withUpdatesTensor:indicesTensor:name:
+gatherAlongAxisTensor:withUpdatesTensor:indicesTensor:name:
+scatterNDWithUpdatesTensor:indicesTensor:shape:batchDimensions:mode:name:
+scatterNDWithDataTensor:updatesTensor:indicesTensor:batchDimensions:mode:name:
+scatterWithUpdatesTensor:indicesTensor:shape:axis:mode:name:
+scatterWithDataTensor:updatesTensor:indicesTensor:axis:mode:name:
+scatterAlongAxis:withUpdatesTensor:indicesTensor:name:
+scatterAlongAxisTensor:withUpdatesTensor:indicesTensor:name:
+scatterAlongAxis:withDataTensor:updatesTensor:indicesTensor:mode:name:
+scatterAlongAxisTensor:withDataTensor:updatesTensor:indicesTensor:mode:name:

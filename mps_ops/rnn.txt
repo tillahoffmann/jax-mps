@@ -1,0 +1,8 @@
+# RNN OPERATIONS (MPSGraphRNNOps.h)
+
+singleGateRNNWithSourceTensor:recurrentWeight:inputWeight:bias:initState:descriptor:name:
+singleGateRNNGradientsWithSourceTensor:recurrentWeight:sourceGradient:zState:stateGradient:inputWeight:bias:initState:descriptor:name:
+LSTMWithSourceTensor:recurrentWeight:inputWeight:bias:initState:initCell:descriptor:name:
+LSTMGradientsWithSourceTensor:recurrentWeight:sourceGradient:zState:cellOutputFwd:stateGradient:cellGradient:inputWeight:bias:initState:initCell:descriptor:name:
+GRUWithSourceTensor:recurrentWeight:inputWeight:bias:initState:descriptor:name:
+GRUGradientsWithSourceTensor:recurrentWeight:sourceGradient:zState:outputFwd:stateGradient:inputWeight:bias:initState:descriptor:name:

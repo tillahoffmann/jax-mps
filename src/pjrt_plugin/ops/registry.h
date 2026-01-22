@@ -126,6 +126,24 @@ inline mlir::Type GetElementType(mlir::Type type) {
     return type;
 }
 
+// Get output shape from operation's result type as NSArray
+inline NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIndex = 0) {
+    if (resultIndex >= op->getNumResults()) {
+        return nil;
+    }
+    auto resultType = op->getResult(resultIndex).getType();
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
+    if (!tensorType) {
+        return nil;
+    }
+
+    NSMutableArray<NSNumber*>* shape = [NSMutableArray array];
+    for (int64_t dim : tensorType.getShape()) {
+        [shape addObject:@(dim)];
+    }
+    return shape;
+}
+
 // Map PJRT dtype to MPSDataType (for compatibility with buffer operations)
 inline MPSDataType PjrtDtypeToMps(int dtype) {
     switch (dtype) {

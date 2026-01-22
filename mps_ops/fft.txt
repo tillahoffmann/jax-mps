@@ -1,0 +1,8 @@
+# FFT OPERATIONS (MPSGraphFourierTransformOps.h)
+
+fastFourierTransformWithTensor:axes:descriptor:name:
+fastFourierTransformWithTensor:axesTensor:descriptor:name:
+realToHermiteanFFTWithTensor:axes:descriptor:name:
+realToHermiteanFFTWithTensor:axesTensor:descriptor:name:
+HermiteanToRealFFTWithTensor:axes:descriptor:name:
+HermiteanToRealFFTWithTensor:axesTensor:descriptor:name:

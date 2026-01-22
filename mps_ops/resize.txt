@@ -1,0 +1,10 @@
+# RESIZE OPERATIONS (MPSGraphResizeOps.h)
+
+resizeTensor:size:mode:centerResult:alignCorners:layout:name:
+resizeTensor:sizeTensor:mode:centerResult:alignCorners:layout:name:
+resizeNearestWithTensor:sizeTensor:nearestRoundingMode:centerResult:alignCorners:layout:name:
+resizeBilinearWithTensor:sizeTensor:centerResult:alignCorners:layout:name:
+resizeBilinearWithTensor:sizeTensor:scale:offset:layout:name:
+resizeWithGradientTensor:input:mode:centerResult:alignCorners:layout:name:
+resizeNearestWithGradientTensor:input:nearestRoundingMode:centerResult:alignCorners:layout:name:
+resizeBilinearWithGradientTensor:input:centerResult:alignCorners:layout:name:

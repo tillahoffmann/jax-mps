@@ -42,6 +42,7 @@ const std::unordered_set<std::string>& getSupportedOps() {
         "stablehlo.negate",
         "stablehlo.abs",
         "stablehlo.sqrt",
+        "stablehlo.erf",
         "stablehlo.log_plus_one",
         // Comparison and selection
         "stablehlo.compare",
@@ -50,6 +51,8 @@ const std::unordered_set<std::string>& getSupportedOps() {
         // Matrix ops
         "stablehlo.dot",
         "stablehlo.dot_general",
+        // Convolution ops
+        "stablehlo.convolution",
         // Shape ops
         "stablehlo.reshape",
         "stablehlo.transpose",
@@ -70,7 +73,9 @@ const std::unordered_set<std::string>& getSupportedOps() {
         "stablehlo.iota",
         "stablehlo.bitcast_convert",
         "stablehlo.custom_call",
-        "stablehlo.reduce",
+        // CHLO (Client HLO) ops
+        "chlo.erf_inv",
+        "chlo.next_after",
         // Control flow
         "func.return",
         "func.call",

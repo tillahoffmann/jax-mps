@@ -18,7 +18,6 @@ def test_rng_uniform(device, shape):
     assert np.all(result_np <= 1.0), f"Got values > 1: {result_np}"
 
 
-@pytest.mark.skip(reason="Requires MLIR rebuild - run ./scripts/setup_deps.sh --force")
 @pytest.mark.parametrize("shape", [(100,), (32, 32)])
 def test_rng_normal(device, shape):
     """Test that jax.random.normal works and produces valid distribution."""

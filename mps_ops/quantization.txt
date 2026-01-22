@@ -1,0 +1,10 @@
+# QUANTIZATION OPERATIONS (MPSGraphQuantizationOps.h)
+
+quantizeTensor:scale:zeroPoint:dataType:name:
+dequantizeTensor:scale:zeroPoint:dataType:name:
+quantizeTensor:scale:zeroPoint:dataType:axis:name:
+dequantizeTensor:scale:zeroPoint:dataType:axis:name:
+quantizeTensor:scaleTensor:zeroPoint:dataType:axis:name:
+dequantizeTensor:scaleTensor:zeroPoint:dataType:axis:name:
+dequantizeTensor:scaleTensor:zeroPointTensor:dataType:axis:name:
+dequantizeTensor:lookupTableTensor:dataType:name:

@@ -1,0 +1,11 @@
+# ACTIVATION OPERATIONS (MPSGraphActivationOps.h)
+
+reLUWithTensor:name:
+reLUGradientWithIncomingGradient:sourceTensor:name:
+sigmoidWithTensor:name:
+sigmoidGradientWithIncomingGradient:sourceTensor:name:
+softMaxWithTensor:axis:name:
+softMaxGradientWithIncomingGradient:sourceTensor:axis:name:
+leakyReLUWithTensor:alpha:name:
+leakyReLUWithTensor:alphaTensor:name:
+leakyReLUGradientWithIncomingGradient:sourceTensor:alphaTensor:name:

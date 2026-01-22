@@ -1,0 +1,6 @@
+# OPTIMIZER OPERATIONS (MPSGraphOptimizerOps.h)
+
+stochasticGradientDescentWithLearningRateTensor:valuesTensor:gradientTensor:name:
+applyStochasticGradientDescentWithLearningRateTensor:variable:gradientTensor:name:
+adamWithLearningRateTensor:beta1Tensor:beta2Tensor:epsilonTensor:valuesTensor:momentumTensor:velocityTensor:gradientTensor:name:
+adamWithCurrentLearningRateTensor:beta1Tensor:beta2Tensor:epsilonTensor:valuesTensor:momentumTensor:velocityTensor:gradientTensor:name:
