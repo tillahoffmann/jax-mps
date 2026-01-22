@@ -50,8 +50,8 @@ jobs:
           retention-days: 7
           include-hidden-files: true
 
-  build-wheel:
-    name: Build wheel (Python ${{ matrix.python }})
+  build-and-test:
+    name: Build and test (Python ${{ matrix.python }})
     needs: build-deps
     runs-on: macos-14
     strategy:
@@ -80,10 +80,18 @@ jobs:
       - name: Install system dependencies
         run: brew install protobuf abseil
 
+      - name: Install project and dev dependencies
+        run: uv sync --all-groups
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
       - name: Build wheel
         run: uv build --wheel
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
+      - name: Run pytest
+        run: uv run pytest tests/ -v
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -91,85 +99,9 @@ jobs:
           name: wheel-py${{ matrix.python }}
           path: dist/*.whl
 
-  test:
-    name: Test wheel (Python ${{ matrix.python }})
-    needs: build-wheel
-    runs-on: macos-14
-    strategy:
-      matrix:
-        python: ["3.13"]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Download wheel
-        uses: actions/download-artifact@v4
-        with:
-          name: wheel-py${{ matrix.python }}
-          path: dist/
-
-      - name: Install dependencies
-        run: |
-          uv sync --all-groups --no-install-project
-          uv pip install dist/*.whl
-
-      - name: Verify JAX backends
-        run: |
-          uv run python -c "
-          import jax
-          print('JAX version:', jax.__version__)
-          print('Available devices:', jax.devices())
-
-          # Check if MPS backend is available
-          try:
-              mps_devices = jax.devices('mps')
-              print('MPS devices:', mps_devices)
-              if not mps_devices:
-                  print('WARNING: No MPS devices found')
-          except Exception as e:
-              print('MPS backend status:', e)
-          "
-
-      - name: Run basic JAX operations
-        run: |
-          uv run python -c "
-          import jax
-          import jax.numpy as jnp
-
-          # Basic operations
-          x = jnp.array([1.0, 2.0, 3.0])
-          y = jnp.array([4.0, 5.0, 6.0])
-          print('x + y =', x + y)
-
-          # Matrix multiplication
-          a = jnp.ones((100, 100))
-          b = jnp.ones((100, 100))
-          c = jnp.matmul(a, b)
-          print('matmul result shape:', c.shape)
-          print('matmul result sum:', float(c.sum()))
-
-          # Verify correctness (100x100 ones * 100x100 ones = 100x100 hundreds)
-          assert float(c.sum()) == 100 * 100 * 100, 'matmul result incorrect'
-          print('Basic operations: PASSED')
-          "
-
-      - name: Run benchmark (GPU test)
-        run: |
-          echo "Running benchmark to verify GPU acceleration..."
-          uv run python benchmark.py
-        continue-on-error: true  # Don't fail if GPU not available in VM
-
-      - name: Run pytest
-        run: uv run pytest tests/ -v
-
   release:
     name: Release
-    needs: [build-wheel, test]
+    needs: build-and-test
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
