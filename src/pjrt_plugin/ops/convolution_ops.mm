@@ -7,8 +7,7 @@ namespace jax_mps {
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
-static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                          NSArray<NSNumber*>* outputShape) {
+static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
     if (!convOp) {
         NSLog(@"ERROR: Expected ConvolutionOp");

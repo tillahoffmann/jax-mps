@@ -166,12 +166,6 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
                 supported);
         }
 
-        // Get output shape for this operation
-        NSArray<NSNumber*>* output_shape = nil;
-        if (op->getNumResults() > 0) {
-            output_shape = GetShapeFromType(op->getResult(0).getType());
-        }
-
         // Check for multi-result operations (not yet supported)
         if (op->getNumResults() > 1) {
             return ProcessResult::Error("Operation '" + op_name +
@@ -179,7 +173,7 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         }
 
         // Execute the handler
-        MPSGraphTensor* out = handler(graph, op, values, output_shape);
+        MPSGraphTensor* out = handler(graph, op, values);
         if (!out) {
             return ProcessResult::Error("Operation '" + op_name + "' handler returned null");
         }

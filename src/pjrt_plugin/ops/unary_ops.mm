@@ -15,8 +15,7 @@ REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
-static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                           NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
@@ -28,8 +27,7 @@ static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, Val
 REGISTER_MPS_OP("stablehlo.log_plus_one", Handle_log_plus_one);
 
 // Compare operation
-static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                      NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
     if (!compareOp) {
         NSLog(@"ERROR: Expected CompareOp");
@@ -65,8 +63,7 @@ static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap
 REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
 
 // Select operation (conditional selection: pred ? true_val : false_val)
-static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                     NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* pred = GetInputTensor(values, op, 0);
     MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
     MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
@@ -81,8 +78,7 @@ static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap&
 REGISTER_MPS_OP("stablehlo.select", Handle_select);
 
 // Clamp operation: clamp(min, x, max)
-static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                    NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
     MPSGraphTensor* operand = GetInputTensor(values, op, 1);
     MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
@@ -94,8 +90,7 @@ static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& 
 REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 
 // Constant creation - creates a constant tensor from MLIR constant op
-static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                       NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
     if (!constantOp) {
         NSLog(@"ERROR: Expected ConstantOp");
@@ -177,8 +172,7 @@ REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
 // Inverse error function (erfinv) using Winitzki approximation
 // erfinv(x) ≈ sign(x) * sqrt(sqrt(t² - log(1-x²)/a) - t)
 // where t = 2/(π*a) + log(1-x²)/2, a ≈ 0.147
-static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                      NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     if (!x)
         return nullptr;
@@ -256,8 +250,7 @@ REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
 // 2. If x or y is NaN, return NaN
 // 3. If x == 0, return smallest subnormal with sign of y
 // 4. Otherwise, treat x as integer bits and increment/decrement based on direction
-static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                         NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     MPSGraphTensor* y = GetInputTensor(values, op, 1);
     if (!x || !y)

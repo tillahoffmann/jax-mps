@@ -4,8 +4,7 @@
 
 namespace jax_mps {
 
-static MPSGraphTensor* Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                        NSArray<NSNumber*>* shape) {
+static MPSGraphTensor* Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
@@ -15,8 +14,7 @@ static MPSGraphTensor* Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueM
 REGISTER_MPS_OP("stablehlo.broadcast", Handle_broadcast);
 
 // broadcast_in_dim needs special handling for dimension mapping
-static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                               NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto broadcastOp = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(op);
     if (!broadcastOp) {
         NSLog(@"ERROR: Expected BroadcastInDimOp");
@@ -69,8 +67,7 @@ static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op,
 }
 REGISTER_MPS_OP("stablehlo.broadcast_in_dim", Handle_broadcast_in_dim);
 
-static MPSGraphTensor* Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                      NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
@@ -79,8 +76,7 @@ static MPSGraphTensor* Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap
 }
 REGISTER_MPS_OP("stablehlo.reshape", Handle_reshape);
 
-static MPSGraphTensor* Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                        NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op);
     if (!transposeOp) {
         NSLog(@"ERROR: Expected TransposeOp");
@@ -101,8 +97,7 @@ static MPSGraphTensor* Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueM
 }
 REGISTER_MPS_OP("stablehlo.transpose", Handle_transpose);
 
-static MPSGraphTensor* Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                      NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
@@ -117,8 +112,7 @@ static MPSGraphTensor* Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap
 REGISTER_MPS_OP("stablehlo.convert", Handle_convert);
 
 // Slice - extract a portion of a tensor (static indices)
-static MPSGraphTensor* Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                    NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op);
     if (!sliceOp) {
         NSLog(@"ERROR: Expected SliceOp");
@@ -148,8 +142,7 @@ static MPSGraphTensor* Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& 
 REGISTER_MPS_OP("stablehlo.slice", Handle_slice);
 
 // Dynamic slice - extract a portion using runtime indices
-static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                            NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dynSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op);
     if (!dynSliceOp) {
         NSLog(@"ERROR: Expected DynamicSliceOp");
@@ -208,8 +201,7 @@ static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Va
 REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
 
 // Iota - create an array of indices
-static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                   NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op);
     if (!iotaOp) {
         NSLog(@"ERROR: Expected IotaOp");
@@ -238,8 +230,7 @@ static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& v
 REGISTER_MPS_OP("stablehlo.iota", Handle_iota);
 
 // Bitcast convert - reinterpret bits as a different type
-static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                              NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
@@ -273,8 +264,7 @@ static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, 
 REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
 
 // Custom call - handle specific JAX custom operations
-static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                          NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op);
     if (!customCallOp) {
         NSLog(@"ERROR: Expected CustomCallOp");

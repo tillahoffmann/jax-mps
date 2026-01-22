@@ -21,18 +21,18 @@ static bool isBooleanResult(mlir::Operation* op) {
 }
 
 // Macro for logical/bitwise operations (AND, OR, XOR) that dispatch based on boolean type
-#define REGISTER_LOGICAL_BITWISE_OP(mlir_op_name, logical_method, bitwise_method, reg_suffix)      \
-    static MPSGraphTensor* Handle_##reg_suffix(MPSGraph* g, mlir::Operation* op, ValueMap& values, \
-                                               NSArray<NSNumber*>*) {                              \
-        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                       \
-        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                       \
-        if (!lhs || !rhs)                                                                          \
-            return nullptr;                                                                        \
-        if (isBooleanResult(op)) {                                                                 \
-            return [g logical_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];         \
-        }                                                                                          \
-        return [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];             \
-    }                                                                                              \
+#define REGISTER_LOGICAL_BITWISE_OP(mlir_op_name, logical_method, bitwise_method, reg_suffix) \
+    static MPSGraphTensor* Handle_##reg_suffix(MPSGraph* g, mlir::Operation* op,              \
+                                               ValueMap& values) {                            \
+        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                  \
+        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                  \
+        if (!lhs || !rhs)                                                                     \
+            return nullptr;                                                                   \
+        if (isBooleanResult(op)) {                                                            \
+            return [g logical_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];    \
+        }                                                                                     \
+        return [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];        \
+    }                                                                                         \
     REGISTER_MPS_OP(mlir_op_name, Handle_##reg_suffix)
 
 REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, and);
@@ -87,21 +87,19 @@ static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap&
                                    name:nil];
 }
 
-static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                         NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     return HandleShiftOp(g, op, values, /*isLeftShift=*/true);
 }
 REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
 
 static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
-                                                  ValueMap& values, NSArray<NSNumber*>*) {
+                                                  ValueMap& values) {
     return HandleShiftOp(g, op, values, /*isLeftShift=*/false);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
 
 // Concatenate - joins tensors along a dimension
-static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                          NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
     if (!concatOp) {
         NSLog(@"ERROR: Expected ConcatenateOp");

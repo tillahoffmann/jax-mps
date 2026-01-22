@@ -21,7 +21,7 @@ namespace jax_mps {
 using ValueMap = std::unordered_map<void*, MPSGraphTensor*>;
 
 // Handler signature: takes MLIR operation directly
-using OpHandler = MPSGraphTensor* (*)(MPSGraph*, mlir::Operation*, ValueMap&, NSArray<NSNumber*>*);
+using OpHandler = MPSGraphTensor* (*)(MPSGraph*, mlir::Operation*, ValueMap&);
 
 // Global op registry - ops register themselves at static init time
 class OpRegistry {
@@ -133,26 +133,26 @@ inline NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIn
     static bool _reg_##handler_fn = ::jax_mps::OpRegistry::Register(mlir_op_name, handler_fn)
 
 // Convenience macro for simple binary ops
-#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                         \
-    static MPSGraphTensor* Handle_mlir_##reg_suffix(                                          \
-        MPSGraph* g, mlir::Operation* op, ::jax_mps::ValueMap& values, NSArray<NSNumber*>*) { \
-        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                  \
-        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                  \
-        if (!lhs || !rhs)                                                                     \
-            return nullptr;                                                                   \
-        return [g mps_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];            \
-    }                                                                                         \
+#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                 \
+    static MPSGraphTensor* Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
+                                                    ::jax_mps::ValueMap& values) {    \
+        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                          \
+        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                          \
+        if (!lhs || !rhs)                                                             \
+            return nullptr;                                                           \
+        return [g mps_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];    \
+    }                                                                                 \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
 
 // Convenience macro for simple unary ops
-#define REGISTER_MLIR_UNARY_OP(mlir_op_name, mps_method, reg_suffix)                          \
-    static MPSGraphTensor* Handle_mlir_##reg_suffix(                                          \
-        MPSGraph* g, mlir::Operation* op, ::jax_mps::ValueMap& values, NSArray<NSNumber*>*) { \
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);                                \
-        if (!input)                                                                           \
-            return nullptr;                                                                   \
-        return [g mps_method##WithTensor:input name:nil];                                     \
-    }                                                                                         \
+#define REGISTER_MLIR_UNARY_OP(mlir_op_name, mps_method, reg_suffix)                  \
+    static MPSGraphTensor* Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
+                                                    ::jax_mps::ValueMap& values) {    \
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);                        \
+        if (!input)                                                                   \
+            return nullptr;                                                           \
+        return [g mps_method##WithTensor:input name:nil];                             \
+    }                                                                                 \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
 
 }  // namespace jax_mps

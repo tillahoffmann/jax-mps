@@ -12,8 +12,7 @@ REGISTER_MLIR_BINARY_OP("stablehlo.maximum", maximum, maximum);
 REGISTER_MLIR_BINARY_OP("stablehlo.minimum", minimum, minimum);
 
 // Matrix multiplication (dot and dot_general)
-static MPSGraphTensor* Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                  NSArray<NSNumber*>*) {
+static MPSGraphTensor* Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
     MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
