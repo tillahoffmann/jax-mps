@@ -31,23 +31,21 @@ def test_logistic_regression_cpu_vs_mps(jax_setup):
     np.random.seed(seed)
     x_np = np.random.randn(batch_size, in_features).astype(np.float32)
 
-    # Create model on CPU (MPS doesn't support RNG operations for initialization)
+    # Create model on CPU for reference
     with jax.default_device(cpu):
-        model = LogisticRegression(in_features, out_features, rngs=nnx.Rngs(seed))
-        kernel_np = np.array(model.linear.kernel[...])
-        bias_np = np.array(model.linear.bias[...])
+        model_cpu = LogisticRegression(in_features, out_features, rngs=nnx.Rngs(seed))
+        kernel_cpu_np = np.array(model_cpu.linear.kernel[...])
+        bias_cpu_np = np.array(model_cpu.linear.bias[...])
 
     # Run on CPU
     x_cpu = jax.device_put(x_np, cpu)
-    kernel_cpu = jax.device_put(kernel_np, cpu)
-    bias_cpu = jax.device_put(bias_np, cpu)
-    logits_cpu = jnp.matmul(x_cpu, kernel_cpu) + bias_cpu
+    logits_cpu = jnp.matmul(x_cpu, model_cpu.linear.kernel) + model_cpu.linear.bias
     output_cpu = jax.nn.sigmoid(logits_cpu)
 
-    # Run on MPS with same weights
+    # Run on MPS with same weights (transfer from CPU)
     x_mps = jax.device_put(x_np, mps)
-    kernel_mps = jax.device_put(kernel_np, mps)
-    bias_mps = jax.device_put(bias_np, mps)
+    kernel_mps = jax.device_put(kernel_cpu_np, mps)
+    bias_mps = jax.device_put(bias_cpu_np, mps)
     logits_mps = jnp.matmul(x_mps, kernel_mps) + bias_mps
     output_mps = jax.nn.sigmoid(logits_mps)
 
@@ -58,3 +56,30 @@ def test_logistic_regression_cpu_vs_mps(jax_setup):
         atol=1e-4,
         err_msg="Logistic regression output differs between CPU and MPS",
     )
+
+
+def test_flax_init_on_mps(jax_setup):
+    """Test that Flax models can be initialized directly on MPS."""
+    mps = jax_setup["mps"]
+
+    seed = 42
+    in_features = 16
+    out_features = 1
+
+    # Initialize model directly on MPS
+    with jax.default_device(mps):
+        model = LogisticRegression(in_features, out_features, rngs=nnx.Rngs(seed))
+
+    # Verify model is on MPS
+    assert mps in model.linear.kernel.devices(), "Kernel should be on MPS"
+    assert mps in model.linear.bias.devices(), "Bias should be on MPS"
+
+    # Verify shapes
+    assert model.linear.kernel.shape == (in_features, out_features)
+    assert model.linear.bias.shape == (out_features,)
+
+    # Verify we can do a forward pass
+    x = jax.device_put(np.random.randn(4, in_features).astype(np.float32), mps)
+    output = model(x)
+    assert output.shape == (4, out_features)
+    assert mps in output.devices(), "Output should be on MPS"

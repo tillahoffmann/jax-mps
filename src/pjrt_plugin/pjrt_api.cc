@@ -279,6 +279,9 @@ PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
     }
     MPS_LOG(" PJRT_Client_Devices: %zu devices, data=%p\n", client->devices.size(),
             (void*)client->devices.data());
+    for (size_t i = 0; i < client->devices.size(); i++) {
+        MPS_LOG(" PJRT_Client_Devices: device[%zu]=%p\n", i, (void*)client->devices[i]);
+    }
     args->devices = client->devices.data();
     args->num_devices = client->devices.size();
     MPS_LOG(" PJRT_Client_Devices returning\n");
@@ -661,39 +664,82 @@ PJRT_Error* MPS_Executable_GetCostAnalysis(PJRT_Executable_GetCostAnalysis_Args*
     return nullptr;
 }
 
-// Static storage for output memory kinds
+// Static storage for output memory kinds - supports up to 64 outputs
 static const char* g_memory_kind = "device";
-static const char* g_output_memory_kinds[1] = {g_memory_kind};
-static size_t g_output_memory_kind_sizes[1] = {6};  // strlen("device")
+static const char* g_output_memory_kinds[64];
+static size_t g_output_memory_kind_sizes[64];
+static bool g_memory_kinds_initialized = false;
+
+static void InitializeMemoryKinds() {
+    if (!g_memory_kinds_initialized) {
+        for (int i = 0; i < 64; i++) {
+            g_output_memory_kinds[i] = g_memory_kind;
+            g_output_memory_kind_sizes[i] = 6;  // strlen("device")
+        }
+        g_memory_kinds_initialized = true;
+    }
+}
 
 PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputMemoryKinds called\n");
-    args->num_outputs = 1;
+    InitializeMemoryKinds();
+
+    // Get the actual number of outputs from the executable
+    size_t num_outputs = 1;
+    if (args->executable && args->executable->executable) {
+        num_outputs = args->executable->executable->num_outputs();
+    }
+
+    args->num_outputs = num_outputs;
     args->memory_kinds = g_output_memory_kinds;
     args->memory_kind_sizes = g_output_memory_kind_sizes;
+    MPS_LOG(" PJRT_Executable_OutputMemoryKinds: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
-// Static storage for output types and dimensions (single output case)
-static PJRT_Buffer_Type g_output_types[1] = {PJRT_Buffer_Type_F32};
-static int64_t g_output_dims[16] = {0};
-static size_t g_output_dim_sizes[1] = {0};
+// Static storage for output types and dimensions - supports up to 64 outputs
+static PJRT_Buffer_Type g_output_types[64];
+static int64_t g_output_dims[64 * 8];  // up to 8 dims per output
+static size_t g_output_dim_sizes[64];
 
 PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputElementTypes called\n");
+
+    // Get the actual number of outputs from the executable
+    size_t num_outputs = 1;
+    if (args->executable && args->executable->executable) {
+        num_outputs = args->executable->executable->num_outputs();
+    }
+
+    // Default to F32 for all outputs
+    for (size_t i = 0; i < num_outputs && i < 64; i++) {
+        g_output_types[i] = PJRT_Buffer_Type_F32;
+    }
+
     args->output_types = g_output_types;
-    args->num_output_types = 1;
+    args->num_output_types = num_outputs;
+    MPS_LOG(" PJRT_Executable_OutputElementTypes: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
 PJRT_Error* MPS_Executable_OutputDimensions(PJRT_Executable_OutputDimensions_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputDimensions called\n");
-    // For a 1D tensor of size 2: dims = [2], dim_sizes = [1]
-    g_output_dims[0] = 2;
-    g_output_dim_sizes[0] = 1;
-    args->num_outputs = 1;
+
+    // Get the actual number of outputs from the executable
+    size_t num_outputs = 1;
+    if (args->executable && args->executable->executable) {
+        num_outputs = args->executable->executable->num_outputs();
+    }
+
+    // Default dimensions (scalar) for all outputs
+    for (size_t i = 0; i < num_outputs && i < 64; i++) {
+        g_output_dim_sizes[i] = 0;  // scalar by default
+    }
+
+    args->num_outputs = num_outputs;
     args->dims = g_output_dims;
     args->dim_sizes = g_output_dim_sizes;
+    MPS_LOG(" PJRT_Executable_OutputDimensions: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
@@ -796,11 +842,14 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
 
     // Write outputs to the pre-allocated output_lists
     size_t num_outputs = exec_result.buffers.size();
+    MPS_LOG(" Execute: creating %zu output buffers with client=%p\n", num_outputs, (void*)client);
     for (size_t i = 0; i < num_outputs; i++) {
         auto* buffer = new PJRT_Buffer();
         buffer->buffer = std::move(exec_result.buffers[i]);
         buffer->client = client;
         args->output_lists[0][i] = buffer;
+        MPS_LOG(" Execute: output[%zu] buffer=%p, client->devices[0]=%p\n", i, (void*)buffer,
+                (void*)(client->devices.empty() ? nullptr : client->devices[0]));
     }
 
     if (args->device_complete_events) {
@@ -916,10 +965,14 @@ PJRT_Error* MPS_Buffer_OnDeviceSizeInBytes(PJRT_Buffer_OnDeviceSizeInBytes_Args*
 }
 
 PJRT_Error* MPS_Buffer_Device(PJRT_Buffer_Device_Args* args) {
+    MPS_LOG(" PJRT_Buffer_Device called, buffer=%p\n", (void*)args->buffer);
     if (args->buffer && args->buffer->client && !args->buffer->client->devices.empty()) {
         args->device = args->buffer->client->devices[0];
+        MPS_LOG(" PJRT_Buffer_Device: returning device=%p from client=%p\n", (void*)args->device,
+                (void*)args->buffer->client);
     } else {
         args->device = nullptr;
+        MPS_LOG(" PJRT_Buffer_Device: returning nullptr (no client or devices)\n");
     }
     return nullptr;
 }
