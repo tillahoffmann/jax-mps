@@ -161,21 +161,49 @@ static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Va
         return nullptr;
 
     auto sliceSizes = dynSliceOp.getSliceSizes();
+    NSUInteger rank = sliceSizes.size();
 
-    // Build the sizes, starts, and strides arrays
-    NSMutableArray<NSNumber*>* sizes = [NSMutableArray array];
-    NSMutableArray<NSNumber*>* zeroStarts = [NSMutableArray array];
-    NSMutableArray<NSNumber*>* strides = [NSMutableArray array];
-
+    // Build the output shape from slice sizes
+    NSMutableArray<NSNumber*>* outputShape = [NSMutableArray array];
     for (int64_t s : sliceSizes) {
-        [sizes addObject:@(s)];
-        [zeroStarts addObject:@0];
-        [strides addObject:@1];
+        [outputShape addObject:@(s)];
     }
 
-    // Note: This is a TEMPORARY workaround that only works correctly when start indices are 0
-    // A proper implementation would need to use gather operations
-    return [g sliceTensor:input starts:zeroStarts ends:sizes strides:strides name:nil];
+    // Get start indices as tensors (operands 1 through N)
+    // and create coordinate tensors offset by the start indices
+    NSMutableArray<MPSGraphTensor*>* indexTensors = [NSMutableArray array];
+    for (NSUInteger dim = 0; dim < rank; dim++) {
+        // Get the start index tensor for this dimension (scalar tensor)
+        MPSGraphTensor* startIdx = GetInputTensor(values, op, dim + 1);
+        if (!startIdx) {
+            NSLog(@"ERROR: dynamic_slice missing start index for dimension %lu",
+                  (unsigned long)dim);
+            return nullptr;
+        }
+
+        // Create coordinate tensor for this dimension (0, 1, 2, ..., slice_size-1)
+        MPSGraphTensor* coords = [g coordinateAlongAxis:(NSInteger)dim
+                                              withShape:outputShape
+                                                   name:nil];
+
+        // Cast coordinates to match start index type for addition
+        coords = [g castTensor:coords toType:startIdx.dataType name:nil];
+
+        // Add start index to coordinates (broadcasts the scalar start index)
+        MPSGraphTensor* adjustedCoords = [g additionWithPrimaryTensor:coords
+                                                      secondaryTensor:startIdx
+                                                                 name:nil];
+
+        [indexTensors addObject:adjustedCoords];
+    }
+
+    // Stack the coordinate tensors along a new last axis to form indices tensor
+    // Shape: [slice_size_0, slice_size_1, ..., rank]
+    MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
+
+    // Use gatherND to gather the slice from the input tensor
+    // batchDimensions: 0 means no batch dimensions
+    return [g gatherNDWithUpdatesTensor:input indicesTensor:indices batchDimensions:0 name:nil];
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
 

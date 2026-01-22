@@ -384,8 +384,6 @@ def test_slice(request: pytest.FixtureRequest, device, shape, slices):
 def test_dynamic_slice(
     request: pytest.FixtureRequest, device, shape, start_indices, slice_sizes
 ):
-    if device.platform == "mps":
-        pytest.xfail("MPS dynamic_slice ignores start indices - implementation bug")
     rng = np.random.default_rng(seed=42)
     x = rng.standard_normal(shape).astype(np.float32)
     return jax.lax.dynamic_slice(x, start_indices, slice_sizes)
