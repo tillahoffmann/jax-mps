@@ -5,24 +5,6 @@
 
 namespace jax_mps {
 
-// Helper to get output shape from operation's result type
-static NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIndex = 0) {
-    if (resultIndex >= op->getNumResults()) {
-        return nil;
-    }
-    auto resultType = op->getResult(resultIndex).getType();
-    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
-    if (!tensorType) {
-        return nil;
-    }
-
-    NSMutableArray<NSNumber*>* shape = [NSMutableArray array];
-    for (int64_t dim : tensorType.getShape()) {
-        [shape addObject:@(dim)];
-    }
-    return shape;
-}
-
 // Unary ops using macros
 REGISTER_MLIR_UNARY_OP("stablehlo.tanh", tanh, tanh);
 REGISTER_MLIR_UNARY_OP("stablehlo.exponential", exponent, exp);
@@ -168,5 +150,81 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
+
+// Inverse error function (erfinv) using Winitzki approximation
+// erfinv(x) ≈ sign(x) * sqrt(sqrt(t² - log(1-x²)/a) - t)
+// where t = 2/(π*a) + log(1-x²)/2, a ≈ 0.147
+static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                      NSArray<NSNumber*>*) {
+    MPSGraphTensor* x = GetInputTensor(values, op, 0);
+    if (!x)
+        return nullptr;
+
+    MPSDataType dtype = x.dataType;
+
+    // Constants for Winitzki approximation
+    // a = 8*(π-3)/(3*π*(4-π)) ≈ 0.140012
+    double a = 0.140012;
+    double two_over_pi_a = 2.0 / (M_PI * a);  // ≈ 4.546884
+
+    MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:dtype];
+    MPSGraphTensor* two = [g constantWithScalar:2.0 dataType:dtype];
+    MPSGraphTensor* neg_one = [g constantWithScalar:-1.0 dataType:dtype];
+    MPSGraphTensor* half = [g constantWithScalar:0.5 dataType:dtype];
+    MPSGraphTensor* const_a = [g constantWithScalar:a dataType:dtype];
+    MPSGraphTensor* const_two_pi_a = [g constantWithScalar:two_over_pi_a dataType:dtype];
+
+    // x² = x * x
+    MPSGraphTensor* x_sq = [g multiplicationWithPrimaryTensor:x secondaryTensor:x name:nil];
+
+    // 1 - x²
+    MPSGraphTensor* one_minus_x_sq = [g subtractionWithPrimaryTensor:one
+                                                     secondaryTensor:x_sq
+                                                                name:nil];
+
+    // Clamp to avoid log(0) - use small epsilon
+    MPSGraphTensor* epsilon = [g constantWithScalar:1e-7 dataType:dtype];
+    MPSGraphTensor* clamped = [g maximumWithPrimaryTensor:one_minus_x_sq
+                                          secondaryTensor:epsilon
+                                                     name:nil];
+
+    // log(1 - x²)
+    MPSGraphTensor* log_term = [g logarithmWithTensor:clamped name:nil];
+
+    // t = 2/(π*a) + log(1-x²)/2
+    MPSGraphTensor* half_log = [g multiplicationWithPrimaryTensor:log_term
+                                                  secondaryTensor:half
+                                                             name:nil];
+    MPSGraphTensor* t = [g additionWithPrimaryTensor:const_two_pi_a
+                                     secondaryTensor:half_log
+                                                name:nil];
+
+    // t²
+    MPSGraphTensor* t_sq = [g multiplicationWithPrimaryTensor:t secondaryTensor:t name:nil];
+
+    // log(1-x²) / a
+    MPSGraphTensor* log_over_a = [g divisionWithPrimaryTensor:log_term
+                                              secondaryTensor:const_a
+                                                         name:nil];
+
+    // t² - log(1-x²)/a
+    MPSGraphTensor* inner = [g subtractionWithPrimaryTensor:t_sq
+                                            secondaryTensor:log_over_a
+                                                       name:nil];
+
+    // sqrt(t² - log(1-x²)/a)
+    MPSGraphTensor* sqrt_inner = [g squareRootWithTensor:inner name:nil];
+
+    // sqrt(...) - t
+    MPSGraphTensor* diff = [g subtractionWithPrimaryTensor:sqrt_inner secondaryTensor:t name:nil];
+
+    // sqrt(sqrt(...) - t) = |erfinv(x)|
+    MPSGraphTensor* abs_result = [g squareRootWithTensor:diff name:nil];
+
+    // sign(x) * |result|
+    MPSGraphTensor* sign_x = [g signWithTensor:x name:nil];
+    return [g multiplicationWithPrimaryTensor:sign_x secondaryTensor:abs_result name:nil];
+}
+REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
 
 }  // namespace jax_mps
