@@ -1,7 +1,10 @@
 """Shared pytest fixtures and utilities for MPS tests."""
 
 import functools
+import os
+import re
 from collections.abc import Callable
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -119,3 +122,51 @@ def assert_cpu_mps_allclose(func: Callable):
             raise ValueError
 
     return _wrapper
+
+
+_TESTED_OPS: set[str] = set()
+
+
+def register_op_test(arg: str | Callable, *args: str) -> Callable:
+    # If the first argument is a callable, return it. If not, return a decorator that
+    # returns the function verbatim.
+    if isinstance(arg, str):
+        _TESTED_OPS.add(arg)
+        _TESTED_OPS.update(args)
+        return lambda x: x
+    elif callable(arg):
+        assert args, "Arguments cannot be empty."
+        _TESTED_OPS.update(args)
+        return arg
+    else:
+        raise ValueError
+
+
+@pytest.fixture(autouse=True, scope="session")
+def assert_all_ops_tested():
+    yield
+
+    if "CI" not in os.environ:
+        return
+
+    stablehlo_parser_cc = (
+        Path(__file__).parent.parent / "src/pjrt_plugin/stablehlo_parser.cc"
+    )
+    assert stablehlo_parser_cc.is_file()
+
+    op_names = set()
+    active = False
+    with stablehlo_parser_cc.open() as fp:
+        for line in fp:
+            if (
+                line
+                == "    static const std::unordered_set<std::string> supported = {\n"
+            ):
+                active = True
+            elif active and line.startswith("    };"):
+                break
+            elif match := re.match(r"^\s+\"(.*?)\",", line):
+                op_names.add(match.group(1))
+
+    missing = op_names - _TESTED_OPS
+    assert not missing, f"Discovered {len(missing)} untested ops: {', '.join(missing)}"
