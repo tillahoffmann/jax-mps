@@ -27,18 +27,6 @@ class LogisticRegression(nnx.Module):
             np.random.randn(16, 1).astype(np.float32),
             np.random.randn(1).astype(np.float32),
         ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_logistic_regression(request: pytest.FixtureRequest, device, x, kernel, bias):
-    """Test that logistic regression produces matching results on CPU and MPS."""
-    logits = jnp.matmul(x, kernel) + bias
-    return jax.nn.sigmoid(logits)
-
-
-@pytest.mark.parametrize(
-    "x, kernel, bias",
-    [
         (
             np.random.randn(4, 16).astype(np.float32),
             np.random.randn(16, 1).astype(np.float32),
@@ -47,8 +35,8 @@ def test_logistic_regression(request: pytest.FixtureRequest, device, x, kernel, 
     ],
 )
 @assert_cpu_mps_allclose
-def test_flax_linear_manual(request: pytest.FixtureRequest, device, x, kernel, bias):
-    """Test that a simple linear + sigmoid (like Flax Linear) produces matching results."""
+def test_linear_sigmoid(request: pytest.FixtureRequest, device, x, kernel, bias):
+    """Test that linear + sigmoid produces matching results on CPU and MPS."""
     logits = jnp.matmul(x, kernel) + bias
     return jax.nn.sigmoid(logits)
 
