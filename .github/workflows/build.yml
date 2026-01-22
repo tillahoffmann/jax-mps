@@ -21,7 +21,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          # v2: pinned to jaxlib 0.9.0 compatible LLVM/StableHLO versions
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
 
       - name: Install build tools
         if: steps.cache-deps.outputs.cache-hit != 'true'
