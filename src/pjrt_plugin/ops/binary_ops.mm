@@ -10,6 +10,7 @@ REGISTER_MLIR_BINARY_OP("stablehlo.multiply", multiplication, multiply);
 REGISTER_MLIR_BINARY_OP("stablehlo.divide", division, divide);
 REGISTER_MLIR_BINARY_OP("stablehlo.maximum", maximum, maximum);
 REGISTER_MLIR_BINARY_OP("stablehlo.minimum", minimum, minimum);
+REGISTER_MLIR_BINARY_OP("stablehlo.remainder", modulo, remainder);
 
 // Matrix multiplication (dot and dot_general)
 static MPSGraphTensor* Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {

@@ -522,3 +522,64 @@ def test_jit_binary_op(request: pytest.FixtureRequest, device, op, a, b):
 @assert_cpu_mps_allclose
 def test_nextafter(request: pytest.FixtureRequest, device, x, y):
     return jnp.nextafter(x, y)
+
+
+# Remainder operation
+@register_op_test("stablehlo.remainder")
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (
+            np.array([5.0, 10.0, -7.0, 15.0], dtype=np.float32),
+            np.array([3.0, 4.0, 3.0, 6.0], dtype=np.float32),
+        ),
+        (
+            np.random.randn(16, 16).astype(np.float32) * 10,
+            np.random.randn(16, 16).astype(np.float32) * 3 + 1,  # Avoid zero
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_remainder(request: pytest.FixtureRequest, device, a, b):
+    return jnp.remainder(a, b)
+
+
+# Reduce operations (stablehlo.reduce and stablehlo.return are used internally)
+@register_op_test("stablehlo.reduce", "stablehlo.return")
+@pytest.mark.parametrize(
+    "op, x, axis",
+    [
+        (jnp.sum, np.random.randn(16, 16).astype(np.float32), None),
+        (jnp.sum, np.random.randn(8, 4, 2).astype(np.float32), 1),
+        (jnp.prod, np.random.randn(4, 4).astype(np.float32) * 0.5 + 1, None),
+        (jnp.max, np.random.randn(16, 16).astype(np.float32), 0),
+        (jnp.min, np.random.randn(16, 16).astype(np.float32), -1),
+        (jnp.all, np.random.rand(8, 8) > 0.5, None),
+        (jnp.any, np.random.rand(8, 8) > 0.5, 0),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
+    return op(x, axis=axis)
+
+
+# Gather operation (embedding lookup pattern)
+@register_op_test("stablehlo.gather")
+@pytest.mark.parametrize(
+    "operand, indices",
+    [
+        # Simple embedding lookup
+        (
+            np.random.randn(100, 16).astype(np.float32),
+            np.array([0, 5, 10, 50, 99], dtype=np.int32),
+        ),
+        # Batched embedding lookup
+        (
+            np.random.randn(50, 8).astype(np.float32),
+            np.array([[0, 1, 2], [10, 20, 30]], dtype=np.int32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_gather(request: pytest.FixtureRequest, device, operand, indices):
+    return jnp.take(operand, indices, axis=0)

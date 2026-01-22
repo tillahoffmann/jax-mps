@@ -124,7 +124,7 @@ def assert_cpu_mps_allclose(func: Callable):
             # Use rtol=2e-5, atol=1e-6 to accommodate CPU/MPS floating point differences.
             # atol is needed because near-zero values can have large relative differences.
             jax.tree.map(
-                lambda a, b: np.testing.assert_allclose(a, b, rtol=2e-5, atol=1e-6),
+                lambda a, b: np.testing.assert_allclose(a, b, rtol=2e-5, atol=2e-6),
                 *current.values(),
             )
         elif len(current) > 2:

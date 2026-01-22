@@ -298,4 +298,80 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
 }
 REGISTER_MPS_OP("stablehlo.custom_call", Handle_custom_call);
 
+// Gather - generalized indexing operation
+// Handles embedding lookups and other gather patterns
+static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto gatherOp = mlir::dyn_cast<mlir::stablehlo::GatherOp>(op);
+    if (!gatherOp) {
+        NSLog(@"ERROR: Expected GatherOp");
+        return nullptr;
+    }
+
+    MPSGraphTensor* operand = GetInputTensor(values, op, 0);
+    MPSGraphTensor* startIndices = GetInputTensor(values, op, 1);
+    if (!operand || !startIndices)
+        return nullptr;
+
+    auto dimNumbers = gatherOp.getDimensionNumbers();
+    auto offsetDims = dimNumbers.getOffsetDims();
+    auto collapsedSliceDims = dimNumbers.getCollapsedSliceDims();
+    auto startIndexMap = dimNumbers.getStartIndexMap();
+    int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
+    auto sliceSizes = gatherOp.getSliceSizes();
+
+    // Handle common embedding lookup pattern:
+    // operand: [num_embeddings, embedding_dim]
+    // indices: [batch..., 1] where the last dim is the index vector
+    // offset_dims: [last_dim] - the embedding dimension
+    // collapsed_slice_dims: [0] - the looked-up dimension
+    // start_index_map: [0] - indices point into dim 0
+
+    NSArray<NSNumber*>* indicesShape = startIndices.shape;
+    NSUInteger indicesRank = indicesShape.count;
+
+    // Check if index_vector_dim is the last dimension and has size 1
+    // This is the common embedding pattern
+    if (indexVectorDim == (int64_t)indicesRank - 1 &&
+        [indicesShape[indicesRank - 1] integerValue] == 1 && startIndexMap.size() == 1 &&
+        collapsedSliceDims.size() == 1 && collapsedSliceDims[0] == startIndexMap[0]) {
+        int64_t gatherAxis = startIndexMap[0];
+
+        // Squeeze the index vector dimension from indices
+        // [batch..., 1] -> [batch...]
+        NSMutableArray<NSNumber*>* squeezedShape = [NSMutableArray array];
+        for (NSUInteger i = 0; i < indicesRank - 1; i++) {
+            [squeezedShape addObject:indicesShape[i]];
+        }
+
+        MPSGraphTensor* squeezedIndices = [g reshapeTensor:startIndices
+                                                 withShape:squeezedShape
+                                                      name:nil];
+
+        // Cast indices to int32 if needed (MPS gather requires int32)
+        if (squeezedIndices.dataType != MPSDataTypeInt32) {
+            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
+        }
+
+        // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
+        // This gathers slices from operand along the specified axis using indices
+        // Result shape: indices.shape + operand.shape[axis+1:]
+        // For embedding [100, 5] with indices [3]: result is [3, 5]
+        MPSGraphTensor* result = [g gatherWithUpdatesTensor:operand
+                                              indicesTensor:squeezedIndices
+                                                       axis:(NSUInteger)gatherAxis
+                                            batchDimensions:0
+                                                       name:nil];
+
+        return result;
+    }
+
+    // For now, log unsupported patterns
+    NSLog(@"ERROR: Unsupported gather pattern - offset_dims size: %lu, collapsed_slice_dims "
+          @"size: %lu, start_index_map size: %lu, index_vector_dim: %lld",
+          (unsigned long)offsetDims.size(), (unsigned long)collapsedSliceDims.size(),
+          (unsigned long)startIndexMap.size(), indexVectorDim);
+    return nullptr;
+}
+REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
+
 }  // namespace jax_mps

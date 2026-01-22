@@ -100,6 +100,14 @@ from jax import random
             },
             {"inputs": ((2, 32, 32, 8), float)},
         ),
+        (
+            nnx.Embed,
+            {
+                "num_embeddings": 100,
+                "features": 5,
+            },
+            {"inputs": ((3, 4), int)},
+        ),
     ],
 )
 @assert_cpu_mps_allclose
@@ -123,6 +131,8 @@ def test_flax_modules(
             (shape, dtype) = value
             if dtype is float:
                 call_args[key] = random.normal(rngs(), shape)
+            elif dtype is int:
+                call_args[key] = random.randint(rngs(), shape, 0, 10)
             else:
                 raise ValueError(dtype)
 
