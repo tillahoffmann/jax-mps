@@ -34,7 +34,7 @@ _MPS_WORKING, _MPS_ERROR = _check_mps_working()
 def jax_setup():
     """Set up JAX with MPS plugin."""
     if not _MPS_WORKING:
-        pytest.skip(f"MPS plugin not working: {_MPS_ERROR}")
+        pytest.fail(f"MPS plugin not working: {_MPS_ERROR}")
 
     mps.initialize()
 
