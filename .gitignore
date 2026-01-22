@@ -24,4 +24,7 @@ third_party/stablehlo/
 
 # macOS
 .DS_Store
+
+# Custom.
 playground/
+tickets/
