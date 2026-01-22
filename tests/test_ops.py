@@ -8,71 +8,8 @@ Tests verify that:
 
 import numpy as np
 import pytest
+from conftest import assert_on_mps
 from numpy.testing import assert_allclose
-
-
-def _check_mps_working():
-    """Check if MPS device is available and operations actually work."""
-    try:
-        import jax
-        import jax.numpy as jnp
-        from jax_plugins import mps
-
-        mps.initialize()
-        mps_device = jax.devices("mps")[0]
-
-        # Simple sanity check: does add actually compute?
-        a = jax.device_put(jnp.array([1.0, 2.0, 3.0]), mps_device)
-        b = jax.device_put(jnp.array([4.0, 5.0, 6.0]), mps_device)
-        result = a + b
-        expected = np.array([5.0, 7.0, 9.0])
-
-        # Check result is correct (not just returning input)
-        if not np.allclose(np.array(result), expected, rtol=1e-5):
-            return False, "MPS operations not computing correctly"
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-# Check once at module load time
-_MPS_WORKING, _MPS_ERROR = _check_mps_working()
-
-
-@pytest.fixture(scope="module")
-def jax_setup():
-    """Set up JAX with MPS plugin."""
-    if not _MPS_WORKING:
-        pytest.skip(f"MPS plugin not working: {_MPS_ERROR}")
-
-    import jax
-    import jax.numpy as jnp
-    from jax_plugins import mps
-
-    mps.initialize()
-
-    # Get devices
-    cpu_device = jax.devices("cpu")[0]
-    mps_device = jax.devices("mps")[0]
-
-    return {
-        "jax": jax,
-        "jnp": jnp,
-        "cpu": cpu_device,
-        "mps": mps_device,
-    }
-
-
-def assert_on_mps(result, mps_device):
-    """Assert that the result tensor is on the MPS device."""
-    # Get the device from the result
-    result_device = result.devices()
-    assert mps_device in result_device, (
-        f"Result is on {result_device}, expected MPS device {mps_device}. "
-        "Operation may have fallen back to CPU."
-    )
-
 
 # Binary operations
 BINARY_OPS = [
@@ -456,7 +393,3 @@ def test_jit_binary_op(jax_setup, name, op_fn):
 
     # Verify correctness
     assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
