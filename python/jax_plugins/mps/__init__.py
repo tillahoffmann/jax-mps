@@ -20,6 +20,7 @@ def _find_library():
     """
     lib_name = "libpjrt_plugin_mps.dylib"
     pkg_dir = Path(__file__).parent
+    project_root = pkg_dir.parent.parent.parent
 
     # Look in common locations
     search_paths = [
@@ -27,8 +28,6 @@ def _find_library():
         pkg_dir,
         # Installed wheel (library in lib/ subdirectory)
         pkg_dir / "lib",
-        # Development build (cmake output)
-        pkg_dir.parent.parent.parent / "build" / "lib",
         # System paths
         Path("/usr/local/lib"),
         Path("/opt/homebrew/lib"),
@@ -38,6 +37,10 @@ def _find_library():
         lib_path = path / lib_name
         if lib_path.exists():
             return str(lib_path)
+
+    # scikit-build-core editable install: build/<wheel_tag>/lib/
+    for lib_path in project_root.glob("build/*/lib/" + lib_name):
+        return str(lib_path)
 
     # Check environment variable
     if "JAX_MPS_LIBRARY_PATH" in os.environ:
