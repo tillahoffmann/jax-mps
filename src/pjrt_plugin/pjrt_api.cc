@@ -357,43 +357,49 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     MPS_LOG(" Program format: %s (size=%zu)\n", format_str.c_str(), args->program->format_size);
     MPS_LOG(" Program code size: %zu\n", args->program->code_size);
 
-    // Parse the StableHLO bytecode
-    mps::StableHLOModule stablehlo_module;
-    bool parsed = false;
+    // Parse the StableHLO bytecode - returns ParsedModule with ownership of MLIR context
+    mps::ParsedModule parsed_module;
 
     if (format_str == "mlir") {
         // MLIR bytecode format (StableHLO portable artifact)
-        parsed = mps::parseStableHLOBytecode(args->program->code, args->program->code_size,
-                                             stablehlo_module);
+        parsed_module = mps::parseStableHLOBytecode(args->program->code, args->program->code_size);
     } else if (format_str == "hlo" || format_str == "hlo_with_config") {
         // Text HLO format (legacy)
         std::string program_str(args->program->code, args->program->code_size);
-        parsed = mps::parseStableHLOText(program_str, stablehlo_module);
+        parsed_module = mps::parseStableHLOText(program_str);
     } else {
         return MakeError("Unknown program format: " + format_str);
     }
 
-    if (!parsed) {
+    if (!parsed_module.ok()) {
         return MakeError(
             "Failed to parse StableHLO program. "
             "The program may be malformed or use an unsupported format.");
     }
 
+    // Log any unsupported operations found (for debugging)
+    if (!parsed_module.unsupported_ops.empty()) {
+        MPS_LOG(" Found %zu unsupported operations:\n", parsed_module.unsupported_ops.size());
+        for (const auto& op : parsed_module.unsupported_ops) {
+            MPS_LOG("   - %s\n", op.c_str());
+        }
+    }
+
     // Check for unsupported operations discovered during parsing
-    if (!stablehlo_module.unsupported_ops.empty()) {
+    if (!parsed_module.unsupported_ops.empty()) {
         std::string unsupported_list;
-        for (size_t i = 0; i < stablehlo_module.unsupported_ops.size(); i++) {
+        for (size_t i = 0; i < parsed_module.unsupported_ops.size(); i++) {
             if (i > 0)
                 unsupported_list += ", ";
-            unsupported_list += stablehlo_module.unsupported_ops[i];
+            unsupported_list += parsed_module.unsupported_ops[i];
         }
         return MakeError("Program contains unsupported StableHLO operations: " + unsupported_list +
                          ". "
                          "The MPS backend does not yet implement these operations.");
     }
 
-    // Compile the StableHLO module to MPS executable
-    auto mps_exec = client->client->CompileStableHLO(stablehlo_module, nullptr);
+    // Compile the ParsedModule to MPS executable (takes ownership)
+    auto mps_exec = client->client->CompileStableHLO(std::move(parsed_module), nullptr);
 
     if (!mps_exec) {
         return MakeError("Failed to compile StableHLO to MPS");

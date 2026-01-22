@@ -18,23 +18,29 @@ def _find_library():
     Returns:
         Path to the library, or None if not found.
     """
+    lib_name = "libpjrt_plugin_mps.dylib"
+    pkg_dir = Path(__file__).parent
+    project_root = pkg_dir.parent.parent.parent
+
     # Look in common locations
     search_paths = [
-        # Development build
-        Path(__file__).parent.parent.parent.parent / "build" / "lib",
-        # Installed package
-        Path(__file__).parent / "lib",
+        # Editable install (scikit-build puts library in package dir)
+        pkg_dir,
+        # Installed wheel (library in lib/ subdirectory)
+        pkg_dir / "lib",
         # System paths
         Path("/usr/local/lib"),
         Path("/opt/homebrew/lib"),
     ]
 
-    lib_name = "libpjrt_plugin_mps.dylib"
-
     for path in search_paths:
         lib_path = path / lib_name
         if lib_path.exists():
             return str(lib_path)
+
+    # scikit-build-core editable install: build/<wheel_tag>/lib/
+    for lib_path in project_root.glob("build/*/lib/" + lib_name):
+        return str(lib_path)
 
     # Check environment variable
     if "JAX_MPS_LIBRARY_PATH" in os.environ:
@@ -69,10 +75,10 @@ def initialize():
         raise MPSPluginError(
             "Could not find libpjrt_plugin_mps.dylib. "
             "Searched paths:\n"
-            "  - build/lib/ (development)\n"
-            "  - python/jax_plugins/mps/lib/ (installed)\n"
-            "  - /usr/local/lib/\n"
-            "  - /opt/homebrew/lib/\n"
+            "  - <package>/libpjrt_plugin_mps.dylib (editable install)\n"
+            "  - <package>/lib/ (wheel install)\n"
+            "  - build/lib/ (cmake build)\n"
+            "  - /usr/local/lib/, /opt/homebrew/lib/\n"
             "You can also set JAX_MPS_LIBRARY_PATH environment variable."
         )
 

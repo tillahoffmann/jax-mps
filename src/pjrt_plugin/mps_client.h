@@ -14,7 +14,7 @@ typedef void* MPSGraph;
 #endif
 
 namespace mps {
-struct StableHLOModule;
+struct ParsedModule;
 }
 
 namespace jax_mps {
@@ -53,9 +53,8 @@ public:
                                                     const std::vector<int64_t>& dims,
                                                     MpsDevice* device);
 
-    // Compilation
-    std::unique_ptr<MpsExecutable> CompileStableHLO(const mps::StableHLOModule& module,
-                                                    MpsDevice* device);
+    // Compilation - takes ownership of ParsedModule
+    std::unique_ptr<MpsExecutable> CompileStableHLO(mps::ParsedModule module, MpsDevice* device);
 
     // Internal: get Metal device
     void* metal_device() const {

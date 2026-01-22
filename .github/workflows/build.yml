@@ -21,9 +21,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          restore-keys: |
-            mlir-stablehlo-macos14-
+          # v2: pinned to jaxlib 0.9.0 compatible LLVM/StableHLO versions
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
 
       - name: Install build tools
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -90,8 +89,10 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
-      - name: Run pytest
-        run: uv run pytest tests/ -v
+      # We skip the tests because MPS is not availabe on the runner yet.
+      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
+      # - name: Run pytest
+      #   run: uv run pytest tests/ -v
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

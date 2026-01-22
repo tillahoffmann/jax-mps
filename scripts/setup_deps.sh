@@ -3,7 +3,12 @@
 # These are built once and installed to a prefix directory.
 #
 # Usage:
-#   ./scripts/setup_deps.sh [--prefix /path/to/install]
+#   ./scripts/setup_deps.sh [--prefix /path/to/install] [--force]
+#
+# Options:
+#   --prefix PATH   Install location (default: $HOME/.local/jax-mps-deps)
+#   --jobs N        Number of parallel jobs (default: number of CPUs)
+#   --force         Force rebuild even if already installed
 #
 # Default prefix: $HOME/.local/jax-mps-deps
 
@@ -14,7 +19,13 @@ PREFIX="${PREFIX:-$HOME/.local/jax-mps-deps}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}"
 BUILD_DIR="${BUILD_DIR:-/tmp/jax-mps-deps-build}"
 
+# Pin to versions matching jaxlib 0.9.0 for bytecode compatibility
+# These are extracted from XLA commit bb760b047bdbfeff962f0366ad5cc782c98657e0
+STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-127d2f238010589ac96f2f402a27afc9dccbb7ab}"
+LLVM_COMMIT_OVERRIDE="${LLVM_COMMIT_OVERRIDE:-f6d0a512972a74ef100723b9526a6a0ddb23f894}"
+
 # Parse arguments
+FORCE_REBUILD=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --prefix)
@@ -25,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             JOBS="$2"
             shift 2
             ;;
+        --force)
+            FORCE_REBUILD=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -32,10 +47,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# If force rebuild, remove existing installations
+if [ "$FORCE_REBUILD" = true ]; then
+    echo "=== Force rebuild: removing existing installations ==="
+    rm -rf "$PREFIX/lib/cmake/mlir" "$PREFIX/lib/cmake/llvm"
+    rm -f "$PREFIX/lib/libStablehloOps.a"
+    rm -rf "$BUILD_DIR/llvm-build" "$BUILD_DIR/stablehlo-build"
+fi
+
 echo "=== jax-mps dependency setup ==="
-echo "Prefix:    $PREFIX"
-echo "Jobs:      $JOBS"
-echo "Build dir: $BUILD_DIR"
+echo "Prefix:       $PREFIX"
+echo "Jobs:         $JOBS"
+echo "Build dir:    $BUILD_DIR"
+echo "StableHLO:    $STABLEHLO_COMMIT"
+echo "LLVM:         $LLVM_COMMIT_OVERRIDE"
+echo "Force:        $FORCE_REBUILD"
 echo ""
 
 mkdir -p "$PREFIX"
@@ -50,19 +76,36 @@ for tool in cmake ninja git; do
     fi
 done
 
-# Clone StableHLO (shallow clone - just need latest main)
+# Clone StableHLO at pinned commit for jaxlib compatibility
 STABLEHLO_DIR="$BUILD_DIR/stablehlo"
 if [ ! -d "$STABLEHLO_DIR" ]; then
-    echo "=== Cloning StableHLO (shallow) ==="
-    git clone --depth 1 https://github.com/openxla/stablehlo.git "$STABLEHLO_DIR"
+    echo "=== Cloning StableHLO at commit $STABLEHLO_COMMIT ==="
+    mkdir -p "$STABLEHLO_DIR"
+    cd "$STABLEHLO_DIR"
+    git init
+    git remote add origin https://github.com/openxla/stablehlo.git
+    git fetch --depth 1 origin "$STABLEHLO_COMMIT"
+    git checkout FETCH_HEAD
 else
-    echo "=== Updating StableHLO ==="
-    cd "$STABLEHLO_DIR" && git fetch --depth 1 origin main && git checkout origin/main
+    echo "=== Checking StableHLO commit ==="
+    cd "$STABLEHLO_DIR"
+    CURRENT_COMMIT=$(git rev-parse HEAD)
+    if [ "$CURRENT_COMMIT" != "$STABLEHLO_COMMIT" ]; then
+        echo "=== Updating StableHLO to commit $STABLEHLO_COMMIT ==="
+        git fetch --depth 1 origin "$STABLEHLO_COMMIT"
+        git checkout FETCH_HEAD
+    fi
 fi
 
 cd "$STABLEHLO_DIR"
-LLVM_COMMIT=$(cat build_tools/llvm_version.txt)
-echo "StableHLO requires LLVM commit: $LLVM_COMMIT"
+# Use LLVM commit override if set, otherwise read from StableHLO
+if [ -n "$LLVM_COMMIT_OVERRIDE" ]; then
+    LLVM_COMMIT="$LLVM_COMMIT_OVERRIDE"
+    echo "Using LLVM commit override: $LLVM_COMMIT"
+else
+    LLVM_COMMIT=$(cat build_tools/llvm_version.txt)
+    echo "StableHLO requires LLVM commit: $LLVM_COMMIT"
+fi
 
 # Clone LLVM - fetch only the specific commit we need
 LLVM_DIR="$BUILD_DIR/llvm-project"
