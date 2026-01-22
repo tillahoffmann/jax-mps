@@ -80,7 +80,7 @@ static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap&
 }
 REGISTER_MPS_OP("stablehlo.select", Handle_select);
 
-// Clamp operation: clamp(min, x, max) = min(max(min, x), max)
+// Clamp operation: clamp(min, x, max)
 static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
                                     NSArray<NSNumber*>*) {
     MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
@@ -89,9 +89,7 @@ static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& 
     if (!minVal || !operand || !maxVal)
         return nullptr;
 
-    // clamp = min(max(minVal, operand), maxVal)
-    MPSGraphTensor* clamped = [g maximumWithPrimaryTensor:minVal secondaryTensor:operand name:nil];
-    return [g minimumWithPrimaryTensor:clamped secondaryTensor:maxVal name:nil];
+    return [g clampWithTensor:operand minValueTensor:minVal maxValueTensor:maxVal name:nil];
 }
 REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 
