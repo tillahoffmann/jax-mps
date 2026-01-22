@@ -20,47 +20,24 @@ static bool isBooleanResult(mlir::Operation* op) {
     return false;
 }
 
-// AND - use logical for booleans, bitwise for integers
-static MPSGraphTensor* Handle_and(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                  NSArray<NSNumber*>*) {
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
-    if (!lhs || !rhs)
-        return nullptr;
-    if (isBooleanResult(op)) {
-        return [g logicalANDWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    }
-    return [g bitwiseANDWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-}
-REGISTER_MPS_OP("stablehlo.and", Handle_and);
+// Macro for logical/bitwise operations (AND, OR, XOR) that dispatch based on boolean type
+#define REGISTER_LOGICAL_BITWISE_OP(mlir_op_name, logical_method, bitwise_method, reg_suffix)      \
+    static MPSGraphTensor* Handle_##reg_suffix(MPSGraph* g, mlir::Operation* op, ValueMap& values, \
+                                               NSArray<NSNumber*>*) {                              \
+        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                       \
+        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                       \
+        if (!lhs || !rhs)                                                                          \
+            return nullptr;                                                                        \
+        if (isBooleanResult(op)) {                                                                 \
+            return [g logical_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];         \
+        }                                                                                          \
+        return [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];             \
+    }                                                                                              \
+    REGISTER_MPS_OP(mlir_op_name, Handle_##reg_suffix)
 
-// OR - use logical for booleans, bitwise for integers
-static MPSGraphTensor* Handle_or(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                 NSArray<NSNumber*>*) {
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
-    if (!lhs || !rhs)
-        return nullptr;
-    if (isBooleanResult(op)) {
-        return [g logicalORWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    }
-    return [g bitwiseORWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-}
-REGISTER_MPS_OP("stablehlo.or", Handle_or);
-
-// XOR - use logical for booleans, bitwise for integers
-static MPSGraphTensor* Handle_xor(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                  NSArray<NSNumber*>*) {
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
-    if (!lhs || !rhs)
-        return nullptr;
-    if (isBooleanResult(op)) {
-        return [g logicalXORWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-    }
-    return [g bitwiseXORWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-}
-REGISTER_MPS_OP("stablehlo.xor", Handle_xor);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, and);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.or", logicalOR, bitwiseOR, or);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.xor", logicalXOR, bitwiseXOR, xor);
 
 // Helper to get bit width from tensor's element type
 static int getBitWidth(mlir::Operation* op) {
@@ -75,9 +52,9 @@ static int getBitWidth(mlir::Operation* op) {
     return 0;
 }
 
-// Shift left - when shift >= bit_width, result should be 0
-static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                         NSArray<NSNumber*>*) {
+// Shared helper for shift operations with overflow handling
+static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                     bool isLeftShift) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     MPSGraphTensor* shiftAmount = GetInputTensor(values, op, 1);
     if (!input || !shiftAmount)
@@ -88,66 +65,37 @@ static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, Value
         return nullptr;
 
     // Perform the shift
-    MPSGraphTensor* shiftedResult = [g bitwiseLeftShiftWithPrimaryTensor:input
-                                                         secondaryTensor:shiftAmount
-                                                                    name:nil];
+    MPSGraphTensor* shiftedResult = isLeftShift ? [g bitwiseLeftShiftWithPrimaryTensor:input
+                                                                       secondaryTensor:shiftAmount
+                                                                                  name:nil]
+                                                : [g bitwiseRightShiftWithPrimaryTensor:input
+                                                                        secondaryTensor:shiftAmount
+                                                                                   name:nil];
 
-    // Create constant for bit width comparison
+    // Handle overflow: when shift >= bit_width, result should be 0
     MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
                                                      shape:@[@1]
                                                   dataType:shiftAmount.dataType];
-
-    // Check if shift >= bit_width
     MPSGraphTensor* overflowMask = [g greaterThanOrEqualToWithPrimaryTensor:shiftAmount
                                                             secondaryTensor:bitWidthTensor
                                                                        name:nil];
-
-    // Create zero tensor
     MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
 
-    // Select: if overflow, return 0; else return shifted result
     return [g selectWithPredicateTensor:overflowMask
                     truePredicateTensor:zeroTensor
                    falsePredicateTensor:shiftedResult
                                    name:nil];
 }
+
+static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                         NSArray<NSNumber*>*) {
+    return HandleShiftOp(g, op, values, /*isLeftShift=*/true);
+}
 REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
 
-// Shift right logical - when shift >= bit_width, result should be 0
 static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
                                                   ValueMap& values, NSArray<NSNumber*>*) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPSGraphTensor* shiftAmount = GetInputTensor(values, op, 1);
-    if (!input || !shiftAmount)
-        return nullptr;
-
-    int bitWidth = getBitWidth(op);
-    if (bitWidth == 0)
-        return nullptr;
-
-    // Perform the shift
-    MPSGraphTensor* shiftedResult = [g bitwiseRightShiftWithPrimaryTensor:input
-                                                          secondaryTensor:shiftAmount
-                                                                     name:nil];
-
-    // Create constant for bit width comparison
-    MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
-                                                     shape:@[@1]
-                                                  dataType:shiftAmount.dataType];
-
-    // Check if shift >= bit_width
-    MPSGraphTensor* overflowMask = [g greaterThanOrEqualToWithPrimaryTensor:shiftAmount
-                                                            secondaryTensor:bitWidthTensor
-                                                                       name:nil];
-
-    // Create zero tensor
-    MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
-
-    // Select: if overflow, return 0; else return shifted result
-    return [g selectWithPredicateTensor:overflowMask
-                    truePredicateTensor:zeroTensor
-                   falsePredicateTensor:shiftedResult
-                                   name:nil];
+    return HandleShiftOp(g, op, values, /*isLeftShift=*/false);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
 
