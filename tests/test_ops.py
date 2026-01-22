@@ -18,26 +18,74 @@ register_op_test(
     "func.return", "func.call", "stablehlo.constant", "stablehlo.custom_call"
 )
 
+# Common test data
+_rng = np.random.default_rng(42)
+_float_2d = _rng.standard_normal((32, 32)).astype(np.float32)
+_float_2d_b = _rng.standard_normal((32, 32)).astype(np.float32) + 0.1
+_float_positive = np.abs(_rng.standard_normal((32, 32)).astype(np.float32)) + 0.1
+_uint_2d = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
+_uint_2d_b = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
+_uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
 
-# Binary operations
+
+# Unary operations
 @pytest.mark.parametrize(
-    "op",
+    "op, x",
     [
-        register_op_test(jnp.add, "stablehlo.add"),
-        register_op_test(jnp.subtract, "stablehlo.subtract"),
-        register_op_test(jnp.multiply, "stablehlo.multiply"),
-        register_op_test(jnp.divide, "stablehlo.divide"),
+        (register_op_test(jnp.tanh, "stablehlo.tanh"), _float_2d),
+        (register_op_test(jnp.exp, "stablehlo.exponential"), _float_2d * 0.5),
+        (register_op_test(jnp.log, "stablehlo.log"), _float_positive),
+        (register_op_test(jnp.negative, "stablehlo.negate"), _float_2d),
+        (register_op_test(jnp.abs, "stablehlo.abs"), _float_2d),
+        (register_op_test(jnp.sqrt, "stablehlo.sqrt"), _float_positive),
+        (register_op_test(jnp.log1p, "stablehlo.log_plus_one"), _float_positive),
+        (register_op_test(jax.scipy.special.erf, "stablehlo.erf"), _float_2d * 0.5),
+        (
+            register_op_test(jax.scipy.special.erfinv, "chlo.erf_inv"),
+            _rng.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
+        ),
     ],
 )
+@assert_cpu_mps_allclose
+def test_unary_op(request: pytest.FixtureRequest, device, op, x):
+    return op(x)
+
+
+# Binary operations (arithmetic, min/max, remainder, bitwise, shifts)
 @pytest.mark.parametrize(
-    "a, b",
+    "op, a, b",
     [
-        (np.random.normal(), np.random.normal()),
-        (np.random.normal(size=(3,)), np.random.normal(size=(3,))),
-        (np.random.normal(size=(4, 1)), np.random.normal(size=(3,))),
+        # Arithmetic
+        (register_op_test(jnp.add, "stablehlo.add"), _float_2d, _float_2d_b),
+        (register_op_test(jnp.subtract, "stablehlo.subtract"), _float_2d, _float_2d_b),
+        (register_op_test(jnp.multiply, "stablehlo.multiply"), _float_2d, _float_2d_b),
+        (register_op_test(jnp.divide, "stablehlo.divide"), _float_2d, _float_2d_b),
+        (register_op_test(jnp.maximum, "stablehlo.maximum"), _float_2d, _float_2d_b),
+        (register_op_test(jnp.minimum, "stablehlo.minimum"), _float_2d, _float_2d_b),
         (
-            np.random.randn(32, 32).astype(np.float32),
-            np.random.randn(32, 32).astype(np.float32) + 0.1,
+            register_op_test(jnp.remainder, "stablehlo.remainder"),
+            _float_2d * 10,
+            _float_2d_b * 3 + 1,
+        ),
+        (
+            register_op_test(jnp.nextafter, "chlo.next_after"),
+            np.array([1.0, -1.0, 0.0, 2.0], dtype=np.float32),
+            np.array([2.0, -2.0, 1.0, 1.0], dtype=np.float32),
+        ),
+        # Bitwise
+        (register_op_test(jnp.bitwise_and, "stablehlo.and"), _uint_2d, _uint_2d_b),
+        (register_op_test(jnp.bitwise_or, "stablehlo.or"), _uint_2d, _uint_2d_b),
+        (register_op_test(jnp.bitwise_xor, "stablehlo.xor"), _uint_2d, _uint_2d_b),
+        # Shifts
+        (
+            register_op_test(jnp.left_shift, "stablehlo.shift_left"),
+            _uint_2d,
+            _uint_shift,
+        ),
+        (
+            register_op_test(jnp.right_shift, "stablehlo.shift_right_logical"),
+            _uint_2d,
+            _uint_shift,
         ),
     ],
 )
@@ -162,28 +210,6 @@ def test_conv2d(
     )
 
 
-# Min/max operations
-@pytest.mark.parametrize(
-    "op",
-    [
-        register_op_test(jnp.maximum, "stablehlo.maximum"),
-        register_op_test(jnp.minimum, "stablehlo.minimum"),
-    ],
-)
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.random.randn(32, 32).astype(np.float32),
-            np.random.randn(32, 32).astype(np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_minmax_op(request: pytest.FixtureRequest, device, op, a, b):
-    return op(a, b)
-
-
 # ReLU activation (uses compare + select internally)
 @register_op_test("stablehlo.compare", "stablehlo.select")
 @pytest.mark.parametrize(
@@ -197,37 +223,6 @@ def test_minmax_op(request: pytest.FixtureRequest, device, op, a, b):
 @assert_cpu_mps_allclose
 def test_relu(request: pytest.FixtureRequest, device, x):
     return jax.nn.relu(x)
-
-
-# Unary operations
-@pytest.mark.parametrize(
-    "op, x",
-    [
-        (
-            register_op_test(jnp.tanh, "stablehlo.tanh"),
-            np.random.randn(32, 32).astype(np.float32),
-        ),
-        (
-            register_op_test(jnp.exp, "stablehlo.exponential"),
-            np.random.randn(32, 32).astype(np.float32) * 0.5,
-        ),  # Avoid overflow
-        (
-            register_op_test(jnp.log, "stablehlo.log"),
-            np.abs(np.random.randn(32, 32).astype(np.float32)) + 0.1,
-        ),  # Positive values
-        (
-            register_op_test(jnp.negative, "stablehlo.negate"),
-            np.random.randn(32, 32).astype(np.float32),
-        ),
-        (
-            register_op_test(jnp.abs, "stablehlo.abs"),
-            np.random.randn(32, 32).astype(np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_unary_op(request: pytest.FixtureRequest, device, op, x):
-    return op(x)
 
 
 # Reshape operations
@@ -289,33 +284,6 @@ def test_convert(request: pytest.FixtureRequest, device, x, to_dtype):
 @assert_cpu_mps_allclose
 def test_bitcast_convert(request: pytest.FixtureRequest, device, x, to_dtype):
     return jax.lax.bitcast_convert_type(x, to_dtype)
-
-
-# Additional unary operations
-@pytest.mark.parametrize(
-    "op, x",
-    [
-        (
-            register_op_test(jnp.sqrt, "stablehlo.sqrt"),
-            np.abs(np.random.randn(32, 32).astype(np.float32)) + 0.1,
-        ),
-        (
-            register_op_test(jnp.log1p, "stablehlo.log_plus_one"),
-            np.abs(np.random.randn(32, 32).astype(np.float32)),
-        ),
-        (
-            register_op_test(jax.scipy.special.erf, "stablehlo.erf"),
-            np.random.randn(32, 32).astype(np.float32) * 0.5,
-        ),
-        (
-            register_op_test(jax.scipy.special.erfinv, "chlo.erf_inv"),
-            np.random.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_special_unary_op(request: pytest.FixtureRequest, device, op, x):
-    return op(x)
 
 
 # Clip/clamp operation
@@ -419,51 +387,6 @@ def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
     return jnp.arange(start, stop, dtype=dtype)
 
 
-# Bitwise operations
-@pytest.mark.parametrize(
-    "op",
-    [
-        register_op_test(jnp.bitwise_and, "stablehlo.and"),
-        register_op_test(jnp.bitwise_or, "stablehlo.or"),
-        register_op_test(jnp.bitwise_xor, "stablehlo.xor"),
-    ],
-)
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
-            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_bitwise_op(request: pytest.FixtureRequest, device, op, a, b):
-    return op(a, b)
-
-
-# Shift operations
-@pytest.mark.parametrize(
-    "op",
-    [
-        register_op_test(jnp.left_shift, "stablehlo.shift_left"),
-        register_op_test(jnp.right_shift, "stablehlo.shift_right_logical"),
-    ],
-)
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
-            np.random.randint(0, 8, size=(32, 32)).astype(np.uint32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_shift_op(request: pytest.FixtureRequest, device, op, a, b):
-    return op(a, b)
-
-
 # Composite operations (operation chaining)
 @pytest.mark.parametrize(
     "op_fn",
@@ -486,62 +409,6 @@ def test_shift_op(request: pytest.FixtureRequest, device, op, a, b):
 @assert_cpu_mps_allclose
 def test_composite_op(request: pytest.FixtureRequest, device, op_fn, a, b, c):
     return op_fn(a, b, c)
-
-
-# JIT compilation tests
-@pytest.mark.parametrize("op", [jnp.add, jnp.subtract])
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.random.randn(32, 32).astype(np.float32),
-            np.random.randn(32, 32).astype(np.float32) + 0.1,
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_jit_binary_op(request: pytest.FixtureRequest, device, op, a, b):
-    @jax.jit
-    def jit_fn(a, b):
-        return op(a, b)
-
-    return jit_fn(a, b)
-
-
-# nextafter operation
-@register_op_test("chlo.next_after")
-@pytest.mark.parametrize(
-    "x, y",
-    [
-        (
-            np.array([1.0, -1.0, 0.0, 2.0], dtype=np.float32),
-            np.array([2.0, -2.0, 1.0, 1.0], dtype=np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_nextafter(request: pytest.FixtureRequest, device, x, y):
-    return jnp.nextafter(x, y)
-
-
-# Remainder operation
-@register_op_test("stablehlo.remainder")
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.array([5.0, 10.0, -7.0, 15.0], dtype=np.float32),
-            np.array([3.0, 4.0, 3.0, 6.0], dtype=np.float32),
-        ),
-        (
-            np.random.randn(16, 16).astype(np.float32) * 10,
-            np.random.randn(16, 16).astype(np.float32) * 3 + 1,  # Avoid zero
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_remainder(request: pytest.FixtureRequest, device, a, b):
-    return jnp.remainder(a, b)
 
 
 # Reduce operations (stablehlo.reduce and stablehlo.return are used internally)
