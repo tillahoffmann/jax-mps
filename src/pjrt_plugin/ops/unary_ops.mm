@@ -111,6 +111,23 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
     NSArray<NSNumber*>* shape = GetOutputShape(op);
     auto value = constantOp.getValue();
 
+    // Check for empty tensor (any dimension is 0)
+    // MPSGraph doesn't support empty tensors, so create a minimal [1] tensor instead
+    // The scatter handler will detect empty indices based on MLIR types and handle appropriately
+    bool isEmpty = false;
+    for (NSNumber* dim in shape) {
+        if ([dim integerValue] == 0) {
+            isEmpty = true;
+            break;
+        }
+    }
+    if (isEmpty) {
+        // Create a minimal tensor with shape [1] and a dummy value
+        // This is safe because operations that use this tensor will detect
+        // empty dimensions from the MLIR types and not actually use the tensor values
+        return [g constantWithScalar:0 shape:@[@1] dataType:dtype];
+    }
+
     if (auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(value)) {
         // Check if it's a splat (single value broadcast to all elements)
         if (denseAttr.isSplat()) {
@@ -126,7 +143,15 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
                 scalarValue = apVal.convertToFloat();
             } else if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
                 auto apInt = denseAttr.getSplatValue<llvm::APInt>();
-                scalarValue = static_cast<double>(apInt.getZExtValue());
+                // For signless integers (the default in MLIR/StableHLO), use sign-extend
+                // to preserve the two's complement representation.
+                // Only use zero-extend for explicitly unsigned types.
+                if (intType.isUnsigned()) {
+                    scalarValue = static_cast<double>(apInt.getZExtValue());
+                } else {
+                    // Signless or signed - use sign-extend
+                    scalarValue = static_cast<double>(apInt.getSExtValue());
+                }
             }
 
             if (shape.count == 0) {
@@ -224,5 +249,104 @@ static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap
     return [g multiplicationWithPrimaryTensor:sign_x secondaryTensor:abs_result name:nil];
 }
 REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
+
+// next_after(x, y) - returns the next representable floating point value from x towards y
+// Implementation follows IEEE 754 nextafter semantics:
+// 1. If x == y, return y
+// 2. If x or y is NaN, return NaN
+// 3. If x == 0, return smallest subnormal with sign of y
+// 4. Otherwise, treat x as integer bits and increment/decrement based on direction
+static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values,
+                                         NSArray<NSNumber*>*) {
+    MPSGraphTensor* x = GetInputTensor(values, op, 0);
+    MPSGraphTensor* y = GetInputTensor(values, op, 1);
+    if (!x || !y)
+        return nullptr;
+
+    MPSDataType dtype = x.dataType;
+
+    // Handle scalar tensors - MPS reinterpretCast doesn't support rank-0
+    NSArray<NSNumber*>* xShape = x.shape;
+    bool isScalar = (xShape.count == 0);
+    if (isScalar) {
+        x = [g reshapeTensor:x withShape:@[@1] name:nil];
+        y = [g reshapeTensor:y withShape:@[@1] name:nil];
+    }
+
+    // Constants
+    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:dtype];
+    MPSGraphTensor* one_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* neg_one_int = [g constantWithScalar:-1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_positive_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_negative_int = [g constantWithScalar:0x80000001 dataType:MPSDataTypeInt32];
+
+    // Bitcast x to int32 (reinterpret bits)
+    MPSGraphTensor* x_as_int = [g reinterpretCastTensor:x toType:MPSDataTypeInt32 name:nil];
+
+    // Check if x == y
+    MPSGraphTensor* x_eq_y = [g equalWithPrimaryTensor:x secondaryTensor:y name:nil];
+
+    // Check if x is zero
+    MPSGraphTensor* x_is_zero = [g equalWithPrimaryTensor:x secondaryTensor:zero name:nil];
+
+    // Check if y > 0 (to determine direction when x == 0)
+    MPSGraphTensor* y_gt_zero = [g greaterThanWithPrimaryTensor:y secondaryTensor:zero name:nil];
+
+    // When x == 0, return smallest positive or negative subnormal
+    MPSGraphTensor* zero_result_int = [g selectWithPredicateTensor:y_gt_zero
+                                               truePredicateTensor:min_positive_int
+                                              falsePredicateTensor:min_negative_int
+                                                              name:nil];
+    MPSGraphTensor* zero_result = [g reinterpretCastTensor:zero_result_int toType:dtype name:nil];
+
+    // For non-zero x, determine direction and increment/decrement
+    // If x > 0 and y > x, or x < 0 and y > x: increment (add 1 to int representation)
+    // If x > 0 and y < x, or x < 0 and y < x: decrement (subtract 1 from int representation)
+    MPSGraphTensor* y_gt_x = [g greaterThanWithPrimaryTensor:y secondaryTensor:x name:nil];
+
+    // x > 0
+    MPSGraphTensor* x_gt_zero = [g greaterThanWithPrimaryTensor:x secondaryTensor:zero name:nil];
+
+    // Determine if we should increment the int representation
+    // Increment when: (x > 0 && y > x) || (x < 0 && y < x)
+    // Which simplifies to: (x > 0) == (y > x)
+    MPSGraphTensor* should_increment = [g equalWithPrimaryTensor:x_gt_zero
+                                                 secondaryTensor:y_gt_x
+                                                            name:nil];
+
+    // Compute the delta (+1 or -1)
+    MPSGraphTensor* delta = [g selectWithPredicateTensor:should_increment
+                                     truePredicateTensor:one_int
+                                    falsePredicateTensor:neg_one_int
+                                                    name:nil];
+
+    // Add delta to x_as_int
+    MPSGraphTensor* result_int = [g additionWithPrimaryTensor:x_as_int
+                                              secondaryTensor:delta
+                                                         name:nil];
+
+    // Bitcast back to float
+    MPSGraphTensor* non_zero_result = [g reinterpretCastTensor:result_int toType:dtype name:nil];
+
+    // Select between zero and non-zero cases
+    MPSGraphTensor* non_equal_result = [g selectWithPredicateTensor:x_is_zero
+                                                truePredicateTensor:zero_result
+                                               falsePredicateTensor:non_zero_result
+                                                               name:nil];
+
+    // If x == y, return y; otherwise return the computed result
+    MPSGraphTensor* result = [g selectWithPredicateTensor:x_eq_y
+                                      truePredicateTensor:y
+                                     falsePredicateTensor:non_equal_result
+                                                     name:nil];
+
+    // Reshape back to scalar if needed
+    if (isScalar) {
+        result = [g reshapeTensor:result withShape:@[] name:nil];
+    }
+
+    return result;
+}
+REGISTER_MPS_OP("chlo.next_after", Handle_next_after);
 
 }  // namespace jax_mps

@@ -1,11 +1,52 @@
 """Tests for Flax NNX models comparing CPU vs MPS (Metal) results."""
 
-import flax.nnx as nnx
+from collections.abc import Callable
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import assert_cpu_mps_allclose
+from flax import nnx
+from jax import random
+
+
+@pytest.mark.parametrize(
+    "cls, args, dtypes_shapes",
+    [
+        (
+            nnx.Linear,
+            {"in_features": 3, "out_features": 4},
+            {"inputs": ((10, 3), float)},
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_flax_modules(
+    request,
+    device,
+    cls: type[nnx.Module],
+    args: dict[str, Any],
+    dtypes_shapes: dict[str, tuple[tuple[int], Any] | Callable],
+):
+    rngs = nnx.Rngs(42)
+    args = args.copy()
+    args.setdefault("rngs", rngs)
+    module = cls(**args)
+
+    call_args = {}
+    for key, value in dtypes_shapes.items():
+        if isinstance(value, Callable):
+            raise NotImplementedError
+        else:
+            (shape, dtype) = value
+            if dtype is float:
+                call_args[key] = random.normal(rngs(), shape)
+            else:
+                raise ValueError(dtype)
+
+    return module(**call_args)
 
 
 class LogisticRegression(nnx.Module):

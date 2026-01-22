@@ -73,6 +73,7 @@ const std::unordered_set<std::string>& getSupportedOps() {
         "stablehlo.custom_call",
         // CHLO (Client HLO) ops
         "chlo.erf_inv",
+        "chlo.next_after",
         // Control flow
         "func.return",
         "func.call",

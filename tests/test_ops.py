@@ -416,3 +416,19 @@ def test_jit_binary_op(request: pytest.FixtureRequest, device, op, a, b):
         return op(a, b)
 
     return jit_fn(a, b)
+
+
+# nextafter operation
+@register_op_test("chlo.next_after")
+@pytest.mark.parametrize(
+    "x, y",
+    [
+        (
+            np.array([1.0, -1.0, 0.0, 2.0], dtype=np.float32),
+            np.array([2.0, -2.0, 1.0, 1.0], dtype=np.float32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_nextafter(request: pytest.FixtureRequest, device, x, y):
+    return jnp.nextafter(x, y)
