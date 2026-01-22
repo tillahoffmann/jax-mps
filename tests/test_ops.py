@@ -6,9 +6,14 @@ Tests verify that:
 2. Operations actually run on the MPS device (not CPU fallback)
 """
 
+import functools
+from collections.abc import Callable
+
+import jax
 import numpy as np
 import pytest
 from conftest import assert_on_mps
+from jax import numpy as jnp
 from numpy.testing import assert_allclose
 
 # Binary operations
@@ -393,3 +398,66 @@ def test_jit_binary_op(jax_setup, name, op_fn):
 
     # Verify correctness
     assert_allclose(np.array(result), expected, rtol=1e-5, atol=1e-5)
+
+
+def assert_cpu_mps_allclose(func: Callable):
+    values = {}
+
+    @functools.wraps(func)
+    def _wrapper(request: pytest.FixtureRequest, device, *args, **kwargs) -> None:
+        # Prepare all the keys and validate current state.
+        assert f"[{device.platform}-" in request.node.name
+        key = request.node.name.replace(f"[{device.platform}-", "[*-")
+        current = values.setdefault(key, {})
+        assert device.platform not in current, (
+            f"Result for key '{key}' on platform '{device.platform}' already exists."
+        )
+
+        # Move tensors to the right device and evaluate.
+        args = [
+            jax.device_put(x, device) if isinstance(x, (np.ndarray, int, float)) else x
+            for x in args
+        ]
+        kwargs = {
+            key: jax.device_put(x, device)
+            if isinstance(x, (np.ndarray, int, float))
+            else x
+            for key, x in kwargs.items()
+        }
+        result = func(request, device, *args, **kwargs)
+        assert result is not None, f"Decorated function {func} must return a value."
+        assert result.device == device, (
+            f"Result is on device '{result.device}'; expected '{device}'."
+        )
+
+        # Store results and verify.
+        current[device.platform] = result
+        if len(current) == 2:
+            jax.tree.map(np.testing.assert_allclose, *current.values())
+        elif len(current) > 2:
+            raise ValueError
+
+    return _wrapper
+
+
+@pytest.fixture(params=["cpu", "mps"])
+def device(request):
+    import jax
+    from jax_plugins import mps
+
+    mps.initialize()
+    return jax.devices(request.param)[0]
+
+
+@pytest.mark.parametrize("op", [jnp.add, jnp.subtract, jnp.multiply, jnp.divide])
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (np.random.normal(), np.random.normal()),
+        (np.random.normal(size=(3,)), np.random.normal(size=(3,))),
+        (np.random.normal(size=(4, 1)), np.random.normal(size=(3,))),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_binary_ops_allclose(request: pytest.FixtureRequest, device, op, a, b):
+    return op(a, b)
