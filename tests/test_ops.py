@@ -7,6 +7,7 @@ Tests verify that:
 """
 
 import jax
+import jax.scipy.special
 import numpy as np
 import pytest
 from conftest import assert_cpu_mps_allclose
@@ -146,6 +147,138 @@ def test_broadcast(request: pytest.FixtureRequest, device, x, output_shape):
 @assert_cpu_mps_allclose
 def test_convert(request: pytest.FixtureRequest, device, x, to_dtype):
     return x.astype(to_dtype)
+
+
+# Additional unary operations
+@pytest.mark.parametrize(
+    "op, x",
+    [
+        (jnp.sqrt, np.abs(np.random.randn(32, 32).astype(np.float32)) + 0.1),
+        (jnp.log1p, np.abs(np.random.randn(32, 32).astype(np.float32))),
+        (jax.scipy.special.erf, np.random.randn(32, 32).astype(np.float32) * 0.5),
+        (
+            jax.scipy.special.erfinv,
+            np.random.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_special_unary_op(request: pytest.FixtureRequest, device, op, x):
+    return op(x)
+
+
+# Clip/clamp operation
+@pytest.mark.parametrize(
+    "x, a_min, a_max",
+    [
+        (np.random.randn(32, 32).astype(np.float32), -0.5, 0.5),
+        (np.random.randn(16, 16).astype(np.float32), 0.0, 1.0),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
+    return jnp.clip(x, a_min, a_max)
+
+
+# Transpose operation
+@pytest.mark.parametrize(
+    "x, axes",
+    [
+        (np.random.randn(4, 8).astype(np.float32), (1, 0)),
+        (np.random.randn(2, 3, 4).astype(np.float32), (2, 0, 1)),
+        (np.random.randn(2, 3, 4, 5).astype(np.float32), (3, 2, 1, 0)),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_transpose(request: pytest.FixtureRequest, device, x, axes):
+    return jnp.transpose(x, axes)
+
+
+# Slice operation
+@pytest.mark.parametrize(
+    "shape, slices",
+    [
+        ((10,), (slice(2, 8),)),
+        ((8, 8), (slice(1, 5), slice(2, 6))),
+        ((4, 8, 8), (slice(1, 3), slice(2, 6), slice(0, 4))),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_slice(request: pytest.FixtureRequest, device, shape, slices):
+    rng = np.random.default_rng(seed=42)
+    x = jax.device_put(rng.standard_normal(shape).astype(np.float32), device)
+
+    @jax.jit
+    def do_slice(x):
+        return x[slices]
+
+    return do_slice(x)
+
+
+# Concatenate operation
+@pytest.mark.parametrize(
+    "arrays, axis",
+    [
+        ([np.random.randn(4, 8).astype(np.float32) for _ in range(3)], 0),
+        ([np.random.randn(4, 8).astype(np.float32) for _ in range(2)], 1),
+        ([np.random.randn(2, 3, 4).astype(np.float32) for _ in range(2)], 2),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_concatenate(request: pytest.FixtureRequest, device, arrays, axis):
+    return jnp.concatenate(arrays, axis=axis)
+
+
+# Iota/arange operation
+@pytest.mark.parametrize(
+    "start, stop, dtype",
+    [
+        (0, 10, np.float32),
+        (0, 32, np.int32),
+        (5, 15, np.float32),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
+    return jnp.arange(start, stop, dtype=dtype)
+
+
+# Bitwise operations
+@pytest.mark.parametrize(
+    "op",
+    [jnp.bitwise_and, jnp.bitwise_or, jnp.bitwise_xor],
+)
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (
+            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
+            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_bitwise_op(request: pytest.FixtureRequest, device, op, a, b):
+    return op(a, b)
+
+
+# Shift operations
+@pytest.mark.parametrize(
+    "op",
+    [jnp.left_shift, jnp.right_shift],
+)
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (
+            np.random.randint(0, 256, size=(32, 32)).astype(np.uint32),
+            np.random.randint(0, 8, size=(32, 32)).astype(np.uint32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_shift_op(request: pytest.FixtureRequest, device, op, a, b):
+    return op(a, b)
 
 
 # Composite operations (operation chaining)
