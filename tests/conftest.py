@@ -158,24 +158,24 @@ def assert_all_ops_tested():
     if "CI" not in os.environ:
         return
 
-    stablehlo_parser_cc = (
-        Path(__file__).parent.parent / "src/pjrt_plugin/stablehlo_parser.cc"
-    )
-    assert stablehlo_parser_cc.is_file()
+    ops_dir = Path(__file__).parent.parent / "src/pjrt_plugin/ops"
+    assert ops_dir.is_dir()
+
+    # Patterns matching op registration calls
+    patterns = [
+        re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
+        re.compile(r'OpRegistry::Register\("([^"]+)"'),
+    ]
 
     op_names = set()
-    active = False
-    with stablehlo_parser_cc.open() as fp:
-        for line in fp:
-            if (
-                line
-                == "    static const std::unordered_set<std::string> supported = {\n"
-            ):
-                active = True
-            elif active and line.startswith("    };"):
-                break
-            elif match := re.match(r"^\s+\"(.*?)\",", line):
-                op_names.add(match.group(1))
+    for mm_file in ops_dir.glob("*.mm"):
+        with mm_file.open() as fp:
+            content = fp.read()
+            for pattern in patterns:
+                op_names.update(pattern.findall(content))
 
+    assert op_names, "Failed to discover any ops."
     missing = op_names - _TESTED_OPS
     assert not missing, f"Discovered {len(missing)} untested ops: {', '.join(missing)}"

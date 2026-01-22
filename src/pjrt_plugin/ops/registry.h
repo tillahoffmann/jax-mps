@@ -6,6 +6,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
@@ -48,6 +49,15 @@ public:
             first = false;
         }
         return result;
+    }
+
+    // Returns set of all registered operation names
+    static std::unordered_set<std::string> GetRegisteredOps() {
+        std::unordered_set<std::string> ops;
+        for (const auto& pair : GetMutableHandlers()) {
+            ops.insert(pair.first);
+        }
+        return ops;
     }
 
 private:

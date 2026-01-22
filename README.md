@@ -132,7 +132,7 @@ jax-mps/
 │   ├── mps_device.h/mm         # Device abstraction
 │   ├── mps_buffer.h/mm         # Buffer management
 │   ├── mps_executable.h/mm     # StableHLO compilation & execution
-│   └── stablehlo_parser.h/cc   # MLIR-based StableHLO parsing
+│   └── stablehlo_parser.h/mm   # MLIR-based StableHLO parsing
 ├── python/
 │   └── jax_plugins/
 │       └── mps/

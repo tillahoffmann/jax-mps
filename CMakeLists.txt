@@ -80,7 +80,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/mps_device.mm
     src/pjrt_plugin/mps_buffer.mm
     src/pjrt_plugin/mps_executable.mm
-    src/pjrt_plugin/stablehlo_parser.cc
+    src/pjrt_plugin/stablehlo_parser.mm
     src/pjrt_plugin/type_utils.mm
     src/pjrt_plugin/ops/binary_ops.mm
     src/pjrt_plugin/ops/unary_ops.mm

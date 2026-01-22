@@ -16,6 +16,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "pjrt_plugin/ops/registry.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/Serialization.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -25,61 +26,15 @@ namespace mps {
 
 namespace {
 
-// Set of supported operation names
+// Set of supported operation names - derived from OpRegistry plus control flow ops
 const std::unordered_set<std::string>& getSupportedOps() {
-    static const std::unordered_set<std::string> supported = {
-        // Binary ops
-        "stablehlo.add",
-        "stablehlo.multiply",
-        "stablehlo.subtract",
-        "stablehlo.divide",
-        "stablehlo.maximum",
-        "stablehlo.minimum",
-        // Unary ops
-        "stablehlo.tanh",
-        "stablehlo.exponential",
-        "stablehlo.log",
-        "stablehlo.negate",
-        "stablehlo.abs",
-        "stablehlo.sqrt",
-        "stablehlo.erf",
-        "stablehlo.log_plus_one",
-        // Comparison and selection
-        "stablehlo.compare",
-        "stablehlo.select",
-        "stablehlo.clamp",
-        // Matrix ops
-        "stablehlo.dot",
-        "stablehlo.dot_general",
-        // Convolution ops
-        "stablehlo.convolution",
-        // Shape ops
-        "stablehlo.reshape",
-        "stablehlo.transpose",
-        "stablehlo.broadcast",
-        "stablehlo.broadcast_in_dim",
-        "stablehlo.convert",
-        "stablehlo.constant",
-        // Bitwise ops (for RNG)
-        "stablehlo.and",
-        "stablehlo.or",
-        "stablehlo.xor",
-        "stablehlo.shift_right_logical",
-        "stablehlo.shift_left",
-        // Other ops
-        "stablehlo.concatenate",
-        "stablehlo.slice",
-        "stablehlo.dynamic_slice",
-        "stablehlo.iota",
-        "stablehlo.bitcast_convert",
-        "stablehlo.custom_call",
-        // CHLO (Client HLO) ops
-        "chlo.erf_inv",
-        "chlo.next_after",
-        // Control flow
-        "func.return",
-        "func.call",
-    };
+    static std::unordered_set<std::string> supported = []() {
+        auto ops = jax_mps::OpRegistry::GetRegisteredOps();
+        // Add control flow ops that don't need handlers
+        ops.insert("func.return");
+        ops.insert("func.call");
+        return ops;
+    }();
     return supported;
 }
 
