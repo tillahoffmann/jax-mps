@@ -89,8 +89,10 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
-      - name: Run pytest
-        run: uv run pytest tests/ -v
+      # We skip the tests because MPS is not availabe on the runner yet.
+      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
+      # - name: Run pytest
+      #   run: uv run pytest tests/ -v
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
