@@ -24,11 +24,32 @@ struct HloOp {
     std::vector<int64_t> shape;           // Output shape
     std::vector<int64_t> broadcast_dims;  // For broadcast_in_dim
     std::vector<int64_t> permutation;     // For transpose
+    int64_t concatenate_dim = 0;          // For concatenate
+
+    // For slice
+    std::vector<int64_t> slice_starts;
+    std::vector<int64_t> slice_limits;
+    std::vector<int64_t> slice_strides;
+
+    // For dynamic_slice
+    std::vector<int64_t> slice_sizes;
+
+    // For iota
+    int64_t iota_dim = 0;
+
+    // For custom_call
+    std::string custom_call_target;
+
+    // For compare
+    std::string compare_direction;  // "LT", "LE", "GT", "GE", "EQ", "NE"
 
     // For constant operations
-    std::vector<float> constant_data;  // Dense constant values
-    float constant_scalar = 0.0f;      // Scalar constant value
-    bool is_scalar_constant = false;   // True if constant is scalar/splat
+    std::vector<float> constant_data;   // Dense constant values (floats only)
+    std::vector<uint8_t> constant_raw;  // Raw byte data for non-float constants
+    float constant_scalar = 0.0f;       // Scalar constant value
+    uint64_t constant_scalar_raw = 0;   // Raw scalar value for integers
+    bool is_scalar_constant = false;    // True if constant is scalar/splat
+    bool uses_raw_data = false;         // True if constant_raw contains the data
 };
 
 // Parsed HLO computation
@@ -36,7 +57,8 @@ struct HloComputation {
     std::string name;
     std::vector<std::pair<std::string, std::vector<int64_t>>> parameters;  // name -> shape
     std::vector<HloOp> ops;
-    std::string root_name;  // Which op is the root/output
+    std::string root_name;                   // Which op is the root/output (legacy, last output)
+    std::vector<std::string> return_values;  // All return values for multi-output functions
 };
 
 // Execution result - either success with buffers or an error

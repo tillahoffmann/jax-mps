@@ -31,6 +31,10 @@ enum class OpKind {
     Log,
     Negate,
     Abs,
+    Sqrt,
+    LogPlusOne,
+    Compare,
+    Select,
     Dot,
     DotGeneral,
     Reshape,
@@ -42,6 +46,19 @@ enum class OpKind {
     Constant,
     Return,
     Call,
+    // Bitwise operations (needed for RNG)
+    And,
+    Or,
+    Xor,
+    ShiftRightLogical,
+    ShiftLeft,
+    // Other operations
+    Concatenate,
+    Slice,
+    DynamicSlice,
+    Iota,
+    BitcastConvert,
+    CustomCall,
     Unknown
 };
 
@@ -55,9 +72,12 @@ struct StableHLOOp {
     TensorType result_type;
 
     // For constants
-    std::vector<float> constant_data;  // Dense array constant data
-    float constant_scalar = 0.0f;      // Scalar constant value (when is_scalar_constant is true)
-    bool is_scalar_constant = false;   // True if constant is a scalar or splat
+    std::vector<float> constant_data;   // Dense array constant data (floats)
+    std::vector<uint8_t> constant_raw;  // Raw byte data for non-float constants
+    float constant_scalar = 0.0f;       // Scalar constant value (when is_scalar_constant is true)
+    uint64_t constant_scalar_raw = 0;   // Raw scalar value for integers
+    bool is_scalar_constant = false;    // True if constant is a scalar or splat
+    bool uses_raw_data = false;         // True if constant_raw contains the data
 
     // For dot_general
     std::vector<int64_t> lhs_batching_dims;
@@ -68,6 +88,29 @@ struct StableHLOOp {
     // For transpose/broadcast
     std::vector<int64_t> permutation;
     std::vector<int64_t> broadcast_dimensions;
+
+    // For concatenate
+    int64_t concatenate_dimension = 0;
+
+    // For slice
+    std::vector<int64_t> slice_starts;
+    std::vector<int64_t> slice_limits;
+    std::vector<int64_t> slice_strides;
+
+    // For dynamic_slice
+    std::vector<int64_t> slice_sizes;
+
+    // For iota
+    int64_t iota_dimension = 0;
+
+    // For custom_call
+    std::string custom_call_target;
+
+    // For compare
+    std::string compare_direction;  // "LT", "LE", "GT", "GE", "EQ", "NE"
+
+    // For func.call
+    std::string call_target;  // Name of the function being called
 };
 
 // Represents a parsed function

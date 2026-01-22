@@ -92,6 +92,16 @@ inline MPSDataType PjrtDtypeToMps(int dtype) {
             return MPSDataTypeInt64;
         case 8:
             return MPSDataTypeUInt32;
+        case 9:
+            return MPSDataTypeUInt64;
+        case 2:
+            return MPSDataTypeInt8;
+        case 6:
+            return MPSDataTypeUInt8;
+        case 3:
+            return MPSDataTypeInt16;
+        case 7:
+            return MPSDataTypeUInt16;
         case 1:
             return MPSDataTypeBool;
         default:

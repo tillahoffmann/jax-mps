@@ -49,16 +49,19 @@ std::string elementTypeToString(mlir::Type type) {
         return "f16";
     if (type.isBF16())
         return "bf16";
-    if (type.isInteger(32))
-        return "i32";
-    if (type.isInteger(64))
-        return "i64";
-    if (type.isInteger(1))
-        return "i1";
-    if (type.isInteger(8))
-        return "i8";
-    if (type.isInteger(16))
-        return "i16";
+
+    // Handle integer types - check for signedness
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type)) {
+        unsigned width = intType.getWidth();
+        bool isUnsigned = intType.isUnsigned();
+        std::string prefix = isUnsigned ? "ui" : "i";
+        // Also treat signless as signed for compatibility
+        if (intType.isSignless()) {
+            // StableHLO uses signless integers, which we treat as signed
+            prefix = "si";
+        }
+        return prefix + std::to_string(width);
+    }
 
     // Default fallback
     std::string str;
@@ -110,6 +113,14 @@ std::pair<OpKind, std::string> getOpKindWithName(mlir::Operation* op) {
         return {OpKind::Negate, name_str};
     if (name == "stablehlo.abs")
         return {OpKind::Abs, name_str};
+    if (name == "stablehlo.sqrt")
+        return {OpKind::Sqrt, name_str};
+    if (name == "stablehlo.log_plus_one")
+        return {OpKind::LogPlusOne, name_str};
+    if (name == "stablehlo.compare")
+        return {OpKind::Compare, name_str};
+    if (name == "stablehlo.select")
+        return {OpKind::Select, name_str};
     if (name == "stablehlo.dot")
         return {OpKind::Dot, name_str};
     if (name == "stablehlo.dot_general")
@@ -132,6 +143,32 @@ std::pair<OpKind, std::string> getOpKindWithName(mlir::Operation* op) {
         return {OpKind::Return, name_str};
     if (name == "func.call" || name == "call")
         return {OpKind::Call, name_str};
+
+    // Bitwise operations (needed for RNG)
+    if (name == "stablehlo.and")
+        return {OpKind::And, name_str};
+    if (name == "stablehlo.or")
+        return {OpKind::Or, name_str};
+    if (name == "stablehlo.xor")
+        return {OpKind::Xor, name_str};
+    if (name == "stablehlo.shift_right_logical")
+        return {OpKind::ShiftRightLogical, name_str};
+    if (name == "stablehlo.shift_left")
+        return {OpKind::ShiftLeft, name_str};
+
+    // Other operations
+    if (name == "stablehlo.concatenate")
+        return {OpKind::Concatenate, name_str};
+    if (name == "stablehlo.slice")
+        return {OpKind::Slice, name_str};
+    if (name == "stablehlo.dynamic_slice")
+        return {OpKind::DynamicSlice, name_str};
+    if (name == "stablehlo.iota")
+        return {OpKind::Iota, name_str};
+    if (name == "stablehlo.bitcast_convert")
+        return {OpKind::BitcastConvert, name_str};
+    if (name == "stablehlo.custom_call")
+        return {OpKind::CustomCall, name_str};
 
     return {OpKind::Unknown, name_str};
 }
@@ -188,8 +225,17 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
         // Generate result name and track it
         if (op->getNumResults() > 0) {
             shloOp.name = "%" + std::to_string(opCounter++);
-            // Map this operation's result to its name
-            valueToName[op->getResult(0).getAsOpaquePointer()] = shloOp.name;
+            // Map all operation results to their names
+            // For single-result ops: %N
+            // For multi-result ops: %N.0, %N.1, etc.
+            if (op->getNumResults() == 1) {
+                valueToName[op->getResult(0).getAsOpaquePointer()] = shloOp.name;
+            } else {
+                for (unsigned i = 0; i < op->getNumResults(); ++i) {
+                    std::string resultName = shloOp.name + "." + std::to_string(i);
+                    valueToName[op->getResult(i).getAsOpaquePointer()] = resultName;
+                }
+            }
         }
 
         // Get operands
@@ -197,7 +243,17 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
             Operand opnd;
             // Try to get a meaningful name
             if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(operand)) {
-                opnd.name = "%arg" + std::to_string(blockArg.getArgNumber());
+                // Check which block the argument belongs to
+                mlir::Block* parentBlock = blockArg.getOwner();
+                mlir::Operation* parentOp = parentBlock->getParentOp();
+                if (mlir::isa<mlir::func::FuncOp>(parentOp)) {
+                    // This is a function argument
+                    opnd.name = "%arg" + std::to_string(blockArg.getArgNumber());
+                } else {
+                    // This is a block argument from a nested region (e.g., reduce body)
+                    // For now, mark as unknown since we don't handle nested regions yet
+                    opnd.name = "%nested_arg" + std::to_string(blockArg.getArgNumber());
+                }
             } else {
                 // Look up the operand's name from our mapping
                 auto it = valueToName.find(operand.getAsOpaquePointer());
@@ -247,50 +303,75 @@ bool parseFunction(mlir::func::FuncOp funcOp, StableHLOFunction& result,
             }
         }
 
+        if (auto concat = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op)) {
+            shloOp.concatenate_dimension = concat.getDimension();
+        }
+
+        if (auto slice = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op)) {
+            for (int64_t d : slice.getStartIndices()) {
+                shloOp.slice_starts.push_back(d);
+            }
+            for (int64_t d : slice.getLimitIndices()) {
+                shloOp.slice_limits.push_back(d);
+            }
+            for (int64_t d : slice.getStrides()) {
+                shloOp.slice_strides.push_back(d);
+            }
+        }
+
+        if (auto dynSlice = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op)) {
+            for (int64_t d : dynSlice.getSliceSizes()) {
+                shloOp.slice_sizes.push_back(d);
+            }
+        }
+
+        if (auto iota = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op)) {
+            shloOp.iota_dimension = iota.getIotaDimension();
+        }
+
+        if (auto compare = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op)) {
+            auto direction = compare.getComparisonDirection();
+            shloOp.compare_direction =
+                mlir::stablehlo::stringifyComparisonDirection(direction).str();
+        }
+
+        if (auto customCall = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
+            shloOp.custom_call_target = customCall.getCallTargetName().str();
+        }
+
+        if (auto callOp = mlir::dyn_cast<mlir::func::CallOp>(op)) {
+            shloOp.call_target = callOp.getCallee().str();
+        }
+
         // Handle constant operations - extract the actual constant value
         if (auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op)) {
             auto value = constantOp.getValue();
             if (auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(value)) {
+                auto elemType = denseAttr.getElementType();
+
                 // Check if it's a splat (single value broadcast to all elements)
                 if (denseAttr.isSplat()) {
-                    auto elemType = denseAttr.getElementType();
+                    shloOp.is_scalar_constant = true;
                     if (elemType.isF32()) {
                         shloOp.constant_scalar = denseAttr.getSplatValue<float>();
-                        shloOp.is_scalar_constant = true;
                     } else if (elemType.isF64()) {
                         shloOp.constant_scalar =
                             static_cast<float>(denseAttr.getSplatValue<double>());
-                        shloOp.is_scalar_constant = true;
                     } else if (elemType.isF16()) {
                         // F16 values come as APFloat, convert to float
                         auto apVal = denseAttr.getSplatValue<llvm::APFloat>();
                         shloOp.constant_scalar = apVal.convertToFloat();
-                        shloOp.is_scalar_constant = true;
-                    } else if (elemType.isInteger(32)) {
-                        shloOp.constant_scalar =
-                            static_cast<float>(denseAttr.getSplatValue<int32_t>());
-                        shloOp.is_scalar_constant = true;
-                    } else if (elemType.isInteger(64)) {
-                        shloOp.constant_scalar =
-                            static_cast<float>(denseAttr.getSplatValue<int64_t>());
-                        shloOp.is_scalar_constant = true;
+                    } else if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+                        // Handle all integer types via APInt
+                        auto apInt = denseAttr.getSplatValue<llvm::APInt>();
+                        shloOp.constant_scalar_raw = apInt.getZExtValue();
+                        shloOp.uses_raw_data = true;
                     }
                 } else {
-                    // Non-splat dense constant - extract all values
-                    auto elemType = denseAttr.getElementType();
-                    if (elemType.isF32()) {
-                        for (float val : denseAttr.getValues<float>()) {
-                            shloOp.constant_data.push_back(val);
-                        }
-                    } else if (elemType.isF64()) {
-                        for (double val : denseAttr.getValues<double>()) {
-                            shloOp.constant_data.push_back(static_cast<float>(val));
-                        }
-                    } else if (elemType.isInteger(32)) {
-                        for (int32_t val : denseAttr.getValues<int32_t>()) {
-                            shloOp.constant_data.push_back(static_cast<float>(val));
-                        }
-                    }
+                    // Non-splat dense constant - use raw data approach for all types
+                    auto rawData = denseAttr.getRawData();
+                    shloOp.constant_raw.assign(rawData.begin(), rawData.end());
+                    shloOp.uses_raw_data = true;
                 }
             }
         }
