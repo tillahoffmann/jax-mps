@@ -22,8 +22,6 @@ jobs:
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          restore-keys: |
-            mlir-stablehlo-macos14-
 
       - name: Install build tools
         if: steps.cache-deps.outputs.cache-hit != 'true'
