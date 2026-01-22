@@ -71,6 +71,10 @@ def assert_on_mps(result, mps_device):
     )
 
 
+def _assert(cond, message):
+    assert cond, message
+
+
 def assert_cpu_mps_allclose(func: Callable):
     """Decorator that runs a test on both CPU and MPS, then compares results.
 
@@ -105,8 +109,13 @@ def assert_cpu_mps_allclose(func: Callable):
         with jax.default_device(device):
             result = func(request, device, *args, **kwargs)
         assert result is not None, f"Decorated function {func} must return a value."
-        assert result.device == device, (
-            f"Result is on device '{result.device}'; expected '{device}'."
+
+        jax.tree.map(
+            lambda x: _assert(
+                x.device == device,
+                f"Result is on device '{x.device}'; expected '{device}'.",
+            ),
+            result,
         )
 
         # Store results and verify.

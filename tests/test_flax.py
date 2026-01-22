@@ -46,7 +46,7 @@ def test_flax_modules(
             else:
                 raise ValueError(dtype)
 
-    return module(**call_args)
+    return module, module(**call_args)
 
 
 class LogisticRegression(nnx.Module):
