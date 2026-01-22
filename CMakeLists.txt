@@ -173,7 +173,9 @@ set_target_properties(pjrt_plugin_mps PROPERTIES
 )
 
 # Install target - this is used by scikit-build-core
+# Note: scikit-build's wheel.install-dir adds "jax_plugins/mps" prefix,
+# so we only need "lib" here to get "jax_plugins/mps/lib" in the wheel
 install(TARGETS pjrt_plugin_mps
-    LIBRARY DESTINATION jax_plugins/mps/lib
-    RUNTIME DESTINATION jax_plugins/mps/lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib
 )
