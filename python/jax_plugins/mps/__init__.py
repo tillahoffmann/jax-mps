@@ -120,7 +120,3 @@ def initialize():
         if "ALREADY_EXISTS" in str(e) and "mps" in str(e).lower():
             return  # Plugin already registered, nothing to do
         raise MPSPluginError(f"Failed to register MPS plugin with JAX: {e}") from e
-
-
-# Version info
-__version__ = "0.1.0"
