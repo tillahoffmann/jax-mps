@@ -1,0 +1,9 @@
+# NORMALIZATION OPERATIONS (MPSGraphNormalizationOps.h)
+
+meanOfTensor:axes:name:
+varianceOfTensor:axes:name:
+varianceOfTensor:meanTensor:axes:name:
+normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:epsilon:name:
+normalizationGammaGradientWithIncomingGradientTensor:sourceTensor:meanTensor:varianceTensor:axes:epsilon:name:
+normalizationBetaGradientWithIncomingGradientTensor:sourceTensor:axes:name:
+normalizationGradientWithIncomingGradientTensor:sourceTensor:meanTensor:varianceTensor:gammaTensor:gammaGradientTensor:betaGradientTensor:axes:epsilon:name:

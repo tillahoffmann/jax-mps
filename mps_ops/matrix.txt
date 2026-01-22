@@ -1,0 +1,5 @@
+# MATRIX OPERATIONS (MPSGraphMatrixMultiplicationOps.h)
+
+matrixMultiplicationWithPrimaryTensor:secondaryTensor:name:
+HammingDistanceWithPrimaryTensor:secondaryTensor:resultDataType:name:
+scaledDotProductAttentionWithQueryTensor:keyTensor:valueTensor:maskTensor:scale:name:

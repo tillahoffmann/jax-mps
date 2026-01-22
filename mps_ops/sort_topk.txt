@@ -1,0 +1,17 @@
+# SORT/TOP-K OPERATIONS (MPSGraphSortOps.h, MPSGraphTopKOps.h)
+
+sortWithTensor:axis:descending:name:
+sortWithTensor:axis:name:
+sortWithTensor:axisTensor:descending:name:
+sortWithTensor:axisTensor:name:
+argSortWithTensor:axis:descending:name:
+argSortWithTensor:axis:name:
+argSortWithTensor:axisTensor:descending:name:
+argSortWithTensor:axisTensor:name:
+topKWithSourceTensor:k:name:
+topKWithSourceTensor:kTensor:name:
+topKWithSourceTensor:axis:k:name:
+bottomKWithSourceTensor:axis:k:name:
+topKWithGradientTensor:source:k:name:
+topKWithGradientTensor:source:axis:k:name:
+bottomKWithGradientTensor:source:axis:k:name:

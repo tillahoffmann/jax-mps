@@ -1,0 +1,12 @@
+# MEMORY OPERATIONS (MPSGraphMemoryOps.h)
+
+placeholderWithShape:dataType:name:
+placeholderWithShape:name:
+constantWithData:shape:dataType:
+constantWithScalar:dataType:
+constantWithScalar:shape:dataType:
+constantWithRealPart:imaginaryPart:dataType:
+variableWithData:shape:dataType:name:
+variableFromTensorWithTensor:name:
+readVariable:name:
+assignVariable:withValueOfTensor:name:

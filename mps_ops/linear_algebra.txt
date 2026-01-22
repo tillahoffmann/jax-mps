@@ -1,0 +1,4 @@
+# LINEAR ALGEBRA (MPSGraphLinearAlgebraOps.h)
+
+bandPartWithTensor:numLower:numUpper:name:
+bandPartWithTensor:numLowerTensor:numUpperTensor:name:

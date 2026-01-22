@@ -1,0 +1,8 @@
+# ONE-HOT OPERATIONS (MPSGraphOneHotOps.h)
+
+oneHotWithIndicesTensor:depth:axis:dataType:onValue:offValue:name:
+oneHotWithIndicesTensor:depth:axis:dataType:name:
+oneHotWithIndicesTensor:depth:axis:name:
+oneHotWithIndicesTensor:depth:dataType:onValue:offValue:name:
+oneHotWithIndicesTensor:depth:dataType:name:
+oneHotWithIndicesTensor:depth:name:

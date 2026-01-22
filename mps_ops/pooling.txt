@@ -1,0 +1,16 @@
+# POOLING OPERATIONS (MPSGraphPoolingOps.h)
+
+maxPooling2DWithSourceTensor:descriptor:name:
+maxPooling2DReturnIndicesWithSourceTensor:descriptor:name:
+maxPooling2DGradientWithGradientTensor:indicesTensor:outputShape:descriptor:name:
+maxPooling2DGradientWithGradientTensor:sourceTensor:descriptor:name:
+avgPooling2DWithSourceTensor:descriptor:name:
+avgPooling2DGradientWithGradientTensor:sourceTensor:descriptor:name:
+maxPooling4DWithSourceTensor:descriptor:name:
+maxPooling4DReturnIndicesWithSourceTensor:descriptor:name:
+maxPooling4DGradientWithGradientTensor:indicesTensor:outputShape:descriptor:name:
+maxPooling4DGradientWithGradientTensor:sourceTensor:descriptor:name:
+avgPooling4DWithSourceTensor:descriptor:name:
+avgPooling4DGradientWithGradientTensor:sourceTensor:descriptor:name:
+L2NormPooling4DWithSourceTensor:descriptor:name:
+L2NormPooling4DGradientWithGradientTensor:sourceTensor:descriptor:name:

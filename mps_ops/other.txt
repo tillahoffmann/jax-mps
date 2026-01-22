@@ -1,0 +1,28 @@
+# OTHER OPERATIONS
+
+## Non-Zero (MPSGraphNonZeroOps.h)
+nonZeroIndicesOfTensor:name:
+
+## Non-Maximum Suppression (MPSGraphNonMaximumSuppressionOps.h)
+nonMaximumSuppressionWithBoxesTensor:scoresTensor:IOUThreshold:scoreThreshold:perClassSuppression:coordinateMode:name:
+nonMaximumSuppressionWithBoxesTensor:scoresTensor:classIndicesTensor:IOUThreshold:scoreThreshold:perClassSuppression:coordinateMode:name:
+
+## ImToCol (MPSGraphImToColOps.h)
+imToColWithSourceTensor:descriptor:name:
+colToImWithSourceTensor:outputShape:descriptor:name:
+
+## Sample Grid (MPSGraphSampleGridOps.h)
+sampleGridWithSourceTensor:coordinateTensor:layout:normalizeCoordinates:relativeCoordinates:alignCorners:paddingMode:samplingMode:constantValue:name:
+
+## Stencil (MPSGraphStencilOps.h)
+stencilWithSourceTensor:weightsTensor:descriptor:name:
+
+## Sparse (MPSGraphSparseOps.h)
+sparseTensorWithType:tensors:shape:dataType:name:
+sparseTensorWithDescriptor:tensors:shape:dataType:name:
+
+## Call (MPSGraphCallOps.h)
+callSymbolName:inputTensors:outputTypes:name:
+
+## Automatic Differentiation (MPSGraphAutomaticDifferentiation.h)
+gradientForPrimaryTensor:withTensors:name:

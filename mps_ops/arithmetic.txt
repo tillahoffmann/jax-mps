@@ -1,0 +1,101 @@
+# ARITHMETIC OPERATIONS (MPSGraphArithmeticOps.h)
+
+## Unary Operations
+identityWithTensor:name:
+exponentWithTensor:name:
+exponentBase2WithTensor:name:
+exponentBase10WithTensor:name:
+logarithmWithTensor:name:
+logarithmBase2WithTensor:name:
+logarithmBase10WithTensor:name:
+squareWithTensor:name:
+squareRootWithTensor:name:
+reciprocalSquareRootWithTensor:name:
+reverseSquareRootWithTensor:name:
+reciprocalWithTensor:name:
+absoluteWithTensor:name:
+absoluteSquareWithTensor:name:
+negativeWithTensor:name:
+signWithTensor:name:
+signbitWithTensor:name:
+ceilWithTensor:name:
+floorWithTensor:name:
+roundWithTensor:name:
+rintWithTensor:name:
+truncateWithTensor:name:
+
+## Trigonometric Operations
+sinWithTensor:name:
+cosWithTensor:name:
+tanWithTensor:name:
+sinhWithTensor:name:
+coshWithTensor:name:
+tanhWithTensor:name:
+asinWithTensor:name:
+acosWithTensor:name:
+atanWithTensor:name:
+asinhWithTensor:name:
+acoshWithTensor:name:
+atanhWithTensor:name:
+
+## Special Functions
+erfWithTensor:name:
+# NOTE: erfinv (inverse error function) is NOT available natively
+
+## Logical/Boolean Operations
+notWithTensor:name:
+isInfiniteWithTensor:name:
+isFiniteWithTensor:name:
+isNaNWithTensor:name:
+
+## Bitwise Operations
+bitwiseNOTWithTensor:name:
+bitwisePopulationCountWithTensor:name:
+
+## Complex Number Operations
+conjugateWithTensor:name:
+realPartOfTensor:name:
+imaginaryPartOfTensor:name:
+complexTensorWithRealTensor:imaginaryTensor:name:
+
+## Binary Operations
+additionWithPrimaryTensor:secondaryTensor:name:
+subtractionWithPrimaryTensor:secondaryTensor:name:
+multiplicationWithPrimaryTensor:secondaryTensor:name:
+divisionWithPrimaryTensor:secondaryTensor:name:
+moduloWithPrimaryTensor:secondaryTensor:name:
+powerWithPrimaryTensor:secondaryTensor:name:
+minimumWithPrimaryTensor:secondaryTensor:name:
+maximumWithPrimaryTensor:secondaryTensor:name:
+minimumWithNaNPropagationWithPrimaryTensor:secondaryTensor:name:
+maximumWithNaNPropagationWithPrimaryTensor:secondaryTensor:name:
+divisionNoNaNWithPrimaryTensor:secondaryTensor:name:
+floorModuloWithPrimaryTensor:secondaryTensor:name:
+atan2WithPrimaryTensor:secondaryTensor:name:
+
+## Comparison Operations
+equalWithPrimaryTensor:secondaryTensor:name:
+notEqualWithPrimaryTensor:secondaryTensor:name:
+lessThanWithPrimaryTensor:secondaryTensor:name:
+lessThanOrEqualToWithPrimaryTensor:secondaryTensor:name:
+greaterThanWithPrimaryTensor:secondaryTensor:name:
+greaterThanOrEqualToWithPrimaryTensor:secondaryTensor:name:
+
+## Logical Binary Operations
+logicalANDWithPrimaryTensor:secondaryTensor:name:
+logicalORWithPrimaryTensor:secondaryTensor:name:
+logicalNANDWithPrimaryTensor:secondaryTensor:name:
+logicalNORWithPrimaryTensor:secondaryTensor:name:
+logicalXORWithPrimaryTensor:secondaryTensor:name:
+logicalXNORWithPrimaryTensor:secondaryTensor:name:
+
+## Bitwise Binary Operations
+bitwiseANDWithPrimaryTensor:secondaryTensor:name:
+bitwiseORWithPrimaryTensor:secondaryTensor:name:
+bitwiseXORWithPrimaryTensor:secondaryTensor:name:
+bitwiseLeftShiftWithPrimaryTensor:secondaryTensor:name:
+bitwiseRightShiftWithPrimaryTensor:secondaryTensor:name:
+
+## Ternary Operations
+selectWithPredicateTensor:truePredicateTensor:falsePredicateTensor:name:
+clampWithTensor:minValueTensor:maxValueTensor:name:

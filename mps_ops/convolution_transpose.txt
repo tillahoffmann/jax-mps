@@ -1,0 +1,5 @@
+# CONVOLUTION TRANSPOSE (MPSGraphConvolutionTransposeOps.h)
+
+convolutionTranspose2DWithSourceTensor:weightsTensor:outputShape:descriptor:name:
+convolutionTranspose2DDataGradientWithIncomingGradientTensor:weightsTensor:outputShape:forwardConvolutionDescriptor:name:
+convolutionTranspose2DWeightsGradientWithIncomingGradientTensor:sourceTensor:outputShape:forwardConvolutionDescriptor:name:

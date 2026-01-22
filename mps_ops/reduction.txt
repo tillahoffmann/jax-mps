@@ -1,0 +1,20 @@
+# REDUCTION OPERATIONS (MPSGraphReductionOps.h)
+
+reductionSumWithTensor:axis:name:
+reductionSumWithTensor:axes:name:
+reductionMaximumWithTensor:axis:name:
+reductionMaximumWithTensor:axes:name:
+reductionMinimumWithTensor:axis:name:
+reductionMinimumWithTensor:axes:name:
+reductionMaximumPropagateNaNWithTensor:axis:name:
+reductionMaximumPropagateNaNWithTensor:axes:name:
+reductionMinimumPropagateNaNWithTensor:axis:name:
+reductionMinimumPropagateNaNWithTensor:axes:name:
+reductionProductWithTensor:axis:name:
+reductionProductWithTensor:axes:name:
+reductionArgMaximumWithTensor:axis:name:
+reductionArgMinimumWithTensor:axis:name:
+reductionAndWithTensor:axis:name:
+reductionAndWithTensor:axes:name:
+reductionOrWithTensor:axis:name:
+reductionOrWithTensor:axes:name:
