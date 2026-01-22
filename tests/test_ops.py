@@ -70,6 +70,98 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
     return jnp.matmul(a, b)
 
 
+# Convolution operations
+@register_op_test("stablehlo.convolution")
+@pytest.mark.parametrize(
+    "x, kernel, strides, padding, dilation, groups",
+    [
+        # Basic 3x3 conv, SAME padding
+        (
+            np.random.randn(2, 28, 28, 3).astype(np.float32),
+            np.random.randn(3, 3, 3, 8).astype(np.float32),
+            (1, 1),
+            "SAME",
+            (1, 1),
+            1,
+        ),
+        # Strided conv
+        (
+            np.random.randn(2, 32, 32, 3).astype(np.float32),
+            np.random.randn(3, 3, 3, 16).astype(np.float32),
+            (2, 2),
+            "SAME",
+            (1, 1),
+            1,
+        ),
+        # VALID padding
+        (
+            np.random.randn(2, 32, 32, 3).astype(np.float32),
+            np.random.randn(5, 5, 3, 8).astype(np.float32),
+            (1, 1),
+            "VALID",
+            (1, 1),
+            1,
+        ),
+        # Dilated conv
+        (
+            np.random.randn(2, 32, 32, 3).astype(np.float32),
+            np.random.randn(3, 3, 3, 8).astype(np.float32),
+            (1, 1),
+            "SAME",
+            (2, 2),
+            1,
+        ),
+        # 1x1 pointwise conv
+        (
+            np.random.randn(2, 16, 16, 64).astype(np.float32),
+            np.random.randn(1, 1, 64, 128).astype(np.float32),
+            (1, 1),
+            "VALID",
+            (1, 1),
+            1,
+        ),
+        # Depthwise conv (groups = in_channels)
+        (
+            np.random.randn(2, 28, 28, 16).astype(np.float32),
+            np.random.randn(3, 3, 1, 16).astype(np.float32),
+            (1, 1),
+            "SAME",
+            (1, 1),
+            16,
+        ),
+        # Grouped conv
+        (
+            np.random.randn(2, 28, 28, 16).astype(np.float32),
+            np.random.randn(3, 3, 4, 32).astype(np.float32),
+            (1, 1),
+            "SAME",
+            (1, 1),
+            4,
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_conv2d(
+    request: pytest.FixtureRequest,
+    device,
+    x,
+    kernel,
+    strides,
+    padding,
+    dilation,
+    groups,
+):
+    return jax.lax.conv_general_dilated(
+        x,
+        kernel,
+        window_strides=strides,
+        padding=padding,
+        rhs_dilation=dilation,
+        feature_group_count=groups,
+        dimension_numbers=("NHWC", "HWIO", "NHWC"),
+    )
+
+
 # Min/max operations
 @pytest.mark.parametrize(
     "op",

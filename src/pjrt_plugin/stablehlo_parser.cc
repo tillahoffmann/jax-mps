@@ -51,6 +51,8 @@ const std::unordered_set<std::string>& getSupportedOps() {
         // Matrix ops
         "stablehlo.dot",
         "stablehlo.dot_general",
+        // Convolution ops
+        "stablehlo.convolution",
         // Shape ops
         "stablehlo.reshape",
         "stablehlo.transpose",

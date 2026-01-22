@@ -85,6 +85,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/unary_ops.mm
     src/pjrt_plugin/ops/shape_ops.mm
     src/pjrt_plugin/ops/bitwise_ops.mm
+    src/pjrt_plugin/ops/convolution_ops.mm
     ${PROTO_SRCS}
 )
 
