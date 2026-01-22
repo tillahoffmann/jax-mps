@@ -56,36 +56,6 @@ static NSArray<NSNumber*>* GetShapeFromType(mlir::Type type) {
     return shape;
 }
 
-// Helper to get PJRT dtype from MLIR element type
-static int MlirTypeToPjrtDtype(mlir::Type elemType) {
-    if (elemType.isF32())
-        return 11;  // PJRT_F32
-    if (elemType.isF16())
-        return 10;  // PJRT_F16
-    if (elemType.isBF16())
-        return 16;  // PJRT_BF16
-    if (elemType.isF64())
-        return 12;  // PJRT_F64
-
-    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
-        unsigned width = intType.getWidth();
-        bool isUnsigned = intType.isUnsigned();
-
-        if (width == 1)
-            return 1;  // PJRT_PRED
-        if (width == 8)
-            return isUnsigned ? 6 : 2;  // PJRT_U8 or PJRT_S8
-        if (width == 16)
-            return isUnsigned ? 7 : 3;  // PJRT_U16 or PJRT_S16
-        if (width == 32)
-            return isUnsigned ? 8 : 4;  // PJRT_U32 or PJRT_S32
-        if (width == 64)
-            return isUnsigned ? 9 : 5;  // PJRT_U64 or PJRT_S64
-    }
-
-    return -1;
-}
-
 // Result type for processOperations - can be an error or return values
 struct ProcessResult {
     std::string error;

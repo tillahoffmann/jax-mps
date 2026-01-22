@@ -11,6 +11,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
+#include "pjrt_plugin/type_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
 namespace jax_mps {
@@ -78,34 +79,6 @@ inline void SetOutputTensor(ValueMap& values, mlir::Operation* op, MPSGraphTenso
     }
 }
 
-// Convert MLIR type to MPSDataType
-inline MPSDataType MlirTypeToMps(mlir::Type type) {
-    if (type.isF32())
-        return MPSDataTypeFloat32;
-    if (type.isF16())
-        return MPSDataTypeFloat16;
-    if (type.isBF16())
-        return MPSDataTypeBFloat16;
-
-    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type)) {
-        unsigned width = intType.getWidth();
-        bool isUnsigned = intType.isUnsigned();
-
-        if (width == 1)
-            return MPSDataTypeBool;
-        if (width == 8)
-            return isUnsigned ? MPSDataTypeUInt8 : MPSDataTypeInt8;
-        if (width == 16)
-            return isUnsigned ? MPSDataTypeUInt16 : MPSDataTypeInt16;
-        if (width == 32)
-            return isUnsigned ? MPSDataTypeUInt32 : MPSDataTypeInt32;
-        if (width == 64)
-            return isUnsigned ? MPSDataTypeUInt64 : MPSDataTypeInt64;
-    }
-
-    return MPSDataTypeInvalid;
-}
-
 // Get MPSDataType from operation's result type
 inline MPSDataType GetResultMpsType(mlir::Operation* op, unsigned index = 0) {
     if (index >= op->getNumResults()) {
@@ -142,38 +115,6 @@ inline NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIn
         [shape addObject:@(dim)];
     }
     return shape;
-}
-
-// Map PJRT dtype to MPSDataType (for compatibility with buffer operations)
-inline MPSDataType PjrtDtypeToMps(int dtype) {
-    switch (dtype) {
-        case 11:
-            return MPSDataTypeFloat32;
-        case 10:
-            return MPSDataTypeFloat16;
-        case 16:
-            return MPSDataTypeBFloat16;
-        case 4:
-            return MPSDataTypeInt32;
-        case 5:
-            return MPSDataTypeInt64;
-        case 8:
-            return MPSDataTypeUInt32;
-        case 9:
-            return MPSDataTypeUInt64;
-        case 2:
-            return MPSDataTypeInt8;
-        case 6:
-            return MPSDataTypeUInt8;
-        case 3:
-            return MPSDataTypeInt16;
-        case 7:
-            return MPSDataTypeUInt16;
-        case 1:
-            return MPSDataTypeBool;
-        default:
-            return MPSDataTypeInvalid;
-    }
 }
 
 // Macro for registering ops - use in .mm files
