@@ -360,7 +360,11 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         for (const auto& ret_value : return_values) {
             MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
             if (!ret_tensor) {
-                return ExecutionResult::Error("Return value not found in tensor map");
+                // Print the MLIR value for debugging
+                std::string valStr;
+                llvm::raw_string_ostream os(valStr);
+                ret_value.print(os);
+                return ExecutionResult::Error("Return value '" + valStr + "' not found in tensors");
             }
             [target_tensors addObject:ret_tensor];
             return_types.push_back(ret_value.getType());
