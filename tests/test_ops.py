@@ -38,6 +38,7 @@ _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
         (register_op_test(jnp.negative, "stablehlo.negate"), _float_2d),
         (register_op_test(jnp.abs, "stablehlo.abs"), _float_2d),
         (register_op_test(jnp.sqrt, "stablehlo.sqrt"), _float_positive),
+        (register_op_test(jax.lax.rsqrt, "stablehlo.rsqrt"), _float_positive),
         (register_op_test(jnp.log1p, "stablehlo.log_plus_one"), _float_positive),
         (register_op_test(jax.scipy.special.erf, "stablehlo.erf"), _float_2d * 0.5),
         (

@@ -12,6 +12,7 @@ REGISTER_MLIR_UNARY_OP("stablehlo.log", logarithm, log);
 REGISTER_MLIR_UNARY_OP("stablehlo.negate", negative, negate);
 REGISTER_MLIR_UNARY_OP("stablehlo.abs", absolute, abs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
+REGISTER_MLIR_UNARY_OP("stablehlo.rsqrt", reciprocalSquareRoot, rsqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
