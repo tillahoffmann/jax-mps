@@ -45,6 +45,8 @@ _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
             register_op_test(jax.scipy.special.erfinv, "chlo.erf_inv"),
             _rng.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
         ),
+        (register_op_test(jnp.floor, "stablehlo.floor"), _float_2d),
+        (register_op_test(jnp.sign, "stablehlo.sign"), _float_2d),
         # ReLU uses compare + select internally
         (
             register_op_test(jax.nn.relu, "stablehlo.compare", "stablehlo.select"),
@@ -54,7 +56,9 @@ _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
 )
 @assert_cpu_mps_allclose
 def test_unary_op(request: pytest.FixtureRequest, device, op, x):
-    return op(x)
+    result = op(x)
+    grad = jax.grad(lambda x: op(x).mean())(x)
+    return result, grad
 
 
 # Binary operations (arithmetic, min/max, remainder, bitwise, shifts)
@@ -97,7 +101,22 @@ def test_unary_op(request: pytest.FixtureRequest, device, op, x):
 )
 @assert_cpu_mps_allclose
 def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
-    return op(a, b)
+    result = op(a, b)
+
+    # Calculate gradients with respect to inexact dtypes.
+    # Skip for nextafter which doesn't have a differentiation rule in JAX.
+    if op is jnp.nextafter:
+        grad = None
+    elif a.dtype == jnp.float32 and b.dtype == jnp.float32:
+        grad = jax.grad(lambda x: op(*x).mean())((a, b))
+    elif a.dtype == jnp.float32:
+        grad = jax.grad(lambda x: op(x, b).mean())(a)
+    elif b.dtype == jnp.float32:
+        grad = jax.grad(lambda x: op(a, x).mean())(b)
+    else:
+        grad = None
+
+    return result, grad
 
 
 # Matrix multiplication
@@ -121,6 +140,7 @@ def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
 )
 @assert_cpu_mps_allclose
 def test_matmul(request: pytest.FixtureRequest, device, a, b):
+    # TODO: Gradient test crashes MPS - needs dot_general transpose implementation
     return jnp.matmul(a, b)
 
 
@@ -205,6 +225,7 @@ def test_conv2d(
     dilation,
     groups,
 ):
+    # TODO: Gradient test needs conv transpose implementation
     return jax.lax.conv_general_dilated(
         x,
         kernel,
@@ -236,7 +257,9 @@ def test_conv2d(
 )
 @assert_cpu_mps_allclose
 def test_shape_op(request: pytest.FixtureRequest, device, op, x, arg):
-    return op(x, arg)
+    result = op(x, arg)
+    grad = jax.grad(lambda x: op(x, arg).mean())(x)
+    return result, grad
 
 
 # Type conversions (convert and bitcast)
@@ -274,7 +297,9 @@ def test_type_convert(request: pytest.FixtureRequest, device, op, x, to_dtype):
 )
 @assert_cpu_mps_allclose
 def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
-    return jnp.clip(x, a_min, a_max)
+    result = jnp.clip(x, a_min, a_max)
+    grad = jax.grad(lambda x: jnp.clip(x, a_min, a_max).mean())(x)
+    return result, grad
 
 
 # Transpose operation
@@ -289,33 +314,41 @@ def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
 )
 @assert_cpu_mps_allclose
 def test_transpose(request: pytest.FixtureRequest, device, x, axes):
-    return jnp.transpose(x, axes)
+    result = jnp.transpose(x, axes)
+    grad = jax.grad(lambda x: jnp.transpose(x, axes).mean())(x)
+    return result, grad
 
 
 # Slice operation
 @register_op_test("stablehlo.slice")
 @pytest.mark.parametrize(
-    "shape, slices",
+    "x, slices",
     [
-        ((10,), (slice(2, 8),)),
-        ((8, 8), (slice(1, 5), slice(2, 6))),
-        ((4, 8, 8), (slice(1, 3), slice(2, 6), slice(0, 4))),
+        (
+            np.random.default_rng(42).standard_normal((10,)).astype(np.float32),
+            (slice(2, 8),),
+        ),
+        (
+            np.random.default_rng(42).standard_normal((8, 8)).astype(np.float32),
+            (slice(1, 5), slice(2, 6)),
+        ),
+        (
+            np.random.default_rng(42).standard_normal((4, 8, 8)).astype(np.float32),
+            (slice(1, 3), slice(2, 6), slice(0, 4)),
+        ),
     ],
 )
 @assert_cpu_mps_allclose
-def test_slice(request: pytest.FixtureRequest, device, shape, slices):
-    rng = np.random.default_rng(seed=42)
-    x = jax.device_put(rng.standard_normal(shape).astype(np.float32), device)
-
-    @jax.jit
+def test_slice(request: pytest.FixtureRequest, device, x, slices):
     def do_slice(x):
         return x[slices]
 
-    return do_slice(x)
+    result = do_slice(x)
+    grad = jax.grad(lambda x: do_slice(x).mean())(x)
+    return result, grad
 
 
 # Dynamic slice operation (indices not known at compile time)
-# xfail: MPS implementation ignores start indices (always slices from 0)
 @register_op_test("stablehlo.dynamic_slice")
 @pytest.mark.parametrize(
     "shape, start_indices, slice_sizes",
@@ -331,7 +364,11 @@ def test_dynamic_slice(
 ):
     rng = np.random.default_rng(seed=42)
     x = rng.standard_normal(shape).astype(np.float32)
-    return jax.lax.dynamic_slice(x, start_indices, slice_sizes)
+    result = jax.lax.dynamic_slice(x, start_indices, slice_sizes)
+    grad = jax.grad(
+        lambda x: jax.lax.dynamic_slice(x, start_indices, slice_sizes).mean()
+    )(x)
+    return result, grad
 
 
 # Concatenate operation
@@ -346,7 +383,9 @@ def test_dynamic_slice(
 )
 @assert_cpu_mps_allclose
 def test_concatenate(request: pytest.FixtureRequest, device, arrays, axis):
-    return jnp.concatenate(arrays, axis=axis)
+    result = jnp.concatenate(arrays, axis=axis)
+    grad = jax.grad(lambda arrs: jnp.concatenate(arrs, axis=axis).mean())(arrays)
+    return result, grad
 
 
 # Iota/arange operation
@@ -380,7 +419,13 @@ def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
 )
 @assert_cpu_mps_allclose
 def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
-    return op(x, axis=axis)
+    result = op(x, axis=axis)
+    # Only compute gradients for differentiable reduce ops with float inputs
+    if op in (jnp.sum, jnp.prod) and x.dtype == np.float32:
+        grad = jax.grad(lambda x: op(x, axis=axis).sum())(x)
+    else:
+        grad = None
+    return result, grad
 
 
 # Gather operation (embedding lookup pattern)
@@ -402,4 +447,80 @@ def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
 )
 @assert_cpu_mps_allclose
 def test_gather(request: pytest.FixtureRequest, device, operand, indices):
-    return jnp.take(operand, indices, axis=0)
+    result = jnp.take(operand, indices, axis=0)
+    # TODO: Batched gather gradient (2D indices) crashes MPS - needs more scatter work
+    if indices.ndim == 1:
+        grad = jax.grad(lambda x: jnp.take(x, indices, axis=0).mean())(operand)
+    else:
+        grad = None
+    return result, grad
+
+
+# Pad operation
+@register_op_test("stablehlo.pad")
+@pytest.mark.parametrize(
+    "x, pad_width, constant_value",
+    [
+        (np.random.randn(4, 4).astype(np.float32), ((1, 1), (2, 2)), 0.0),
+        (np.random.randn(3, 5).astype(np.float32), ((0, 2), (1, 0)), 1.0),
+        (
+            np.random.randn(
+                8,
+            ).astype(np.float32),
+            ((3, 3),),
+            -1.0,
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_pad(request: pytest.FixtureRequest, device, x, pad_width, constant_value):
+    # TODO: Gradient crashes MPS - pad gradient uses slice which needs more ops
+    return jnp.pad(x, pad_width, constant_values=constant_value)
+
+
+# Dynamic update slice operation
+@register_op_test("stablehlo.dynamic_update_slice")
+@pytest.mark.parametrize(
+    "operand, update, start_indices",
+    [
+        (
+            np.zeros((8,), dtype=np.float32),
+            np.ones((3,), dtype=np.float32),
+            (2,),
+        ),
+        (
+            np.zeros((6, 6), dtype=np.float32),
+            np.ones((2, 3), dtype=np.float32),
+            (1, 2),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_dynamic_update_slice(
+    request: pytest.FixtureRequest, device, operand, update, start_indices
+):
+    result = jax.lax.dynamic_update_slice(operand, update, start_indices)
+    grad = jax.grad(
+        lambda x: jax.lax.dynamic_update_slice(operand, x, start_indices).mean()
+    )(update)
+    return result, grad
+
+
+# Scatter operation
+@register_op_test("stablehlo.scatter")
+@pytest.mark.parametrize(
+    "operand, indices, updates",
+    [
+        # Simple scatter add
+        (
+            np.zeros((10, 4), dtype=np.float32),
+            np.array([0, 2, 5], dtype=np.int32),
+            np.ones((3, 4), dtype=np.float32),
+        ),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updates):
+    # Use JAX's indexed update which uses scatter internally
+    # TODO: Gradient test fails on MPS with memory error
+    return operand.at[indices].add(updates)

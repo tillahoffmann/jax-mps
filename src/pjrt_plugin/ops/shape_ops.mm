@@ -298,6 +298,137 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
 }
 REGISTER_MPS_OP("stablehlo.custom_call", Handle_custom_call);
 
+// Pad - add padding around tensor
+static MPSGraphTensor* Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(op);
+    if (!padOp) {
+        NSLog(@"ERROR: Expected PadOp");
+        return nullptr;
+    }
+
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* paddingValue = GetInputTensor(values, op, 1);
+    if (!input || !paddingValue)
+        return nullptr;
+
+    auto edgePaddingLow = padOp.getEdgePaddingLow();
+    auto edgePaddingHigh = padOp.getEdgePaddingHigh();
+    auto interiorPadding = padOp.getInteriorPadding();
+
+    // Check if interior padding is all zeros (simple edge padding case)
+    bool hasInteriorPadding = false;
+    for (int64_t p : interiorPadding) {
+        if (p != 0) {
+            hasInteriorPadding = true;
+            break;
+        }
+    }
+
+    if (hasInteriorPadding) {
+        NSLog(@"ERROR: Interior padding not yet supported");
+        return nullptr;
+    }
+
+    // Get output shape and create a tensor filled with padding value
+    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
+    MPSGraphTensor* padded = [g broadcastTensor:paddingValue toShape:outputShape name:nil];
+
+    // Calculate starts and ends for sliceUpdate (where to place the input)
+    NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
+    NSMutableArray<NSNumber*>* ends = [NSMutableArray array];
+    NSMutableArray<NSNumber*>* strides = [NSMutableArray array];
+
+    NSArray<NSNumber*>* inputShape = input.shape;
+    for (NSUInteger i = 0; i < edgePaddingLow.size(); i++) {
+        int64_t start = edgePaddingLow[i];
+        int64_t inputDim = [inputShape[i] longLongValue];
+        [starts addObject:@(start)];
+        [ends addObject:@(start + inputDim)];
+        [strides addObject:@1];
+    }
+
+    // Use sliceUpdateDataTensor to insert input into the padded tensor
+    return [g sliceUpdateDataTensor:padded
+                       updateTensor:input
+                             starts:starts
+                               ends:ends
+                            strides:strides
+                               name:nil];
+}
+REGISTER_MPS_OP("stablehlo.pad", Handle_pad);
+
+// Dynamic update slice - update a portion of a tensor with new values
+static MPSGraphTensor* Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation* op,
+                                                   ValueMap& values) {
+    auto updateSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op);
+    if (!updateSliceOp) {
+        NSLog(@"ERROR: Expected DynamicUpdateSliceOp");
+        return nullptr;
+    }
+
+    MPSGraphTensor* operand = GetInputTensor(values, op, 0);
+    MPSGraphTensor* update = GetInputTensor(values, op, 1);
+    if (!operand || !update)
+        return nullptr;
+
+    NSArray<NSNumber*>* updateShape = update.shape;
+    NSUInteger rank = updateShape.count;
+
+    // Get start indices (operands 2 through N)
+    NSMutableArray<MPSGraphTensor*>* startIndices = [NSMutableArray array];
+    for (NSUInteger i = 0; i < rank; i++) {
+        MPSGraphTensor* startIdx = GetInputTensor(values, op, i + 2);
+        if (!startIdx) {
+            NSLog(@"ERROR: dynamic_update_slice missing start index for dimension %lu",
+                  (unsigned long)i);
+            return nullptr;
+        }
+        [startIndices addObject:startIdx];
+    }
+
+    // Build starts array by reading the scalar start indices
+    // For sliceUpdateDataTensor, we need static starts/ends/strides
+    // But the start indices are dynamic tensors, so we need to use scatter instead
+
+    // Create coordinate tensors for the update region
+    NSMutableArray<MPSGraphTensor*>* indexTensors = [NSMutableArray array];
+    for (NSUInteger dim = 0; dim < rank; dim++) {
+        MPSGraphTensor* startIdx = startIndices[dim];
+
+        // Create coordinate tensor for this dimension (0, 1, 2, ..., update_size-1)
+        MPSGraphTensor* coords = [g coordinateAlongAxis:(NSInteger)dim
+                                              withShape:updateShape
+                                                   name:nil];
+
+        // Cast coordinates to match start index type
+        coords = [g castTensor:coords toType:startIdx.dataType name:nil];
+
+        // Add start index to coordinates
+        MPSGraphTensor* adjustedCoords = [g additionWithPrimaryTensor:coords
+                                                      secondaryTensor:startIdx
+                                                                 name:nil];
+
+        [indexTensors addObject:adjustedCoords];
+    }
+
+    // Stack the coordinate tensors along a new last axis to form indices tensor
+    MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
+
+    // Cast indices to int32 if needed
+    if (indices.dataType != MPSDataTypeInt32) {
+        indices = [g castTensor:indices toType:MPSDataTypeInt32 name:nil];
+    }
+
+    // Use scatterND to update the operand at the specified indices
+    return [g scatterNDWithDataTensor:operand
+                        updatesTensor:update
+                        indicesTensor:indices
+                      batchDimensions:0
+                                 mode:MPSGraphScatterModeSet
+                                 name:nil];
+}
+REGISTER_MPS_OP("stablehlo.dynamic_update_slice", Handle_dynamic_update_slice);
+
 // Gather - generalized indexing operation
 // Handles embedding lookups and other gather patterns
 static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
@@ -373,5 +504,104 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
+
+// Scatter - update tensor at specified indices
+// This handles the common pattern used by gather gradients
+static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
+    if (!scatterOp) {
+        NSLog(@"ERROR: Expected ScatterOp");
+        return nullptr;
+    }
+
+    // Get inputs (may be variadic, but we handle single input case)
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* scatterIndices = GetInputTensor(values, op, 1);
+    MPSGraphTensor* updates = GetInputTensor(values, op, 2);
+    if (!input || !scatterIndices || !updates)
+        return nullptr;
+
+    auto dimNumbers = scatterOp.getScatterDimensionNumbers();
+    auto updateWindowDims = dimNumbers.getUpdateWindowDims();
+    auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
+    auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
+    int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
+
+    NSArray<NSNumber*>* indicesShape = scatterIndices.shape;
+    NSUInteger indicesRank = indicesShape.count;
+
+    // Handle common embedding gradient pattern (reverse of gather):
+    // input: [num_embeddings, embedding_dim] - zeros initially
+    // indices: [batch..., 1] where last dim is index vector
+    // updates: [batch..., embedding_dim] - gradients to scatter
+    // Result: accumulate updates into input at specified indices
+
+    // Check for the common pattern where:
+    // - index_vector_dim is the last dimension of indices
+    // - indices has size 1 in that dimension
+    // - we're scattering along a single dimension
+    if (indexVectorDim == (int64_t)indicesRank - 1 &&
+        [indicesShape[indicesRank - 1] integerValue] == 1 && scatterDimsToOperandDims.size() == 1 &&
+        insertedWindowDims.size() == 1 && insertedWindowDims[0] == scatterDimsToOperandDims[0]) {
+        int64_t scatterAxis = scatterDimsToOperandDims[0];
+
+        // Squeeze the index vector dimension from indices
+        NSMutableArray<NSNumber*>* squeezedShape = [NSMutableArray array];
+        for (NSUInteger i = 0; i < indicesRank - 1; i++) {
+            [squeezedShape addObject:indicesShape[i]];
+        }
+
+        MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
+                                                 withShape:squeezedShape
+                                                      name:nil];
+
+        // Cast indices to int32 if needed
+        if (squeezedIndices.dataType != MPSDataTypeInt32) {
+            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
+        }
+
+        // Determine the scatter mode based on the update computation
+        // Check if it's an add operation (common for gradients)
+        MPSGraphScatterMode mode = MPSGraphScatterModeAdd;
+
+        auto& updateRegion = scatterOp.getUpdateComputation();
+        if (!updateRegion.empty()) {
+            auto& block = updateRegion.front();
+            // Check if the block has a single operation that's an add
+            // followed by a return
+            for (auto& innerOp : block) {
+                if (mlir::isa<mlir::stablehlo::AddOp>(innerOp)) {
+                    mode = MPSGraphScatterModeAdd;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::MaxOp>(innerOp)) {
+                    mode = MPSGraphScatterModeMax;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::MinOp>(innerOp)) {
+                    mode = MPSGraphScatterModeMin;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::MulOp>(innerOp)) {
+                    mode = MPSGraphScatterModeMul;
+                    break;
+                }
+            }
+        }
+
+        // Use scatterWithDataTensor to scatter updates into input
+        return [g scatterWithDataTensor:input
+                          updatesTensor:updates
+                          indicesTensor:squeezedIndices
+                                   axis:(NSUInteger)scatterAxis
+                                   mode:mode
+                                   name:nil];
+    }
+
+    NSLog(@"ERROR: Unsupported scatter pattern - update_window_dims size: %lu, "
+          @"inserted_window_dims size: %lu, scatter_dims_to_operand_dims size: %lu, "
+          @"index_vector_dim: %lld",
+          (unsigned long)updateWindowDims.size(), (unsigned long)insertedWindowDims.size(),
+          (unsigned long)scatterDimsToOperandDims.size(), indexVectorDim);
+    return nullptr;
+}
+REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);
 
 }  // namespace jax_mps

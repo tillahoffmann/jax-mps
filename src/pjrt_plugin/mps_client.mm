@@ -12,10 +12,17 @@
 namespace jax_mps {
 
 MpsClient::MpsClient()
-    : platform_name_("mps"), platform_version_("0.1.0"), metal_device_(nullptr) {}
+    : platform_name_("mps"),
+      platform_version_("0.1.0"),
+      metal_device_(nullptr),
+      command_queue_(nullptr) {}
 
 MpsClient::~MpsClient() {
     devices_.clear();
+    if (command_queue_) {
+        CFRelease((__bridge CFTypeRef)command_queue_);
+        command_queue_ = nullptr;
+    }
     if (metal_device_) {
         CFRelease((__bridge CFTypeRef)metal_device_);
         metal_device_ = nullptr;
@@ -39,6 +46,14 @@ bool MpsClient::Initialize() {
     }
 
     metal_device_ = (__bridge_retained void*)device;
+
+    // Create a shared command queue (avoids context leak warnings)
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (!queue) {
+        NSLog(@"Failed to create Metal command queue");
+        return false;
+    }
+    command_queue_ = (__bridge_retained void*)queue;
 
     // Create device wrapper
     NSString* name = [device name];

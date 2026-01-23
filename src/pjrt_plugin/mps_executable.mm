@@ -340,10 +340,10 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 "This indicates an internal error in the MPS graph construction.");
         }
 
-        // Execute graph
-        id<MTLCommandQueue> commandQueue = [mtl_device newCommandQueue];
+        // Get cached command queue from client
+        id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>)client_->command_queue();
         if (!commandQueue) {
-            return ExecutionResult::Error("Failed to create Metal command queue");
+            return ExecutionResult::Error("No Metal command queue available");
         }
 
         NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
