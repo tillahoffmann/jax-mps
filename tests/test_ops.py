@@ -18,7 +18,7 @@ register_op_test(
     "func.return", "func.call", "stablehlo.constant", "stablehlo.custom_call"
 )
 
-# Common test data
+# Common test data (seeded for reproducibility)
 _rng = np.random.default_rng(42)
 _float_2d = _rng.standard_normal((32, 32)).astype(np.float32)
 _float_2d_b = _rng.standard_normal((32, 32)).astype(np.float32) + 0.1
@@ -26,6 +26,22 @@ _float_positive = np.abs(_rng.standard_normal((32, 32)).astype(np.float32)) + 0.
 _uint_2d = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
 _uint_2d_b = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
 _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
+
+# Additional seeded test data for various shapes
+_rng2 = np.random.default_rng(43)
+_float_1d = _rng2.standard_normal((10,)).astype(np.float32)
+_float_2d_small = _rng2.standard_normal((4, 8)).astype(np.float32)
+_float_3d = _rng2.standard_normal((2, 3, 4)).astype(np.float32)
+_float_4d = _rng2.standard_normal((2, 3, 4, 5)).astype(np.float32)
+_float_8x8 = _rng2.standard_normal((8, 8)).astype(np.float32)
+_float_4x8x8 = _rng2.standard_normal((4, 8, 8)).astype(np.float32)
+
+# Matmul test data
+_rng_matmul = np.random.default_rng(44)
+_matmul_a1 = _rng_matmul.standard_normal((32, 64)).astype(np.float32)
+_matmul_b1 = _rng_matmul.standard_normal((64, 32)).astype(np.float32)
+_matmul_a2 = _rng_matmul.standard_normal((16, 16)).astype(np.float32)
+_matmul_b2 = _rng_matmul.standard_normal((16, 16)).astype(np.float32)
 
 
 # Unary operations
@@ -65,7 +81,7 @@ def test_unary_op(request: pytest.FixtureRequest, device, op, x):
     return result, grad
 
 
-# Binary operations (arithmetic, min/max, remainder, bitwise, shifts)
+# Binary operations (arithmetic, min/max, remainder, bitwise, shifts, matmul)
 @pytest.mark.parametrize(
     "op, a, b",
     [
@@ -106,14 +122,20 @@ def test_unary_op(request: pytest.FixtureRequest, device, op, x):
             _uint_2d,
             _uint_shift,
         ),
+        # Matrix multiplication
+        (
+            register_op_test(jnp.matmul, "stablehlo.dot", "stablehlo.dot_general"),
+            _matmul_a1,
+            _matmul_b1,
+        ),
+        (jnp.matmul, _matmul_a2, _matmul_b2),
     ],
 )
 @assert_cpu_mps_allclose
 def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
     result = op(a, b)
 
-    # Calculate gradients with respect to inexact dtypes.
-    # Skip for nextafter which doesn't have a differentiation rule in JAX.
+    # Calculate gradients for float types (skip non-differentiable ops)
     if op is jnp.nextafter:
         grad = None
     elif a.dtype == jnp.float32 and b.dtype == jnp.float32:
@@ -128,40 +150,18 @@ def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
     return result, grad
 
 
-# Matrix multiplication
-@register_op_test("stablehlo.dot", "stablehlo.dot_general")
-@pytest.mark.parametrize(
-    "a, b",
-    [
-        (
-            np.random.randn(32, 64).astype(np.float32),
-            np.random.randn(64, 32).astype(np.float32),
-        ),
-        (
-            np.random.randn(16, 16).astype(np.float32),
-            np.random.randn(16, 16).astype(np.float32),
-        ),
-        (
-            np.random.randn(64, 128).astype(np.float32),
-            np.random.randn(128, 64).astype(np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_matmul(request: pytest.FixtureRequest, device, a, b):
-    # TODO: Gradient test crashes MPS - needs dot_general transpose implementation
-    return jnp.matmul(a, b)
-
-
 # Convolution operations
+_rng_conv = np.random.default_rng(45)
+
+
 @register_op_test("stablehlo.convolution")
 @pytest.mark.parametrize(
     "x, kernel, strides, padding, dilation, groups",
     [
         # Basic 3x3 conv, SAME padding
         (
-            np.random.randn(2, 28, 28, 3).astype(np.float32),
-            np.random.randn(3, 3, 3, 8).astype(np.float32),
+            _rng_conv.standard_normal((2, 28, 28, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -169,8 +169,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # Strided conv
         (
-            np.random.randn(2, 32, 32, 3).astype(np.float32),
-            np.random.randn(3, 3, 3, 16).astype(np.float32),
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 16)).astype(np.float32),
             (2, 2),
             "SAME",
             (1, 1),
@@ -178,8 +178,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # VALID padding
         (
-            np.random.randn(2, 32, 32, 3).astype(np.float32),
-            np.random.randn(5, 5, 3, 8).astype(np.float32),
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((5, 5, 3, 8)).astype(np.float32),
             (1, 1),
             "VALID",
             (1, 1),
@@ -187,8 +187,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # Dilated conv
         (
-            np.random.randn(2, 32, 32, 3).astype(np.float32),
-            np.random.randn(3, 3, 3, 8).astype(np.float32),
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 1),
             "SAME",
             (2, 2),
@@ -196,8 +196,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # 1x1 pointwise conv
         (
-            np.random.randn(2, 16, 16, 64).astype(np.float32),
-            np.random.randn(1, 1, 64, 128).astype(np.float32),
+            _rng_conv.standard_normal((2, 16, 16, 64)).astype(np.float32),
+            _rng_conv.standard_normal((1, 1, 64, 128)).astype(np.float32),
             (1, 1),
             "VALID",
             (1, 1),
@@ -205,8 +205,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # Depthwise conv (groups = in_channels)
         (
-            np.random.randn(2, 28, 28, 16).astype(np.float32),
-            np.random.randn(3, 3, 1, 16).astype(np.float32),
+            _rng_conv.standard_normal((2, 28, 28, 16)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 1, 16)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -214,8 +214,8 @@ def test_matmul(request: pytest.FixtureRequest, device, a, b):
         ),
         # Grouped conv
         (
-            np.random.randn(2, 28, 28, 16).astype(np.float32),
-            np.random.randn(3, 3, 4, 32).astype(np.float32),
+            _rng_conv.standard_normal((2, 28, 28, 16)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 4, 32)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -234,19 +234,29 @@ def test_conv2d(
     dilation,
     groups,
 ):
-    # TODO: Gradient test needs conv transpose implementation
-    return jax.lax.conv_general_dilated(
-        x,
-        kernel,
-        window_strides=strides,
-        padding=padding,
-        rhs_dilation=dilation,
-        feature_group_count=groups,
-        dimension_numbers=("NHWC", "HWIO", "NHWC"),
-    )
+    def conv_fn(x, kernel):
+        return jax.lax.conv_general_dilated(
+            x,
+            kernel,
+            window_strides=strides,
+            padding=padding,
+            rhs_dilation=dilation,
+            feature_group_count=groups,
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        )
+
+    result = conv_fn(x, kernel)
+    # Gradient only works for basic convs (stride=1, groups=1)
+    # Strided conv gradient produces incorrect values
+    # Grouped/depthwise conv gradient crashes with batch_group_count not supported
+    if strides == (1, 1) and groups == 1:
+        grad = jax.grad(lambda args: conv_fn(*args).mean())((x, kernel))
+    else:
+        grad = None
+    return result, grad
 
 
-# Shape operations (reshape, broadcast, transpose)
+# Shape operations (reshape, broadcast, transpose, reverse)
 @pytest.mark.parametrize(
     "op, x, arg",
     [
@@ -260,8 +270,17 @@ def test_conv2d(
             _rng.standard_normal((1, 32)).astype(np.float32),
             (4, 32),
         ),
-        # Transpose
+        # Transpose - various ranks
         (register_op_test(jnp.transpose, "stablehlo.transpose"), _float_2d, (1, 0)),
+        (jnp.transpose, _float_2d_small, (1, 0)),
+        (jnp.transpose, _float_3d, (2, 0, 1)),
+        (jnp.transpose, _float_4d, (3, 2, 1, 0)),
+        # Reverse - various ranks and axes
+        (register_op_test(jax.lax.rev, "stablehlo.reverse"), _float_1d, (0,)),
+        (jax.lax.rev, _float_2d_small, (0,)),
+        (jax.lax.rev, _float_2d_small, (1,)),
+        (jax.lax.rev, _float_2d_small, (0, 1)),
+        (jax.lax.rev, _float_3d, (1, 2)),
     ],
 )
 @assert_cpu_mps_allclose
@@ -300,8 +319,8 @@ def test_type_convert(request: pytest.FixtureRequest, device, op, x, to_dtype):
 @pytest.mark.parametrize(
     "x, a_min, a_max",
     [
-        (np.random.randn(32, 32).astype(np.float32), -0.5, 0.5),
-        (np.random.randn(16, 16).astype(np.float32), 0.0, 1.0),
+        (_float_2d, -0.5, 0.5),
+        (_float_2d_small, 0.0, 1.0),
     ],
 )
 @assert_cpu_mps_allclose
@@ -311,59 +330,14 @@ def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
     return result, grad
 
 
-# Transpose operation
-@register_op_test("stablehlo.transpose")
-@pytest.mark.parametrize(
-    "x, axes",
-    [
-        (np.random.randn(4, 8).astype(np.float32), (1, 0)),
-        (np.random.randn(2, 3, 4).astype(np.float32), (2, 0, 1)),
-        (np.random.randn(2, 3, 4, 5).astype(np.float32), (3, 2, 1, 0)),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_transpose(request: pytest.FixtureRequest, device, x, axes):
-    result = jnp.transpose(x, axes)
-    grad = jax.grad(lambda x: jnp.transpose(x, axes).mean())(x)
-    return result, grad
-
-
-# Reverse operation
-@register_op_test("stablehlo.reverse")
-@pytest.mark.parametrize(
-    "x, axes",
-    [
-        (np.random.randn(8).astype(np.float32), (0,)),
-        (np.random.randn(4, 8).astype(np.float32), (0,)),
-        (np.random.randn(4, 8).astype(np.float32), (1,)),
-        (np.random.randn(4, 8).astype(np.float32), (0, 1)),
-        (np.random.randn(2, 3, 4).astype(np.float32), (1, 2)),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_reverse(request: pytest.FixtureRequest, device, x, axes):
-    result = jax.lax.rev(x, axes)
-    grad = jax.grad(lambda x: jax.lax.rev(x, axes).mean())(x)
-    return result, grad
-
-
-# Slice operation
+# Slicing operations (static and dynamic)
 @register_op_test("stablehlo.slice")
 @pytest.mark.parametrize(
     "x, slices",
     [
-        (
-            np.random.default_rng(42).standard_normal((10,)).astype(np.float32),
-            (slice(2, 8),),
-        ),
-        (
-            np.random.default_rng(42).standard_normal((8, 8)).astype(np.float32),
-            (slice(1, 5), slice(2, 6)),
-        ),
-        (
-            np.random.default_rng(42).standard_normal((4, 8, 8)).astype(np.float32),
-            (slice(1, 3), slice(2, 6), slice(0, 4)),
-        ),
+        (_float_1d, (slice(2, 8),)),
+        (_float_8x8, (slice(1, 5), slice(2, 6))),
+        (_float_4x8x8, (slice(1, 3), slice(2, 6), slice(0, 4))),
     ],
 )
 @assert_cpu_mps_allclose
@@ -376,7 +350,6 @@ def test_slice(request: pytest.FixtureRequest, device, x, slices):
     return result, grad
 
 
-# Dynamic slice operation (indices not known at compile time)
 @register_op_test("stablehlo.dynamic_slice")
 @pytest.mark.parametrize(
     "shape, start_indices, slice_sizes",
@@ -400,13 +373,22 @@ def test_dynamic_slice(
 
 
 # Concatenate operation
+_rng_concat = np.random.default_rng(46)
+
+
 @register_op_test("stablehlo.concatenate")
 @pytest.mark.parametrize(
     "arrays, axis",
     [
-        ([np.random.randn(4, 8).astype(np.float32) for _ in range(3)], 0),
-        ([np.random.randn(4, 8).astype(np.float32) for _ in range(2)], 1),
-        ([np.random.randn(2, 3, 4).astype(np.float32) for _ in range(2)], 2),
+        ([_rng_concat.standard_normal((4, 8)).astype(np.float32) for _ in range(3)], 0),
+        ([_rng_concat.standard_normal((4, 8)).astype(np.float32) for _ in range(2)], 1),
+        (
+            [
+                _rng_concat.standard_normal((2, 3, 4)).astype(np.float32)
+                for _ in range(2)
+            ],
+            2,
+        ),
     ],
 )
 @assert_cpu_mps_allclose
@@ -432,17 +414,24 @@ def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
 
 
 # Reduce operations (stablehlo.reduce and stablehlo.return are used internally)
+_rng_reduce = np.random.default_rng(47)
+
+
 @register_op_test("stablehlo.reduce", "stablehlo.return")
 @pytest.mark.parametrize(
     "op, x, axis",
     [
-        (jnp.sum, np.random.randn(16, 16).astype(np.float32), None),
-        (jnp.sum, np.random.randn(8, 4, 2).astype(np.float32), 1),
-        (jnp.prod, np.random.randn(4, 4).astype(np.float32) * 0.5 + 1, None),
-        (jnp.max, np.random.randn(16, 16).astype(np.float32), 0),
-        (jnp.min, np.random.randn(16, 16).astype(np.float32), -1),
-        (jnp.all, np.random.rand(8, 8) > 0.5, None),
-        (jnp.any, np.random.rand(8, 8) > 0.5, 0),
+        (jnp.sum, _rng_reduce.standard_normal((16, 16)).astype(np.float32), None),
+        (jnp.sum, _rng_reduce.standard_normal((8, 4, 2)).astype(np.float32), 1),
+        (
+            jnp.prod,
+            _rng_reduce.standard_normal((4, 4)).astype(np.float32) * 0.5 + 1,
+            None,
+        ),
+        (jnp.max, _rng_reduce.standard_normal((16, 16)).astype(np.float32), 0),
+        (jnp.min, _rng_reduce.standard_normal((16, 16)).astype(np.float32), -1),
+        (jnp.all, _rng_reduce.random((8, 8)) > 0.5, None),
+        (jnp.any, _rng_reduce.random((8, 8)) > 0.5, 0),
     ],
 )
 @assert_cpu_mps_allclose
@@ -457,18 +446,21 @@ def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
 
 
 # Gather operation (embedding lookup pattern)
+_rng_gather = np.random.default_rng(48)
+
+
 @register_op_test("stablehlo.gather")
 @pytest.mark.parametrize(
     "operand, indices",
     [
-        # Simple embedding lookup
+        # Simple embedding lookup (1D indices - gradient works)
         (
-            np.random.randn(100, 16).astype(np.float32),
+            _rng_gather.standard_normal((100, 16)).astype(np.float32),
             np.array([0, 5, 10, 50, 99], dtype=np.int32),
         ),
-        # Batched embedding lookup
+        # Batched embedding lookup (2D indices - gradient crashes MPS scatter)
         (
-            np.random.randn(50, 8).astype(np.float32),
+            _rng_gather.standard_normal((50, 8)).astype(np.float32),
             np.array([[0, 1, 2], [10, 20, 30]], dtype=np.int32),
         ),
     ],
@@ -476,7 +468,7 @@ def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
 @assert_cpu_mps_allclose
 def test_gather(request: pytest.FixtureRequest, device, operand, indices):
     result = jnp.take(operand, indices, axis=0)
-    # TODO: Batched gather gradient (2D indices) crashes MPS - needs more scatter work
+    # 2D indices gradient crashes MPS with scatter rank mismatch error
     if indices.ndim == 1:
         grad = jax.grad(lambda x: jnp.take(x, indices, axis=0).mean())(operand)
     else:
@@ -485,24 +477,21 @@ def test_gather(request: pytest.FixtureRequest, device, operand, indices):
 
 
 # Pad operation
+_rng_pad = np.random.default_rng(49)
+
+
 @register_op_test("stablehlo.pad")
 @pytest.mark.parametrize(
     "x, pad_width, constant_value",
     [
-        (np.random.randn(4, 4).astype(np.float32), ((1, 1), (2, 2)), 0.0),
-        (np.random.randn(3, 5).astype(np.float32), ((0, 2), (1, 0)), 1.0),
-        (
-            np.random.randn(
-                8,
-            ).astype(np.float32),
-            ((3, 3),),
-            -1.0,
-        ),
+        (_rng_pad.standard_normal((4, 4)).astype(np.float32), ((1, 1), (2, 2)), 0.0),
+        (_rng_pad.standard_normal((3, 5)).astype(np.float32), ((0, 2), (1, 0)), 1.0),
+        (_rng_pad.standard_normal((8,)).astype(np.float32), ((3, 3),), -1.0),
     ],
 )
 @assert_cpu_mps_allclose
 def test_pad(request: pytest.FixtureRequest, device, x, pad_width, constant_value):
-    # TODO: Gradient crashes MPS - pad gradient uses slice which needs more ops
+    # Gradient crashes MPS with strided_slice_update shape mismatch
     return jnp.pad(x, pad_width, constant_values=constant_value)
 
 
@@ -549,6 +538,5 @@ def test_dynamic_update_slice(
 )
 @assert_cpu_mps_allclose
 def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updates):
-    # Use JAX's indexed update which uses scatter internally
-    # TODO: Gradient test fails on MPS with memory error
+    # Gradient fails with "Memory kinds and dtypes have different sizes" error
     return operand.at[indices].add(updates)
