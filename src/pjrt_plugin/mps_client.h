@@ -56,9 +56,12 @@ public:
     // Compilation - takes ownership of ParsedModule
     std::unique_ptr<MpsExecutable> CompileStableHLO(mps::ParsedModule module, MpsDevice* device);
 
-    // Internal: get Metal device
+    // Internal: get Metal device and command queue
     void* metal_device() const {
         return metal_device_;
+    }
+    void* command_queue() const {
+        return command_queue_;
     }
 
 private:
@@ -67,7 +70,8 @@ private:
 
     std::string platform_name_;
     std::string platform_version_;
-    void* metal_device_;  // id<MTLDevice>
+    void* metal_device_;   // id<MTLDevice>
+    void* command_queue_;  // id<MTLCommandQueue>
     std::vector<std::unique_ptr<MpsDevice>> devices_;
 };
 
