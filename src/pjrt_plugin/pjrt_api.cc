@@ -77,6 +77,26 @@ struct PJRT_Buffer {
 struct PJRT_Executable {
     std::unique_ptr<jax_mps::MpsExecutable> executable;
     PJRT_Client* client;
+
+    // Dynamic storage for output metadata (lazily initialized)
+    mutable std::vector<const char*> output_memory_kinds;
+    mutable std::vector<size_t> output_memory_kind_sizes;
+    mutable std::vector<PJRT_Buffer_Type> output_types;
+    mutable std::vector<int64_t> output_dims;
+    mutable std::vector<size_t> output_dim_sizes;
+    mutable bool output_metadata_initialized = false;
+
+    void initOutputMetadata() const {
+        if (output_metadata_initialized)
+            return;
+        size_t num_outputs = executable ? executable->num_outputs() : 1;
+        output_memory_kinds.resize(num_outputs, "device");
+        output_memory_kind_sizes.resize(num_outputs, 6);  // strlen("device")
+        output_types.resize(num_outputs, PJRT_Buffer_Type_F32);
+        output_dims.resize(num_outputs * 8, 0);  // up to 8 dims per output
+        output_dim_sizes.resize(num_outputs, 0);
+        output_metadata_initialized = true;
+    }
 };
 
 struct PJRT_LoadedExecutable {
@@ -670,59 +690,39 @@ PJRT_Error* MPS_Executable_GetCostAnalysis(PJRT_Executable_GetCostAnalysis_Args*
     return nullptr;
 }
 
-// Static storage for output memory kinds - supports up to 64 outputs
+// Static string constant for memory kind
 static const char* g_memory_kind = "device";
-static const char* g_output_memory_kinds[64];
-static size_t g_output_memory_kind_sizes[64];
-static bool g_memory_kinds_initialized = false;
-
-static void InitializeMemoryKinds() {
-    if (!g_memory_kinds_initialized) {
-        for (int i = 0; i < 64; i++) {
-            g_output_memory_kinds[i] = g_memory_kind;
-            g_output_memory_kind_sizes[i] = 6;  // strlen("device")
-        }
-        g_memory_kinds_initialized = true;
-    }
-}
 
 PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputMemoryKinds called\n");
-    InitializeMemoryKinds();
 
-    // Get the actual number of outputs from the executable
-    size_t num_outputs = 1;
-    if (args->executable && args->executable->executable) {
-        num_outputs = args->executable->executable->num_outputs();
+    if (!args->executable) {
+        return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
 
+    // Initialize dynamic storage if needed
+    args->executable->initOutputMetadata();
+
+    size_t num_outputs = args->executable->output_memory_kinds.size();
     args->num_outputs = num_outputs;
-    args->memory_kinds = g_output_memory_kinds;
-    args->memory_kind_sizes = g_output_memory_kind_sizes;
+    args->memory_kinds = args->executable->output_memory_kinds.data();
+    args->memory_kind_sizes = args->executable->output_memory_kind_sizes.data();
     MPS_LOG(" PJRT_Executable_OutputMemoryKinds: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
-// Static storage for output types and dimensions - supports up to 64 outputs
-static PJRT_Buffer_Type g_output_types[64];
-static int64_t g_output_dims[64 * 8];  // up to 8 dims per output
-static size_t g_output_dim_sizes[64];
-
 PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputElementTypes called\n");
 
-    // Get the actual number of outputs from the executable
-    size_t num_outputs = 1;
-    if (args->executable && args->executable->executable) {
-        num_outputs = args->executable->executable->num_outputs();
+    if (!args->executable) {
+        return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
 
-    // Default to F32 for all outputs
-    for (size_t i = 0; i < num_outputs && i < 64; i++) {
-        g_output_types[i] = PJRT_Buffer_Type_F32;
-    }
+    // Initialize dynamic storage if needed
+    args->executable->initOutputMetadata();
 
-    args->output_types = g_output_types;
+    size_t num_outputs = args->executable->output_types.size();
+    args->output_types = args->executable->output_types.data();
     args->num_output_types = num_outputs;
     MPS_LOG(" PJRT_Executable_OutputElementTypes: %zu outputs\n", num_outputs);
     return nullptr;
@@ -731,20 +731,17 @@ PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes
 PJRT_Error* MPS_Executable_OutputDimensions(PJRT_Executable_OutputDimensions_Args* args) {
     MPS_LOG(" PJRT_Executable_OutputDimensions called\n");
 
-    // Get the actual number of outputs from the executable
-    size_t num_outputs = 1;
-    if (args->executable && args->executable->executable) {
-        num_outputs = args->executable->executable->num_outputs();
+    if (!args->executable) {
+        return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
 
-    // Default dimensions (scalar) for all outputs
-    for (size_t i = 0; i < num_outputs && i < 64; i++) {
-        g_output_dim_sizes[i] = 0;  // scalar by default
-    }
+    // Initialize dynamic storage if needed
+    args->executable->initOutputMetadata();
 
+    size_t num_outputs = args->executable->output_dim_sizes.size();
     args->num_outputs = num_outputs;
-    args->dims = g_output_dims;
-    args->dim_sizes = g_output_dim_sizes;
+    args->dims = args->executable->output_dims.data();
+    args->dim_sizes = args->executable->output_dim_sizes.data();
     MPS_LOG(" PJRT_Executable_OutputDimensions: %zu outputs\n", num_outputs);
     return nullptr;
 }
@@ -835,6 +832,10 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
         }
     }
 
+    // Debug: log expected vs actual outputs
+    size_t expected_outputs = args->executable->executable->executable->num_outputs();
+    MPS_LOG(" Execute: expected_outputs=%zu, num_args=%zu\n", expected_outputs, args->num_args);
+
     PJRT_Client* client = args->executable->client;
     jax_mps::MpsDevice* device =
         client && !client->devices.empty() ? client->devices[0]->device : nullptr;
@@ -848,7 +849,15 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
 
     // Write outputs to the pre-allocated output_lists
     size_t num_outputs = exec_result.buffers.size();
-    MPS_LOG(" Execute: creating %zu output buffers with client=%p\n", num_outputs, (void*)client);
+    MPS_LOG(" Execute: actual_outputs=%zu, expected=%zu, client=%p\n", num_outputs,
+            expected_outputs, (void*)client);
+
+    // Safety check: don't write more outputs than expected
+    if (num_outputs > expected_outputs) {
+        MPS_LOG(" WARNING: More outputs produced (%zu) than expected (%zu)!\n", num_outputs,
+                expected_outputs);
+    }
+
     for (size_t i = 0; i < num_outputs; i++) {
         auto* buffer = new PJRT_Buffer();
         buffer->buffer = std::move(exec_result.buffers[i]);

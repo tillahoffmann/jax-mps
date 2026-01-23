@@ -604,4 +604,26 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
 }
 REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);
 
+// Reverse - reverse elements along specified dimensions
+static MPSGraphTensor* Handle_reverse(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(op);
+    if (!reverseOp) {
+        NSLog(@"ERROR: Expected ReverseOp");
+        return nullptr;
+    }
+
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+
+    auto dimensions = reverseOp.getDimensions();
+    NSMutableArray<NSNumber*>* axes = [NSMutableArray array];
+    for (int64_t dim : dimensions) {
+        [axes addObject:@(dim)];
+    }
+
+    return [g reverseTensor:input axes:axes name:nil];
+}
+REGISTER_MPS_OP("stablehlo.reverse", Handle_reverse);
+
 }  // namespace jax_mps
