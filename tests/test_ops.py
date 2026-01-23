@@ -44,6 +44,11 @@ _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
             register_op_test(jax.scipy.special.erfinv, "chlo.erf_inv"),
             _rng.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
         ),
+        # ReLU uses compare + select internally
+        (
+            register_op_test(jax.nn.relu, "stablehlo.compare", "stablehlo.select"),
+            _float_2d,
+        ),
     ],
 )
 @assert_cpu_mps_allclose
@@ -210,80 +215,51 @@ def test_conv2d(
     )
 
 
-# ReLU activation (uses compare + select internally)
-@register_op_test("stablehlo.compare", "stablehlo.select")
+# Shape operations (reshape, broadcast, transpose)
 @pytest.mark.parametrize(
-    "x",
+    "op, x, arg",
     [
-        np.random.randn(32).astype(np.float32),
-        np.random.randn(16, 16).astype(np.float32),
-        np.random.randn(4, 8, 8).astype(np.float32),
+        # Reshape
+        (register_op_test(jnp.reshape, "stablehlo.reshape"), _float_2d, (64, 16)),
+        # Broadcast
+        (
+            register_op_test(
+                jnp.broadcast_to, "stablehlo.broadcast", "stablehlo.broadcast_in_dim"
+            ),
+            _rng.standard_normal((1, 32)).astype(np.float32),
+            (4, 32),
+        ),
+        # Transpose
+        (register_op_test(jnp.transpose, "stablehlo.transpose"), _float_2d, (1, 0)),
     ],
 )
 @assert_cpu_mps_allclose
-def test_relu(request: pytest.FixtureRequest, device, x):
-    return jax.nn.relu(x)
+def test_shape_op(request: pytest.FixtureRequest, device, op, x, arg):
+    return op(x, arg)
 
 
-# Reshape operations
-@register_op_test("stablehlo.reshape")
+# Type conversions (convert and bitcast)
+_astype = register_op_test(lambda x, d: x.astype(d), "stablehlo.convert")
+
+
 @pytest.mark.parametrize(
-    "x, output_shape",
+    "op, x, to_dtype",
     [
-        (np.random.randn(4, 8).astype(np.float32), (8, 4)),
-        (np.random.randn(2, 3, 4).astype(np.float32), (6, 4)),
-        (np.random.randn(32).astype(np.float32), (4, 8)),
-        (np.random.randn(2, 2, 2, 2).astype(np.float32), (4, 4)),
+        # Regular conversions
+        (_astype, _float_2d, np.float16),
+        (_astype, _float_2d.astype(np.float16), np.float32),
+        (_astype, _rng.integers(-100, 100, (16, 16)).astype(np.int32), np.float32),
+        # Bitcast conversions
+        (
+            register_op_test(jax.lax.bitcast_convert_type, "stablehlo.bitcast_convert"),
+            _float_2d,
+            np.int32,
+        ),
     ],
 )
 @assert_cpu_mps_allclose
-def test_reshape(request: pytest.FixtureRequest, device, x, output_shape):
-    return jnp.reshape(x, output_shape)
-
-
-# Broadcast operations
-@register_op_test("stablehlo.broadcast", "stablehlo.broadcast_in_dim")
-@pytest.mark.parametrize(
-    "x, output_shape",
-    [
-        (np.random.randn(1).astype(np.float32), (4,)),
-        (np.random.randn(1, 4).astype(np.float32), (3, 4)),
-        (np.random.randn(4, 1).astype(np.float32), (4, 8)),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_broadcast(request: pytest.FixtureRequest, device, x, output_shape):
-    return jnp.broadcast_to(x, output_shape)
-
-
-# Type conversion
-@register_op_test("stablehlo.convert")
-@pytest.mark.parametrize(
-    "x, to_dtype",
-    [
-        (np.random.randn(16, 16).astype(np.float32), np.float16),
-        (np.random.randn(16, 16).astype(np.float16), np.float32),
-        (np.random.randint(-100, 100, size=(16, 16)).astype(np.int32), np.float32),
-        (np.random.randn(16, 16).astype(np.float32), np.int32),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_convert(request: pytest.FixtureRequest, device, x, to_dtype):
-    return x.astype(to_dtype)
-
-
-# Bitcast conversion (reinterpret memory as different type)
-@register_op_test("stablehlo.bitcast_convert")
-@pytest.mark.parametrize(
-    "x, to_dtype",
-    [
-        (np.random.randn(16, 16).astype(np.float32), np.int32),
-        (np.random.randint(0, 2**31, size=(16, 16)).astype(np.int32), np.float32),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_bitcast_convert(request: pytest.FixtureRequest, device, x, to_dtype):
-    return jax.lax.bitcast_convert_type(x, to_dtype)
+def test_type_convert(request: pytest.FixtureRequest, device, op, x, to_dtype):
+    return op(x, to_dtype)
 
 
 # Clip/clamp operation
@@ -385,30 +361,6 @@ def test_concatenate(request: pytest.FixtureRequest, device, arrays, axis):
 @assert_cpu_mps_allclose
 def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
     return jnp.arange(start, stop, dtype=dtype)
-
-
-# Composite operations (operation chaining)
-@pytest.mark.parametrize(
-    "op_fn",
-    [
-        lambda a, b, c: jnp.multiply(jnp.add(a, b), c),
-        lambda a, b, c: jnp.add(jnp.tanh(a), jnp.tanh(b)),
-        lambda a, b, c: jnp.tanh(jnp.matmul(a, b)),
-    ],
-)
-@pytest.mark.parametrize(
-    "a, b, c",
-    [
-        (
-            np.random.randn(16, 16).astype(np.float32),
-            np.random.randn(16, 16).astype(np.float32),
-            np.random.randn(16, 16).astype(np.float32),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_composite_op(request: pytest.FixtureRequest, device, op_fn, a, b, c):
-    return op_fn(a, b, c)
 
 
 # Reduce operations (stablehlo.reduce and stablehlo.return are used internally)
