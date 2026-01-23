@@ -47,6 +47,10 @@ _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
         ),
         (register_op_test(jnp.floor, "stablehlo.floor"), _float_2d),
         (register_op_test(jnp.sign, "stablehlo.sign"), _float_2d),
+        (
+            register_op_test(jnp.isfinite, "stablehlo.is_finite"),
+            np.array([1.0, np.inf, -np.inf, np.nan, 0.0], dtype=np.float32),
+        ),
         # ReLU uses compare + select internally
         (
             register_op_test(jax.nn.relu, "stablehlo.compare", "stablehlo.select"),
@@ -76,6 +80,11 @@ def test_unary_op(request: pytest.FixtureRequest, device, op, x):
             register_op_test(jnp.remainder, "stablehlo.remainder"),
             _float_2d * 10,
             _float_2d_b * 3 + 1,
+        ),
+        (
+            register_op_test(jnp.power, "stablehlo.power"),
+            _float_positive,
+            _float_2d_b * 0.5 + 1,
         ),
         (
             register_op_test(jnp.nextafter, "chlo.next_after"),
@@ -316,6 +325,25 @@ def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
 def test_transpose(request: pytest.FixtureRequest, device, x, axes):
     result = jnp.transpose(x, axes)
     grad = jax.grad(lambda x: jnp.transpose(x, axes).mean())(x)
+    return result, grad
+
+
+# Reverse operation
+@register_op_test("stablehlo.reverse")
+@pytest.mark.parametrize(
+    "x, axes",
+    [
+        (np.random.randn(8).astype(np.float32), (0,)),
+        (np.random.randn(4, 8).astype(np.float32), (0,)),
+        (np.random.randn(4, 8).astype(np.float32), (1,)),
+        (np.random.randn(4, 8).astype(np.float32), (0, 1)),
+        (np.random.randn(2, 3, 4).astype(np.float32), (1, 2)),
+    ],
+)
+@assert_cpu_mps_allclose
+def test_reverse(request: pytest.FixtureRequest, device, x, axes):
+    result = jax.lax.rev(x, axes)
+    grad = jax.grad(lambda x: jax.lax.rev(x, axes).mean())(x)
     return result, grad
 
 
