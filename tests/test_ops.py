@@ -167,7 +167,7 @@ _rng_conv = np.random.default_rng(45)
             (1, 1),
             1,
         ),
-        # Strided conv
+        # Strided conv (stride=2)
         (
             _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
             _rng_conv.standard_normal((3, 3, 3, 16)).astype(np.float32),
@@ -176,7 +176,60 @@ _rng_conv = np.random.default_rng(45)
             (1, 1),
             1,
         ),
-        # VALID padding
+        # Strided conv (stride=2) with VALID padding
+        (
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (2, 2),
+            "VALID",
+            (1, 1),
+            1,
+        ),
+        # Strided conv (stride=3)
+        (
+            _rng_conv.standard_normal((2, 33, 33, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (3, 3),
+            "SAME",
+            (1, 1),
+            1,
+        ),
+        # Asymmetric strides (fixed - cross-dimensional padding shift correction)
+        (
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (2, 1),
+            "SAME",
+            (1, 1),
+            1,
+        ),
+        (
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (1, 2),
+            "SAME",
+            (1, 1),
+            1,
+        ),
+        (
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (3, 2),
+            "VALID",
+            (1, 1),
+            1,
+        ),
+        # Stride + dilation combination - gradient has bug in MPS
+        pytest.param(
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (2, 2),
+            "SAME",
+            (2, 2),
+            1,
+            marks=pytest.mark.xfail(reason="MPS stride+dilation gradient bug"),
+        ),
+        # VALID padding (no stride)
         (
             _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
             _rng_conv.standard_normal((5, 5, 3, 8)).astype(np.float32),
@@ -199,6 +252,25 @@ _rng_conv = np.random.default_rng(45)
             _rng_conv.standard_normal((2, 16, 16, 64)).astype(np.float32),
             _rng_conv.standard_normal((1, 1, 64, 128)).astype(np.float32),
             (1, 1),
+            "VALID",
+            (1, 1),
+            1,
+        ),
+        # Large kernel with stride - gradient has bug in MPS
+        pytest.param(
+            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng_conv.standard_normal((7, 7, 3, 16)).astype(np.float32),
+            (2, 2),
+            "SAME",
+            (1, 1),
+            1,
+            marks=pytest.mark.xfail(reason="MPS large kernel + stride gradient bug"),
+        ),
+        # Small input with stride
+        (
+            _rng_conv.standard_normal((2, 8, 8, 3)).astype(np.float32),
+            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            (2, 2),
             "VALID",
             (1, 1),
             1,
@@ -246,10 +318,9 @@ def test_conv2d(
         )
 
     result = conv_fn(x, kernel)
-    # Gradient only works for basic convs (stride=1, groups=1)
-    # Strided conv gradient produces incorrect values
     # Grouped/depthwise conv gradient crashes with batch_group_count not supported
-    if strides == (1, 1) and groups == 1:
+    # Strided conv gradients now work after transposed conv fix in convolution_ops.mm
+    if groups == 1:
         grad = jax.grad(lambda args: conv_fn(*args).mean())((x, kernel))
     else:
         grad = None
@@ -270,11 +341,20 @@ def test_conv2d(
             _rng.standard_normal((1, 32)).astype(np.float32),
             (4, 32),
         ),
-        # Transpose - various ranks
+        # Transpose - various ranks and permutations
         (register_op_test(jnp.transpose, "stablehlo.transpose"), _float_2d, (1, 0)),
         (jnp.transpose, _float_2d_small, (1, 0)),
+        # 3D transposes - all permutations that move data
         (jnp.transpose, _float_3d, (2, 0, 1)),
-        (jnp.transpose, _float_4d, (3, 2, 1, 0)),
+        (jnp.transpose, _float_3d, (0, 2, 1)),  # partial transpose
+        (jnp.transpose, _float_3d, (1, 2, 0)),
+        (jnp.transpose, _float_3d, (2, 1, 0)),  # full reversal
+        # 4D transposes - common patterns
+        (jnp.transpose, _float_4d, (3, 2, 1, 0)),  # full reversal
+        (jnp.transpose, _float_4d, (0, 2, 1, 3)),  # swap middle dims
+        (jnp.transpose, _float_4d, (0, 1, 3, 2)),  # swap last dims
+        (jnp.transpose, _float_4d, (0, 3, 2, 1)),  # NHWC -> NCHW style
+        (jnp.transpose, _float_4d, (1, 0, 2, 3)),  # swap first dims
         # Reverse - various ranks and axes
         (register_op_test(jax.lax.rev, "stablehlo.reverse"), _float_1d, (0,)),
         (jax.lax.rev, _float_2d_small, (0,)),
@@ -335,9 +415,39 @@ def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
 @pytest.mark.parametrize(
     "x, slices",
     [
+        # Basic slices (stride=1)
         (_float_1d, (slice(2, 8),)),
         (_float_8x8, (slice(1, 5), slice(2, 6))),
         (_float_4x8x8, (slice(1, 3), slice(2, 6), slice(0, 4))),
+        # Strided slices (stride=2) - use gather op which has limited MPS support
+        (_float_1d, (slice(0, 10, 2),)),  # 1D strided slice works
+        pytest.param(
+            _float_8x8,
+            (slice(0, 8, 2), slice(0, 8, 2)),
+            marks=pytest.mark.xfail(
+                reason="MPS gather pattern unsupported for 2D+ strided slices"
+            ),
+        ),
+        pytest.param(
+            _float_4x8x8,
+            (slice(0, 4, 2), slice(0, 8, 2), slice(0, 8, 1)),
+            marks=pytest.mark.xfail(
+                reason="MPS gather pattern unsupported for 2D+ strided slices"
+            ),
+        ),
+        # Strided slices (stride=3)
+        (_float_1d, (slice(0, 10, 3),)),  # 1D strided slice works
+        (_float_8x8, (slice(0, 8, 3), slice(0, 8, 1))),  # Only one axis strided works
+        # Asymmetric strides - some 2D+ patterns unsupported by MPS gather
+        (_float_8x8, (slice(0, 8, 2), slice(0, 8, 1))),
+        (_float_8x8, (slice(0, 8, 1), slice(0, 8, 3))),
+        pytest.param(
+            _float_4x8x8,
+            (slice(0, 4, 1), slice(0, 8, 2), slice(0, 8, 3)),
+            marks=pytest.mark.xfail(
+                reason="MPS gather pattern unsupported for 3D strided slices"
+            ),
+        ),
     ],
 )
 @assert_cpu_mps_allclose
@@ -421,6 +531,7 @@ _rng_reduce = np.random.default_rng(47)
 @pytest.mark.parametrize(
     "op, x, axis",
     [
+        # Basic reductions
         (jnp.sum, _rng_reduce.standard_normal((16, 16)).astype(np.float32), None),
         (jnp.sum, _rng_reduce.standard_normal((8, 4, 2)).astype(np.float32), 1),
         (
@@ -432,6 +543,18 @@ _rng_reduce = np.random.default_rng(47)
         (jnp.min, _rng_reduce.standard_normal((16, 16)).astype(np.float32), -1),
         (jnp.all, _rng_reduce.random((8, 8)) > 0.5, None),
         (jnp.any, _rng_reduce.random((8, 8)) > 0.5, 0),
+        # Multi-axis reductions (tuple of axes)
+        (jnp.sum, _rng_reduce.standard_normal((4, 8, 16)).astype(np.float32), (0, 2)),
+        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), (1, 3)),
+        (jnp.max, _rng_reduce.standard_normal((8, 8, 8)).astype(np.float32), (0, 1)),
+        (jnp.min, _rng_reduce.standard_normal((4, 4, 4, 4)).astype(np.float32), (0, 2)),
+        # 4D tensor reductions
+        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), None),
+        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), 2),
+        (jnp.max, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), 3),
+        # Negative axis
+        (jnp.sum, _rng_reduce.standard_normal((8, 4, 2)).astype(np.float32), -2),
+        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), -1),
     ],
 )
 @assert_cpu_mps_allclose
@@ -540,3 +663,28 @@ def test_dynamic_update_slice(
 def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updates):
     # Gradient fails with "Memory kinds and dtypes have different sizes" error
     return operand.at[indices].add(updates)
+
+
+# Non-contiguous array transfer (regression test for CIFAR loader bug)
+# Create non-contiguous test data - transpose creates view with non-standard strides
+_noncontig_rng = np.random.default_rng(42)
+_noncontig_array = (
+    _noncontig_rng.standard_normal((256, 3, 32, 32))
+    .astype(np.float32)
+    .transpose(0, 2, 3, 1)
+)
+assert not _noncontig_array.flags["C_CONTIGUOUS"], "Test data must be non-contiguous"
+
+
+@pytest.mark.parametrize("x", [_noncontig_array])
+@assert_cpu_mps_allclose
+def test_noncontiguous_array_transfer(request: pytest.FixtureRequest, device, x):
+    """Test that non-contiguous arrays are transferred correctly to MPS.
+
+    Regression test for a bug where transpose() created a non-contiguous array
+    that was corrupted when transferred to MPS. Fixed by handling byte_strides
+    in BufferFromHostBuffer to copy strided data to contiguous layout.
+    """
+    # The decorator already transfers x to the device via jax.device_put.
+    # Just return it - the comparison will catch corruption.
+    return x

@@ -1,11 +1,5 @@
 fail_fast: true
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.13
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v19.1.6
@@ -16,6 +10,24 @@ repos:
 
   - repo: local
     hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'uv run ruff format'
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: ruff-check
+        name: ruff check
+        entry: bash -c 'uv run ruff check --fix'
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: pyright
+        name: pyright
+        entry: bash -c 'uv run pyright'
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: build
         name: build
         entry: bash -c 'uv pip install -e . -q'

@@ -17,13 +17,13 @@ REGISTER_MPS_OP("stablehlo.broadcast", Handle_broadcast);
 static MPSGraphTensor* Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto broadcastOp = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(op);
     if (!broadcastOp) {
-        NSLog(@"ERROR: Expected BroadcastInDimOp");
+        MPS_LOG_ERROR("Expected BroadcastInDimOp\n");
         return nullptr;
     }
 
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input) {
-        NSLog(@"ERROR: broadcast_in_dim input tensor not found");
+        MPS_LOG_ERROR("broadcast_in_dim input tensor not found\n");
         return nullptr;
     }
 
@@ -79,7 +79,7 @@ REGISTER_MPS_OP("stablehlo.reshape", Handle_reshape);
 static MPSGraphTensor* Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op);
     if (!transposeOp) {
-        NSLog(@"ERROR: Expected TransposeOp");
+        MPS_LOG_ERROR("Expected TransposeOp\n");
         return nullptr;
     }
 
@@ -104,7 +104,7 @@ static MPSGraphTensor* Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap
 
     MPSDataType dtype = GetResultMpsType(op);
     if (dtype == MPSDataTypeInvalid) {
-        NSLog(@"ERROR: Invalid dtype for convert operation");
+        MPS_LOG_ERROR("Invalid dtype for convert operation\n");
         return nullptr;
     }
     return [g castTensor:input toType:dtype name:nil];
@@ -115,7 +115,7 @@ REGISTER_MPS_OP("stablehlo.convert", Handle_convert);
 static MPSGraphTensor* Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op);
     if (!sliceOp) {
-        NSLog(@"ERROR: Expected SliceOp");
+        MPS_LOG_ERROR("Expected SliceOp\n");
         return nullptr;
     }
 
@@ -145,7 +145,7 @@ REGISTER_MPS_OP("stablehlo.slice", Handle_slice);
 static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dynSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op);
     if (!dynSliceOp) {
-        NSLog(@"ERROR: Expected DynamicSliceOp");
+        MPS_LOG_ERROR("Expected DynamicSliceOp\n");
         return nullptr;
     }
 
@@ -169,8 +169,8 @@ static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Va
         // Get the start index tensor for this dimension (scalar tensor)
         MPSGraphTensor* startIdx = GetInputTensor(values, op, dim + 1);
         if (!startIdx) {
-            NSLog(@"ERROR: dynamic_slice missing start index for dimension %lu",
-                  (unsigned long)dim);
+            MPS_LOG_ERROR("dynamic_slice missing start index for dimension %lu\n",
+                          (unsigned long)dim);
             return nullptr;
         }
 
@@ -204,13 +204,13 @@ REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
 static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op);
     if (!iotaOp) {
-        NSLog(@"ERROR: Expected IotaOp");
+        MPS_LOG_ERROR("Expected IotaOp\n");
         return nullptr;
     }
 
     MPSDataType dtype = GetResultMpsType(op);
     if (dtype == MPSDataTypeInvalid) {
-        NSLog(@"ERROR: Invalid dtype for iota operation");
+        MPS_LOG_ERROR("Invalid dtype for iota operation\n");
         return nullptr;
     }
 
@@ -237,7 +237,7 @@ static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, 
 
     MPSDataType dtype = GetResultMpsType(op);
     if (dtype == MPSDataTypeInvalid) {
-        NSLog(@"ERROR: Invalid dtype for bitcast_convert operation");
+        MPS_LOG_ERROR("Invalid dtype for bitcast_convert operation\n");
         return nullptr;
     }
 
@@ -267,7 +267,7 @@ REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
 static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op);
     if (!customCallOp) {
-        NSLog(@"ERROR: Expected CustomCallOp");
+        MPS_LOG_ERROR("Expected CustomCallOp\n");
         return nullptr;
     }
 
@@ -280,7 +280,7 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
 
     // cu_threefry2x32 - Threefry RNG core operation
     if (target == "cu_threefry2x32") {
-        NSLog(@"ERROR: Custom call 'cu_threefry2x32' is not yet implemented");
+        MPS_LOG_ERROR("Custom call 'cu_threefry2x32' is not yet implemented\n");
         return nullptr;
     }
 
@@ -293,7 +293,7 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
     }
 
     // Unknown custom call
-    NSLog(@"ERROR: Unknown custom_call target: %s", target.c_str());
+    MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.custom_call", Handle_custom_call);
@@ -302,7 +302,7 @@ REGISTER_MPS_OP("stablehlo.custom_call", Handle_custom_call);
 static MPSGraphTensor* Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(op);
     if (!padOp) {
-        NSLog(@"ERROR: Expected PadOp");
+        MPS_LOG_ERROR("Expected PadOp\n");
         return nullptr;
     }
 
@@ -325,7 +325,7 @@ static MPSGraphTensor* Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& va
     }
 
     if (hasInteriorPadding) {
-        NSLog(@"ERROR: Interior padding not yet supported");
+        MPS_LOG_ERROR("Interior padding not yet supported\n");
         return nullptr;
     }
 
@@ -362,7 +362,7 @@ static MPSGraphTensor* Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation*
                                                    ValueMap& values) {
     auto updateSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op);
     if (!updateSliceOp) {
-        NSLog(@"ERROR: Expected DynamicUpdateSliceOp");
+        MPS_LOG_ERROR("Expected DynamicUpdateSliceOp\n");
         return nullptr;
     }
 
@@ -379,8 +379,8 @@ static MPSGraphTensor* Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation*
     for (NSUInteger i = 0; i < rank; i++) {
         MPSGraphTensor* startIdx = GetInputTensor(values, op, i + 2);
         if (!startIdx) {
-            NSLog(@"ERROR: dynamic_update_slice missing start index for dimension %lu",
-                  (unsigned long)i);
+            MPS_LOG_ERROR("dynamic_update_slice missing start index for dimension %lu\n",
+                          (unsigned long)i);
             return nullptr;
         }
         [startIndices addObject:startIdx];
@@ -415,9 +415,7 @@ static MPSGraphTensor* Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation*
     MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
     // Cast indices to int32 if needed
-    if (indices.dataType != MPSDataTypeInt32) {
-        indices = [g castTensor:indices toType:MPSDataTypeInt32 name:nil];
-    }
+    indices = EnsureInt32(g, indices);
 
     // Use scatterND to update the operand at the specified indices
     return [g scatterNDWithDataTensor:operand
@@ -434,7 +432,7 @@ REGISTER_MPS_OP("stablehlo.dynamic_update_slice", Handle_dynamic_update_slice);
 static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto gatherOp = mlir::dyn_cast<mlir::stablehlo::GatherOp>(op);
     if (!gatherOp) {
-        NSLog(@"ERROR: Expected GatherOp");
+        MPS_LOG_ERROR("Expected GatherOp\n");
         return nullptr;
     }
 
@@ -479,9 +477,7 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
                                                       name:nil];
 
         // Cast indices to int32 if needed (MPS gather requires int32)
-        if (squeezedIndices.dataType != MPSDataTypeInt32) {
-            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
-        }
+        squeezedIndices = EnsureInt32(g, squeezedIndices);
 
         // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
         // This gathers slices from operand along the specified axis using indices
@@ -497,10 +493,10 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
     }
 
     // For now, log unsupported patterns
-    NSLog(@"ERROR: Unsupported gather pattern - offset_dims size: %lu, collapsed_slice_dims "
-          @"size: %lu, start_index_map size: %lu, index_vector_dim: %lld",
-          (unsigned long)offsetDims.size(), (unsigned long)collapsedSliceDims.size(),
-          (unsigned long)startIndexMap.size(), indexVectorDim);
+    MPS_LOG_ERROR("Unsupported gather pattern - offset_dims size: %lu, collapsed_slice_dims "
+                  "size: %lu, start_index_map size: %lu, index_vector_dim: %lld\n",
+                  (unsigned long)offsetDims.size(), (unsigned long)collapsedSliceDims.size(),
+                  (unsigned long)startIndexMap.size(), indexVectorDim);
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
@@ -510,7 +506,7 @@ REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
 static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
     if (!scatterOp) {
-        NSLog(@"ERROR: Expected ScatterOp");
+        MPS_LOG_ERROR("Expected ScatterOp\n");
         return nullptr;
     }
 
@@ -556,9 +552,7 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
                                                       name:nil];
 
         // Cast indices to int32 if needed
-        if (squeezedIndices.dataType != MPSDataTypeInt32) {
-            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
-        }
+        squeezedIndices = EnsureInt32(g, squeezedIndices);
 
         // Determine the scatter mode based on the update computation
         // Check if it's an add operation (common for gradients)
@@ -595,11 +589,11 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
                                    name:nil];
     }
 
-    NSLog(@"ERROR: Unsupported scatter pattern - update_window_dims size: %lu, "
-          @"inserted_window_dims size: %lu, scatter_dims_to_operand_dims size: %lu, "
-          @"index_vector_dim: %lld",
-          (unsigned long)updateWindowDims.size(), (unsigned long)insertedWindowDims.size(),
-          (unsigned long)scatterDimsToOperandDims.size(), indexVectorDim);
+    MPS_LOG_ERROR("Unsupported scatter pattern - update_window_dims size: %lu, "
+                  "inserted_window_dims size: %lu, scatter_dims_to_operand_dims size: %lu, "
+                  "index_vector_dim: %lld\n",
+                  (unsigned long)updateWindowDims.size(), (unsigned long)insertedWindowDims.size(),
+                  (unsigned long)scatterDimsToOperandDims.size(), indexVectorDim);
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);
@@ -608,7 +602,7 @@ REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);
 static MPSGraphTensor* Handle_reverse(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(op);
     if (!reverseOp) {
-        NSLog(@"ERROR: Expected ReverseOp");
+        MPS_LOG_ERROR("Expected ReverseOp\n");
         return nullptr;
     }
 

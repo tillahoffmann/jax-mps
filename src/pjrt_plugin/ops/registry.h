@@ -12,6 +12,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
+#include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/type_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -125,6 +126,14 @@ inline NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIn
         [shape addObject:@(dim)];
     }
     return shape;
+}
+
+// Helper to cast tensor to Int32 if needed (for indices)
+inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
+    if (tensor.dataType != MPSDataTypeInt32) {
+        return [g castTensor:tensor toType:MPSDataTypeInt32 name:nil];
+    }
+    return tensor;
 }
 
 // Macro for registering ops - use in .mm files

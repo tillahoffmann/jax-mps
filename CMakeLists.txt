@@ -27,7 +27,7 @@ find_package(absl REQUIRED)
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
 
 # Generate C++ from proto files
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS proto/device_assignment.proto)
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS src/proto/device_assignment.proto)
 
 # Find MLIR and LLVM packages
 find_package(MLIR REQUIRED CONFIG)
@@ -76,6 +76,13 @@ find_library(VERSION_LIB Version HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 # Source files
 set(PJRT_SOURCES
     src/pjrt_plugin/pjrt_api.cc
+    src/pjrt_plugin/pjrt_client.cc
+    src/pjrt_plugin/pjrt_device.cc
+    src/pjrt_plugin/pjrt_memory.cc
+    src/pjrt_plugin/pjrt_buffer.cc
+    src/pjrt_plugin/pjrt_executable.cc
+    src/pjrt_plugin/pjrt_event.cc
+    src/pjrt_plugin/pjrt_topology.cc
     src/pjrt_plugin/mps_client.mm
     src/pjrt_plugin/mps_device.mm
     src/pjrt_plugin/mps_buffer.mm

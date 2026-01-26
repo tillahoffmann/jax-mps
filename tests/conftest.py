@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from jax_plugins import mps
 
 
@@ -121,10 +122,11 @@ def assert_cpu_mps_allclose(func: Callable):
         # Store results and verify.
         current[device.platform] = result
         if len(current) == 2:
-            # Use rtol=2e-5, atol=1e-6 to accommodate CPU/MPS floating point differences.
+            # Use rtol=2e-5, atol=5e-6 to accommodate CPU/MPS floating point differences.
             # atol is needed because near-zero values can have large relative differences.
+            # Large kernel convolutions (7x7) with strides can accumulate ~3e-6 differences.
             jax.tree.map(
-                lambda a, b: np.testing.assert_allclose(a, b, rtol=2e-5, atol=2e-6),
+                lambda a, b: np.testing.assert_allclose(a, b, rtol=2e-5, atol=5e-6),
                 *current.values(),
             )
         elif len(current) > 2:

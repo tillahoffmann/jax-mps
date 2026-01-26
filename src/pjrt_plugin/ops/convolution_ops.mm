@@ -10,7 +10,7 @@ namespace jax_mps {
 static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
     if (!convOp) {
-        NSLog(@"ERROR: Expected ConvolutionOp");
+        MPS_LOG_ERROR("Expected ConvolutionOp\n");
         return nullptr;
     }
 
@@ -46,14 +46,14 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
 
     // Currently only support 2D convolutions
     if (spatialRank != 2) {
-        NSLog(@"ERROR: Only 2D convolution is currently supported, got %zu spatial dims",
-              spatialRank);
+        MPS_LOG_ERROR("Only 2D convolution is currently supported, got %zu spatial dims\n",
+                      spatialRank);
         return nullptr;
     }
 
     // Check batch group count (used for gradient computations)
     if (batchGroupCount != 1) {
-        NSLog(@"ERROR: batch_group_count != 1 not yet supported");
+        MPS_LOG_ERROR("batch_group_count != 1 not yet supported\n");
         return nullptr;
     }
 
@@ -150,9 +150,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
          kernelSpatialDims[0] == 1 && kernelSpatialDims[1] == 2 && kernelInputFeatureDim == 3);
 
     if (!inputIsNHWC && !inputIsNCHW && !inputIsCHWN) {
-        NSLog(@"ERROR: Unsupported input layout. Expected NHWC, NCHW, or CHWN. Got batch=%lld, "
-              @"feature=%lld, spatial=[%lld,%lld]",
-              inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
+        MPS_LOG_ERROR("Unsupported input layout. Expected NHWC, NCHW, or CHWN. Got batch=%lld, "
+                      "feature=%lld, spatial=[%lld,%lld]\n",
+                      inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
         return nullptr;
     }
 
@@ -181,10 +181,10 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // Permutation: [0, 3, 1, 2]
         mpsKernel = [g transposeTensor:kernel permutation:@[@0, @3, @1, @2] name:nil];
     } else {
-        NSLog(@"ERROR: Unsupported kernel layout. Got output=%lld, input=%lld, "
-              @"spatial=[%lld,%lld]",
-              kernelOutputFeatureDim, kernelInputFeatureDim, kernelSpatialDims[0],
-              kernelSpatialDims[1]);
+        MPS_LOG_ERROR("Unsupported kernel layout. Got output=%lld, input=%lld, "
+                      "spatial=[%lld,%lld]\n",
+                      kernelOutputFeatureDim, kernelInputFeatureDim, kernelSpatialDims[0],
+                      kernelSpatialDims[1]);
         return nullptr;
     }
 
@@ -227,7 +227,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // For transposed conv, MPS needs the output shape
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
         if (!resultType) {
-            NSLog(@"ERROR: Could not get result type for transposed convolution");
+            MPS_LOG_ERROR("Could not get result type for transposed convolution\n");
             return nullptr;
         }
 
@@ -250,13 +250,22 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // - MPS transpose conv expects source_channels == kernel_O
         // - But StableHLO kernel has source_channels == kernel_I
         // So we need to swap I and O: OIHW [O, I, H, W] -> [I, O, H, W]
-        MPSGraphTensor* transposeKernel = [g transposeTensor:mpsKernel
+        //
+        // Additionally, MPS transposed conv correlates (no kernel flip) while
+        // StableHLO expects convolution semantics (kernel flipped).
+        // We must flip the kernel in both spatial dimensions to match.
+        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3).
+        MPSGraphTensor* flippedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
+        MPSGraphTensor* transposeKernel = [g transposeTensor:flippedKernel
                                                  permutation:@[@1, @0, @2, @3]
                                                         name:nil];
 
+        // For transposed convolution, MPS stride controls upsampling factor.
+        // This corresponds to StableHLO's lhs_dilation (input dilation).
+        // For backward pass of stride=N forward conv, inputDilation=N.
         MPSGraphConvolution2DOpDescriptor* transposeDesc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:1
-                          strideInY:1
+            descriptorWithStrideInX:(NSUInteger)inputDilationW
+                          strideInY:(NSUInteger)inputDilationH
                     dilationRateInX:(NSUInteger)dilationW
                     dilationRateInY:(NSUInteger)dilationH
                              groups:(NSUInteger)featureGroupCount
@@ -264,10 +273,35 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
-        transposeDesc.paddingLeft = (NSUInteger)padLeft;
-        transposeDesc.paddingRight = (NSUInteger)padRight;
-        transposeDesc.paddingTop = (NSUInteger)padTop;
-        transposeDesc.paddingBottom = (NSUInteger)padBottom;
+        // For transposed convolution with explicit outputShape, MPS computes
+        // padding internally based on input/output shapes and stride. However,
+        // when strides are asymmetric (inputDilationH != inputDilationW), MPS's
+        // default alignment doesn't match StableHLO's expected output position.
+        //
+        // For symmetric strides (2,2), (3,3), etc., MPS's default alignment is
+        // correct and we don't need any padding adjustment.
+        //
+        // For asymmetric strides like (2,1) or (1,2), MPS produces spatially
+        // shifted output. The shift direction and amount are determined by the
+        // padding asymmetry in the StableHLO operation:
+        // - padTop - padBottom gives the H direction shift amount
+        // - padLeft - padRight gives the W direction shift amount
+        //
+        // Empirically, MPS transposed conv applies these shifts in swapped
+        // dimensions: H padding asymmetry affects W output position and vice versa.
+        // We only apply this correction when strides are actually asymmetric.
+        int64_t shiftH = 0;
+        int64_t shiftW = 0;
+        if (inputDilationH != inputDilationW) {
+            // Asymmetric strides - apply cross-dimensional shift correction
+            shiftH = padLeft - padRight;  // W padding asymmetry -> H shift
+            shiftW = padTop - padBottom;  // H padding asymmetry -> W shift
+        }
+
+        transposeDesc.paddingLeft = (NSUInteger)(shiftW > 0 ? shiftW : 0);
+        transposeDesc.paddingRight = 0;
+        transposeDesc.paddingTop = (NSUInteger)(shiftH > 0 ? shiftH : 0);
+        transposeDesc.paddingBottom = 0;
 
         result = [g convolutionTranspose2DWithSourceTensor:convInput
                                              weightsTensor:transposeKernel
@@ -313,8 +347,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // Permutation: [1, 2, 0, 3]
         result = [g transposeTensor:result permutation:@[@1, @2, @0, @3] name:nil];
     } else if (!outputIsNHWC) {
-        NSLog(@"WARNING: Unexpected output layout batch=%lld, feature=%lld, spatial=[%lld,%lld]",
-              outputBatchDim, outputFeatureDim, outputSpatialDims[0], outputSpatialDims[1]);
+        MPS_LOG_WARN("Unexpected output layout batch=%lld, feature=%lld, spatial=[%lld,%lld]\n",
+                     outputBatchDim, outputFeatureDim, outputSpatialDims[0], outputSpatialDims[1]);
     }
 
     return result;

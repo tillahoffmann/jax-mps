@@ -17,16 +17,12 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 [project.urls]
-Homepage = "https://github.com/till/jax-mps"
-Repository = "https://github.com/till/jax-mps"
+Homepage = "https://github.com/tillahoffmann/jax-mps"
+Repository = "https://github.com/tillahoffmann/jax-mps"
 
 [project.entry-points."jax_plugins"]
 mps = "jax_plugins.mps"
@@ -44,7 +40,7 @@ cmake.build-type = "Release"
 build.verbose = true
 
 # Install the built library to the package
-wheel.packages = ["python/jax_plugins"]
+wheel.packages = ["src/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
 [tool.cibuildwheel]
@@ -66,20 +62,5 @@ dev = [
     "pre-commit>=4.5.1",
     "pytest",
     "ruff>=0.14.13",
+    "tqdm>=4.67.1",
 ]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 88
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
-
-[tool.ruff.format]
-quote-style = "double"
-
-

@@ -34,7 +34,7 @@ REGISTER_MPS_OP("stablehlo.log_plus_one", Handle_log_plus_one);
 static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
     if (!compareOp) {
-        NSLog(@"ERROR: Expected CompareOp");
+        MPS_LOG_ERROR(" Expected CompareOp\n");
         return nullptr;
     }
 
@@ -60,7 +60,7 @@ static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap
         case Dir::NE:
             return [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
         default:
-            NSLog(@"ERROR: Unknown compare direction");
+            MPS_LOG_ERROR(" Unknown compare direction\n");
             return nullptr;
     }
 }
@@ -97,13 +97,13 @@ REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
     if (!constantOp) {
-        NSLog(@"ERROR: Expected ConstantOp");
+        MPS_LOG_ERROR(" Expected ConstantOp\n");
         return nullptr;
     }
 
     MPSDataType dtype = GetResultMpsType(op);
     if (dtype == MPSDataTypeInvalid) {
-        NSLog(@"ERROR: Invalid dtype for constant operation");
+        MPS_LOG_ERROR(" Invalid dtype for constant operation\n");
         return nullptr;
     }
 
@@ -168,7 +168,7 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
         }
     }
 
-    NSLog(@"ERROR: Constant operation has unsupported value type");
+    MPS_LOG_ERROR(" Constant operation has unsupported value type\n");
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.constant", Handle_constant);

@@ -32,14 +32,14 @@ static std::string GetReductionOpType(mlir::Region& body) {
 static MPSGraphTensor* Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
     if (!reduceOp) {
-        NSLog(@"ERROR: Expected ReduceOp");
+        MPS_LOG_ERROR(" Expected ReduceOp\n");
         return nullptr;
     }
 
     // Get the input tensor (first operand)
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input) {
-        NSLog(@"ERROR: reduce input tensor not found");
+        MPS_LOG_ERROR(" reduce input tensor not found\n");
         return nullptr;
     }
 
@@ -67,7 +67,7 @@ static MPSGraphTensor* Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap&
     } else if (reductionType == "stablehlo.or") {
         result = [g reductionOrWithTensor:input axes:axes name:nil];
     } else {
-        NSLog(@"ERROR: Unsupported reduction type: %s", reductionType.c_str());
+        MPS_LOG_ERROR(" Unsupported reduction type: %s\n", reductionType.c_str());
         return nullptr;
     }
 
@@ -87,7 +87,7 @@ REGISTER_MPS_OP("stablehlo.reduce", Handle_reduce);
 static MPSGraphTensor* Handle_return(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     // This should never be called directly - it's handled by the parent operation
     // But we register it so it's not flagged as unsupported during module verification
-    NSLog(@"WARNING: stablehlo.return should not be called directly");
+    MPS_LOG_WARN("stablehlo.return should not be called directly\n");
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.return", Handle_return);
