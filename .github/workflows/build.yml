@@ -103,6 +103,9 @@ jobs:
     needs: build-and-test
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+      contents: write  # Required for GitHub release creation
 
     steps:
       - name: Download all wheels
@@ -120,6 +123,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          skip-existing: true

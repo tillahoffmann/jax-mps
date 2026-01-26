@@ -1,13 +1,13 @@
 [project]
 name = "jax-mps"
-version = "0.1.0"
+version = "0.9.0"
 description = "JAX backend for Apple Metal Performance Shaders (MPS)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
-    "jax>=0.4.20",
-    "jaxlib>=0.4.20",
+    "jax>=0.9.0,<0.10",
+    "jaxlib>=0.9.0,<0.10",
 ]
 keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
 classifiers = [
@@ -44,22 +44,15 @@ wheel.packages = ["src/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
 [tool.cibuildwheel]
-# Only build for macOS ARM64
-build = ["cp310-macosx_arm64", "cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
-skip = ["*-musllinux*", "*-manylinux*", "*win*", "*i686*", "*x86_64*"]
-
-# macOS specific
-[tool.cibuildwheel.macos]
-archs = ["arm64"]
+build = ["cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
 environment = { CMAKE_PREFIX_PATH = "$HOME/.local/jax-mps-deps" }
-
-# Before building, ensure deps are built
 before-all = "./scripts/setup_deps.sh"
 
 [dependency-groups]
 dev = [
     "flax>=0.10.7",
     "pre-commit>=4.5.1",
+    "pyright>=1.1.408",
     "pytest",
     "ruff>=0.14.13",
     "tqdm>=4.67.1",
