@@ -223,3 +223,80 @@ def test_flax_model_init(device):
     assert np.all(result_np >= 0.0) and np.all(result_np <= 1.0), (
         "Sigmoid output out of range"
     )
+
+
+class _StridedConvBlock(nnx.Module):
+    """Conv + BN block with optional strided projection (like ResNet downsampling)."""
+
+    def __init__(self, in_f: int, out_f: int, stride: int, rngs: nnx.Rngs):
+        self.conv = nnx.Conv(
+            in_f,
+            out_f,
+            kernel_size=(3, 3),
+            strides=(stride, stride),
+            padding="SAME",
+            use_bias=False,
+            rngs=rngs,
+        )
+        self.bn = nnx.BatchNorm(out_f, momentum=0.9, epsilon=1e-5, rngs=rngs)
+        self.needs_proj = in_f != out_f or stride != 1
+        if self.needs_proj:
+            self.proj = nnx.Conv(
+                in_f,
+                out_f,
+                kernel_size=(1, 1),
+                strides=(stride, stride),
+                padding="SAME",
+                use_bias=False,
+                rngs=rngs,
+            )
+            self.bn_proj = nnx.BatchNorm(out_f, momentum=0.9, epsilon=1e-5, rngs=rngs)
+
+    def __call__(self, x):
+        residual = x
+        y = nnx.relu(self.bn(self.conv(x)))
+        if self.needs_proj:
+            residual = self.bn_proj(self.proj(residual))
+        return y + residual
+
+
+class _TwoStageNet(nnx.Module):
+    """Mini network with strided blocks to test gradient flow."""
+
+    def __init__(self, rngs: nnx.Rngs):
+        self.conv_init = nnx.Conv(3, 16, kernel_size=(3, 3), padding="SAME", rngs=rngs)
+        self.bn_init = nnx.BatchNorm(16, momentum=0.9, epsilon=1e-5, rngs=rngs)
+        self.block1 = _StridedConvBlock(16, 16, stride=1, rngs=rngs)
+        self.block2 = _StridedConvBlock(16, 32, stride=2, rngs=rngs)  # Strided
+        self.dense = nnx.Linear(32, 10, rngs=rngs)
+
+    def __call__(self, x):
+        x = nnx.relu(self.bn_init(self.conv_init(x)))
+        x = self.block1(x)
+        x = self.block2(x)
+        x = jnp.mean(x, axis=(1, 2))
+        return self.dense(x)
+
+
+_strided_net_rng = np.random.default_rng(42)
+_strided_net_x = _strided_net_rng.standard_normal((2, 16, 16, 3)).astype(np.float32)
+
+
+@pytest.mark.xfail(reason="MPS gradient divergence with strided conv in deep networks")
+@pytest.mark.parametrize("x", [_strided_net_x])
+@assert_cpu_mps_allclose
+def test_strided_conv_network_gradients(request: pytest.FixtureRequest, device, x):
+    """Test gradients flow correctly through network with strided convolutions.
+
+    This is a regression test for MPS gradient divergence when backpropagating
+    through strided convolution layers with projection shortcuts.
+    """
+    model = _TwoStageNet(nnx.Rngs(0))
+    labels = jax.nn.one_hot(jnp.array([0, 1]), 10)
+
+    def loss_fn(model):
+        logits = model(x)
+        return jnp.mean(logits * labels)
+
+    grads = nnx.grad(loss_fn)(model)
+    return grads
