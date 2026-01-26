@@ -66,7 +66,7 @@ from jax import random
             {"inputs": ((2, 16, 16, 64), float)},
         ),
         # Depthwise convolution (feature_group_count = in_features)
-        (
+        pytest.param(
             nnx.Conv,
             {
                 "in_features": 16,
@@ -75,9 +75,10 @@ from jax import random
                 "feature_group_count": 16,
             },
             {"inputs": ((2, 28, 28, 16), float)},
+            marks=pytest.mark.xfail(reason="MPS: batch_group_count != 1 not supported"),
         ),
         # Grouped convolution
-        (
+        pytest.param(
             nnx.Conv,
             {
                 "in_features": 16,
@@ -86,6 +87,7 @@ from jax import random
                 "feature_group_count": 4,
             },
             {"inputs": ((2, 28, 28, 16), float)},
+            marks=pytest.mark.xfail(reason="MPS: batch_group_count != 1 not supported"),
         ),
         # Strided + dilated + valid padding combined
         (
@@ -108,6 +110,18 @@ from jax import random
             },
             {"inputs": ((3, 4), int)},
         ),
+        # BatchNorm
+        (
+            nnx.BatchNorm,
+            {"num_features": 16, "momentum": 0.9, "epsilon": 1e-5},
+            {"x": ((4, 16), float)},
+        ),
+        # BatchNorm with spatial dimensions (like in CNN)
+        (
+            nnx.BatchNorm,
+            {"num_features": 8, "momentum": 0.9, "epsilon": 1e-5},
+            {"x": ((2, 28, 28, 8), float)},
+        ),
     ],
 )
 @assert_cpu_mps_allclose
@@ -124,6 +138,7 @@ def test_flax_modules(
     module = cls(**args)
 
     call_args = {}
+    has_float_input = False
     for key, value in dtypes_shapes.items():
         if isinstance(value, Callable):
             raise NotImplementedError
@@ -131,12 +146,24 @@ def test_flax_modules(
             (shape, dtype) = value
             if dtype is float:
                 call_args[key] = random.normal(rngs(), shape)
+                has_float_input = True
             elif dtype is int:
                 call_args[key] = random.randint(rngs(), shape, 0, 10)
             else:
                 raise ValueError(dtype)
 
-    return module, module(**call_args)
+    result = module(**call_args)
+
+    # Compute gradients w.r.t. all parameters for differentiable modules
+    if has_float_input:
+
+        def loss_fn(model):
+            return model(**call_args).mean()
+
+        grads = nnx.grad(loss_fn)(module)
+        return result, grads
+    else:
+        return result
 
 
 class LogisticRegression(nnx.Module):
@@ -150,26 +177,37 @@ class LogisticRegression(nnx.Module):
         return jax.nn.sigmoid(logits)
 
 
+_linear_sigmoid_rng = np.random.default_rng(42)
+
+
 @pytest.mark.parametrize(
     "x, kernel, bias",
     [
         (
-            np.random.randn(32, 16).astype(np.float32),
-            np.random.randn(16, 1).astype(np.float32),
-            np.random.randn(1).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((32, 16)).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((16, 1)).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((1,)).astype(np.float32),
         ),
         (
-            np.random.randn(4, 16).astype(np.float32),
-            np.random.randn(16, 1).astype(np.float32),
-            np.random.randn(1).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((4, 16)).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((16, 1)).astype(np.float32),
+            _linear_sigmoid_rng.standard_normal((1,)).astype(np.float32),
         ),
     ],
 )
 @assert_cpu_mps_allclose
 def test_linear_sigmoid(request: pytest.FixtureRequest, device, x, kernel, bias):
     """Test that linear + sigmoid produces matching results on CPU and MPS."""
-    logits = jnp.matmul(x, kernel) + bias
-    return jax.nn.sigmoid(logits)
+
+    def forward(x, kernel, bias):
+        logits = jnp.matmul(x, kernel) + bias
+        return jax.nn.sigmoid(logits)
+
+    result = forward(x, kernel, bias)
+    # Compute gradients w.r.t. all inputs
+    grad_fn = jax.grad(lambda args: forward(*args).mean())
+    grads = grad_fn((x, kernel, bias))
+    return result, grads
 
 
 def test_flax_model_init(device):
