@@ -36,6 +36,7 @@ struct ExecutionResult {
 
 // Compiled executable for Metal
 // Owns the MLIR context and module, executing operations directly from MLIR
+// Caches the compiled MPSGraph for efficient repeated execution
 class MpsExecutable {
 public:
     // Takes ownership of the ParsedModule
@@ -65,6 +66,9 @@ public:
     }
 
 private:
+    // Build and cache the MPSGraph (called on first execution)
+    bool BuildGraph();
+
     MpsClient* client_;
     std::string name_;
     std::string error_;
@@ -75,6 +79,13 @@ private:
     std::unique_ptr<mlir::MLIRContext> context_;
     mlir::OwningOpRef<mlir::ModuleOp> module_;
     mlir::func::FuncOp entry_func_;
+
+    // Cached MPSGraph state (built once, reused for all executions)
+    bool graph_built_ = false;
+    void* cached_graph_ = nullptr;                 // MPSGraph* (prevent ObjC in header)
+    std::vector<void*> cached_placeholders_;       // MPSGraphTensor* for inputs
+    std::vector<void*> cached_targets_;            // MPSGraphTensor* for outputs
+    std::vector<mlir::Type> cached_return_types_;  // Output types for dtype conversion
 };
 
 }  // namespace jax_mps

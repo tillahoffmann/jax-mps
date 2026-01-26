@@ -40,6 +40,14 @@ MpsExecutable::MpsExecutable(MpsClient* client, mps::ParsedModule module)
 
 MpsExecutable::~MpsExecutable() {
     // MLIR context and module are automatically cleaned up via unique_ptr/OwningOpRef
+    // Release the cached graph (graph owns all its tensors)
+    if (cached_graph_) {
+        MPSGraph* graph = (__bridge_transfer MPSGraph*)cached_graph_;
+        (void)graph;  // ARC will release
+        cached_graph_ = nullptr;
+    }
+    // Note: cached_placeholders_ and cached_targets_ point to tensors owned by the graph,
+    // so we don't release them separately - they'll be freed when the graph is freed.
 }
 
 // Helper to get output shape from MLIR type
@@ -187,12 +195,100 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
     return result;
 }
 
+bool MpsExecutable::BuildGraph() {
+    if (graph_built_)
+        return true;
+
+    @autoreleasepool {
+        if (!client_) {
+            error_ = "No MPS client available";
+            return false;
+        }
+
+        // Create and cache MPSGraph
+        MPSGraph* graph = [[MPSGraph alloc] init];
+        if (!graph) {
+            error_ = "Failed to create MPSGraph";
+            return false;
+        }
+
+        // Value map for building the graph
+        ValueMap values;
+
+        // Create placeholders for each function argument
+        size_t num_args = entry_func_.getNumArguments();
+        cached_placeholders_.resize(num_args);
+
+        for (size_t i = 0; i < num_args; i++) {
+            mlir::BlockArgument arg = entry_func_.getArgument(i);
+            NSArray<NSNumber*>* shape = GetShapeFromType(arg.getType());
+            if (!shape) {
+                error_ = "Invalid argument type at index " + std::to_string(i);
+                return false;
+            }
+
+            // Get dtype from MLIR type
+            auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(arg.getType());
+            MPSDataType mps_dtype =
+                MlirTypeToPjrtDtype(tensorType.getElementType()) >= 0
+                    ? PjrtDtypeToMps(MlirTypeToPjrtDtype(tensorType.getElementType()))
+                    : MPSDataTypeFloat32;
+
+            NSString* argName = [NSString stringWithFormat:@"arg%zu", i];
+            MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
+                                                             dataType:mps_dtype
+                                                                 name:argName];
+
+            values[arg.getAsOpaquePointer()] = placeholder;
+            cached_placeholders_[i] = (__bridge void*)placeholder;  // Graph owns the tensor
+        }
+
+        // Process operations to build the graph
+        ProcessResult processResult;
+        @try {
+            mlir::Block& entryBlock = entry_func_.front();
+            processResult = processOperations(graph, entryBlock, values, *module_, 0);
+        } @catch (NSException* exception) {
+            error_ = "MPS graph build failed: " + std::string([[exception reason] UTF8String]);
+            return false;
+        }
+
+        if (!processResult.ok()) {
+            error_ = processResult.error;
+            return false;
+        }
+
+        // Cache target tensors and return types
+        for (const auto& ret_value : processResult.return_values) {
+            MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
+            if (!ret_tensor) {
+                error_ = "Return value not found in tensors";
+                return false;
+            }
+            cached_targets_.push_back((__bridge void*)ret_tensor);  // Graph owns the tensor
+            cached_return_types_.push_back(ret_value.getType());
+        }
+
+        // Cache the graph
+        cached_graph_ = (__bridge_retained void*)graph;
+        graph_built_ = true;
+    }
+    return true;
+}
+
 ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, MpsDevice* device) {
     ExecutionResult result;
 
     // Check for compilation errors
     if (!valid_) {
         return ExecutionResult::Error("Cannot execute: compilation failed - " + error_);
+    }
+
+    // Build graph on first execution (lazy initialization)
+    if (!graph_built_) {
+        if (!BuildGraph()) {
+            return ExecutionResult::Error("Graph build failed: " + error_);
+        }
     }
 
     @autoreleasepool {
@@ -206,91 +302,49 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
         }
 
-        // Create MPSGraph
-        MPSGraph* graph = [[MPSGraph alloc] init];
-        if (!graph) {
-            return ExecutionResult::Error("Failed to create MPSGraph. Metal may not be available.");
-        }
+        // Use cached graph
+        MPSGraph* graph = (__bridge MPSGraph*)cached_graph_;
 
-        // Value map: mlir::Value (opaque pointer) -> MPSGraphTensor*
-        ValueMap values;
-
-        // Create placeholder tensors for function arguments
+        // Create feeds dictionary from input buffers
         NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds =
             [NSMutableDictionary dictionary];
 
-        // Validate input count
-        size_t num_args = entry_func_.getNumArguments();
+        size_t num_args = cached_placeholders_.size();
         if (inputs.size() < num_args) {
             return ExecutionResult::Error("Input count mismatch: expected " +
                                           std::to_string(num_args) + " inputs, got " +
                                           std::to_string(inputs.size()));
         }
 
-        // Create placeholders for each function argument
-        for (size_t i = 0; i < num_args && i < inputs.size(); i++) {
-            mlir::BlockArgument arg = entry_func_.getArgument(i);
+        for (size_t i = 0; i < num_args; i++) {
             MpsBuffer* input = inputs[i];
-
             if (!input) {
                 return ExecutionResult::Error("Null input buffer at index " + std::to_string(i));
             }
 
-            // Get shape from argument type
-            NSArray<NSNumber*>* shape = GetShapeFromType(arg.getType());
-            if (!shape) {
-                return ExecutionResult::Error("Invalid argument type at index " +
-                                              std::to_string(i));
-            }
-
-            MPSDataType mps_dtype = PjrtDtypeToMps(input->dtype());
-            if (mps_dtype == MPSDataTypeInvalid) {
-                return ExecutionResult::Error("Unsupported data type (PJRT dtype " +
-                                              std::to_string(input->dtype()) +
-                                              ") for input at index " + std::to_string(i));
-            }
-
-            // Create placeholder
-            NSString* argName = [NSString stringWithFormat:@"arg%zu", i];
-            MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
-                                                             dataType:mps_dtype
-                                                                 name:argName];
-
-            // Map the MLIR argument to the placeholder tensor
-            values[arg.getAsOpaquePointer()] = placeholder;
-
-            // Create tensor data from input buffer
+            MPSGraphTensor* placeholder = (__bridge MPSGraphTensor*)cached_placeholders_[i];
             id<MTLBuffer> mtl_buffer = (__bridge id<MTLBuffer>)input->metal_buffer();
             if (!mtl_buffer) {
                 return ExecutionResult::Error("Input buffer at index " + std::to_string(i) +
                                               " has no Metal buffer");
             }
+
+            // Get shape and dtype from placeholder
             MPSGraphTensorData* tensor_data =
                 [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buffer
-                                                        shape:shape
-                                                     dataType:mps_dtype];
+                                                        shape:placeholder.shape
+                                                     dataType:placeholder.dataType];
             feeds[placeholder] = tensor_data;
         }
 
-        // Process operations, handling func.call recursively
-        ProcessResult processResult;
-        @try {
-            mlir::Block& entryBlock = entry_func_.front();
-            processResult = processOperations(graph, entryBlock, values, *module_, 0);
-        } @catch (NSException* exception) {
-            return ExecutionResult::Error("MPS operation failed with Objective-C exception: " +
-                                          std::string([[exception name] UTF8String]) + " - " +
-                                          std::string([[exception reason] UTF8String]));
+        // Build target tensors array from cache
+        NSMutableArray<MPSGraphTensor*>* target_tensors = [NSMutableArray array];
+        for (void* p : cached_targets_) {
+            [target_tensors addObject:(__bridge MPSGraphTensor*)p];
         }
 
-        if (!processResult.ok()) {
-            return ExecutionResult::Error(processResult.error);
-        }
-
-        std::vector<mlir::Value>& return_values = processResult.return_values;
-
-        // Handle identity functions - computation with no ops that just passes through input
-        if (return_values.empty() && !inputs.empty()) {
+        // Handle identity functions (no operations)
+        if (target_tensors.count == 0 && !inputs.empty()) {
             MpsBuffer* input = inputs[0];
             if (!input) {
                 return ExecutionResult::Error("Identity function with null input");
@@ -302,7 +356,6 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 return ExecutionResult::Error("Identity function input has no Metal buffer");
             }
 
-            // Create a new buffer with copied data
             id<MTLBuffer> output_buffer =
                 [mtl_device newBufferWithBytes:input_buffer.contents
                                         length:byte_size
@@ -317,27 +370,8 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             return result;
         }
 
-        // Collect target tensors from return values
-        NSMutableArray<MPSGraphTensor*>* target_tensors = [NSMutableArray array];
-        std::vector<mlir::Type> return_types;
-
-        for (const auto& ret_value : return_values) {
-            MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
-            if (!ret_tensor) {
-                // Print the MLIR value for debugging
-                std::string valStr;
-                llvm::raw_string_ostream os(valStr);
-                ret_value.print(os);
-                return ExecutionResult::Error("Return value '" + valStr + "' not found in tensors");
-            }
-            [target_tensors addObject:ret_tensor];
-            return_types.push_back(ret_value.getType());
-        }
-
         if (target_tensors.count == 0) {
-            return ExecutionResult::Error(
-                "No result tensor produced. "
-                "This indicates an internal error in the MPS graph construction.");
+            return ExecutionResult::Error("No result tensor produced.");
         }
 
         // Get cached command queue from client
@@ -346,6 +380,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             return ExecutionResult::Error("No Metal command queue available");
         }
 
+        // Execute the cached graph
         NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
         @try {
             result_dict = [graph runWithMTLCommandQueue:commandQueue
@@ -353,13 +388,11 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                           targetTensors:target_tensors
                                        targetOperations:nil];
         } @catch (NSException* exception) {
-            return ExecutionResult::Error(
-                "MPS graph execution failed with Objective-C exception: " +
-                std::string([[exception name] UTF8String]) + " - " +
-                std::string([[exception reason] UTF8String]));
+            return ExecutionResult::Error("MPS graph execution failed: " +
+                                          std::string([[exception reason] UTF8String]));
         }
 
-        // Process each output
+        // Process outputs using cached return types
         for (size_t i = 0; i < target_tensors.count; i++) {
             MPSGraphTensor* target = target_tensors[i];
             MPSGraphTensorData* result_data = result_dict[target];
@@ -368,29 +401,25 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                               std::to_string(i));
             }
 
-            // Get result shape
             std::vector<int64_t> result_shape;
             for (NSNumber* dim in result_data.shape) {
                 result_shape.push_back([dim longLongValue]);
             }
 
-            // Get dtype from MLIR type
             mlir::Type elemType =
-                mlir::cast<mlir::RankedTensorType>(return_types[i]).getElementType();
+                mlir::cast<mlir::RankedTensorType>(cached_return_types_[i]).getElementType();
             int output_dtype = MlirTypeToPjrtDtype(elemType);
             if (output_dtype < 0) {
                 return ExecutionResult::Error("Unsupported output type for result " +
                                               std::to_string(i));
             }
 
-            // Calculate byte size
             size_t byte_size = 1;
             for (int64_t dim : result_shape) {
                 byte_size *= dim;
             }
             byte_size *= DtypeByteSize(output_dtype);
 
-            // Create output buffer with shared storage
             id<MTLBuffer> output_buffer =
                 [mtl_device newBufferWithLength:byte_size options:MTLResourceStorageModeShared];
             if (!output_buffer) {
@@ -398,7 +427,6 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                               std::to_string(byte_size) + " bytes");
             }
 
-            // Copy result data using MPSNDArray
             MPSNDArray* ndarray = [result_data mpsndarray];
             if (!ndarray) {
                 return ExecutionResult::Error("Failed to get MPSNDArray from result data");
