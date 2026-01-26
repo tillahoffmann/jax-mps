@@ -1,63 +1,56 @@
-# jax-mps
+# jax-mps [![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml)
 
 A JAX backend for Apple Metal Performance Shaders (MPS), enabling GPU-accelerated JAX computations on Apple Silicon.
 
+## Example
+
+jax-mps achieves a modest 2.5x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using a M4 MacBook Air.
+
+```bash
+$ JAX_PLATFORMS=cpu uv run examples/resnet/main.py --steps=10
+JAX devices: [CpuDevice(id=0)]
+Loading CIFAR-10...
+Loaded 50,000 training samples
+Preparing 195 batches on device...
+Starting training for 10 steps ...
+loss = 1.339: 100%|██████████████████████████████████████████████████| 10/10 [00:28<00:00,  2.84s/it]
+Final training loss: 1.339
+Time per step (after first step): 2.844
+
+$ JAX_PLATFORMS=mps uv run examples/resnet/main.py --steps=10
+WARNING:2026-01-26 15:39:50,179:jax._src.xla_bridge:905: Platform 'mps' is experimental and not all JAX functionality may be correctly supported!
+JAX devices: [MpsDevice(id=0)]
+Loading CIFAR-10...
+Loaded 50,000 training samples
+Preparing 195 batches on device...
+Starting training for 10 steps ...
+loss = 1.339: 100%|██████████████████████████████████████████████████| 10/10 [00:11<00:00,  1.16s/it]
+Final training loss: 1.339
+Time per step (after first step): 1.156
+```
+
 ## Architecture
 
-```
-JAX Program
-    ↓
-StableHLO (MLIR)
-    ↓
-PJRT Plugin (this project)
-    ↓
-MPSGraph (Apple's graph framework)
-    ↓
-Metal GPU
-```
+This project implements a [PJRT plugin](https://openxla.org/xla/pjrt) to offload evaluation of JAX expressions to a [Metal Performance Shaders Graph](https://developer.apple.com/documentation/metalperformanceshadersgraph). The evaluation proceeds in several stages:
 
-This project implements a PJRT (Portable JAX Runtime) plugin that:
-1. Receives HLO (High Level Operations) from JAX
-2. Parses the HLO to identify operations
-3. Builds an equivalent MPSGraph
-4. Executes on the Metal GPU
-
-## Requirements
-
-- macOS 13.0 or later
-- Apple Silicon (M1/M2/M3/M4) or AMD GPU
-- CMake 3.20+, Ninja
-- Xcode Command Line Tools
-- Python 3.10+
-- JAX 0.4.20+
+1. The JAX program is lowered to [StableHLO](https://openxla.org/stablehlo), a set of high-level operations for machine learning applications.
+2. The plugin parses the StableHLO representation of the program and builds the corresponding MPS graph. The graph is cached to avoid re-construction on invocation of the same program, e.g., repeated training steps.
+3. The MPS graph is executed, using native [MPS operations](./mps_ops/) where possible, and the results are returned to the caller.
 
 ## Building
 
+1. Install build tools and build and install LLVM/MLIR & StableHLO. This is a one-time setup and takes about 30 minutes. See the `setup_deps.sh` script for further options, such as forced re-installation, installation location, etc. The script pins LLVM and StableHLO to specific commits matching jaxlib 0.9.0 for bytecode compatibility (see the section on [Version Pinning](#version-pinning)) for details.
+
 ```bash
-# Install build tools
-brew install cmake ninja
-
-# Build and install LLVM/MLIR + StableHLO (one-time setup)
-./scripts/setup_deps.sh
-
-# Build jax-mps
-cmake -B build -DCMAKE_PREFIX_PATH=$HOME/.local/jax-mps-deps
-cmake --build build
+$ brew install cmake ninja
+$ ./scripts/setup_deps.sh
 ```
 
-The `setup_deps.sh` script:
-- Clones LLVM and StableHLO
-- Builds them against each other (they require matched versions)
-- Installs to `~/.local/jax-mps-deps/` by default
+2. Build the plugin and install it as a Python package. This step should be fast, and MUST be repeated for all changes to C++ files.
 
-Options:
 ```bash
-./scripts/setup_deps.sh --prefix /custom/path  # Custom install location
-./scripts/setup_deps.sh --jobs 4               # Limit parallel jobs
-./scripts/setup_deps.sh --force                # Force rebuild with pinned versions
+$ uv pip install -e .
 ```
-
-This will produce `build/lib/libpjrt_plugin_mps.dylib`.
 
 ### Version Pinning
 
@@ -79,64 +72,19 @@ curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/s
 
 Then update the `STABLEHLO_COMMIT` and `LLVM_COMMIT_OVERRIDE` variables in `setup_deps.sh`.
 
-## Installation
-
-```bash
-# Install the Python package in development mode
-pip install -e .
-
-# Or set the library path manually
-export JAX_MPS_LIBRARY_PATH=/path/to/build/lib/libpjrt_plugin_mps.dylib
-```
-
-## Usage
-
-```python
-import jax
-import jax.numpy as jnp
-
-# The plugin registers automatically via entry points
-# Or initialize manually:
-from jax_plugins import mps
-mps.initialize()
-
-# Check available devices
-print(jax.devices())  # Should show MPS device
-
-# Use JAX as normal
-x = jnp.array([1.0, 2.0, 3.0])
-y = jnp.array([4.0, 5.0, 6.0])
-print(x + y)
-```
-
-## Supported Operations
-
-Currently implemented:
-- **Binary ops**: `add`, `subtract`, `multiply`, `divide`, `maximum`, `minimum`, `remainder`, `power`
-- **Matrix ops**: `dot`, `dot_general` (matrix multiplication), `convolution`
-- **Unary ops**: `tanh`, `exp`, `log`, `log_plus_one`, `negate`, `abs`, `sqrt`, `rsqrt`, `erf`, `floor`, `sign`, `is_finite`
-- **Comparison/selection**: `compare`, `select`, `clamp`
-- **Shape ops**: `broadcast`, `broadcast_in_dim`, `reshape`, `transpose`, `convert`, `bitcast_convert`, `reverse`
-- **Slicing/indexing**: `slice`, `dynamic_slice`, `dynamic_update_slice`, `gather`, `scatter`, `pad`, `iota`
-- **Reduction ops**: `reduce` (sum, product, max, min, and, or)
-- **Bitwise ops**: `and`, `or`, `xor`, `shift_left`, `shift_right_logical`
-- **Other**: `concatenate`, `constant`, `custom_call`
-
-Adding new operations: see `src/pjrt_plugin/ops/` for examples.
-
 ## Project Structure
 
 ```
 jax-mps/
 ├── CMakeLists.txt
 ├── src/
-│   ├── jax_plugins/mps/        # Python JAX plugin
-│   ├── pjrt_plugin/            # C++ PJRT implementation
-│   │   ├── pjrt_api.cc         # PJRT C API entry point
-│   │   ├── mps_client.h/mm     # Metal client management
-│   │   ├── mps_executable.h/mm # StableHLO compilation & execution
-│   │   └── ops/                # Operation implementations
-│   └── proto/                  # Protobuf definitions
+│   ├── jax_plugins/mps/         # Python JAX plugin
+│   ├── pjrt_plugin/             # C++ PJRT implementation
+│   │   ├── pjrt_api.cc          # PJRT C API entry point
+│   │   ├── mps_client.h/mm      # Metal client management
+│   │   ├── mps_executable.h/mm  # StableHLO compilation & execution
+│   │   └── ops/                 # Operation implementations
+│   └── proto/                   # Protobuf definitions
 └── tests/
 ```
 
@@ -144,56 +92,17 @@ jax-mps/
 
 ### PJRT Plugin
 
-PJRT (Portable JAX Runtime) is JAX's abstraction for hardware backends. Our plugin implements:
+PJRT (Portable JAX Runtime) is JAX's abstraction for hardware backends. The plugin implements:
+
 - `PJRT_Client_Create` - Initialize Metal device
 - `PJRT_Client_Compile` - Parse HLO and prepare MPSGraph
 - `PJRT_Client_BufferFromHostBuffer` - Transfer data to GPU
 - `PJRT_LoadedExecutable_Execute` - Run computation on GPU
 
-### HLO Parsing
-
-We use MLIR and StableHLO libraries to parse the portable StableHLO bytecode format that JAX emits.
-
 ### MPSGraph Execution
 
-Operations are mapped to MPSGraph equivalents:
+Operations are mapped to MPSGraph equivalents, e.g.,:
+
 - `add` → `additionWithPrimaryTensor:secondaryTensor:`
 - `dot` → `matrixMultiplicationWithPrimaryTensor:secondaryTensor:`
 - `tanh` → `tanhWithTensor:`
-
-## Limitations
-
-- **Subset of operations**: Many ops implemented, more can be added
-- **Synchronous execution**: No async support yet
-- **Single device**: Multi-GPU not supported
-
-## Performance
-
-On Apple M4, large matrix multiplication shows ~45-60x speedup over CPU:
-
-| Operation | Size | CPU | MPS | Speedup |
-|-----------|------|-----|-----|---------|
-| matmul | 4000×4000 | 880ms | 15ms | **60x** |
-| matmul | 1000×1000 | 8ms | 1.3ms | **6x** |
-| add | 4000×4000 | 8ms | 13ms | 0.6x |
-
-Small operations have GPU overhead that exceeds the computation benefit.
-
-## Contributing
-
-This is an experimental project. Contributions welcome:
-1. Add more operations in `mps_executable.mm`
-2. Add proper error handling
-3. Implement async execution
-4. Add tests
-
-## References
-
-- [OpenXLA PJRT Documentation](https://openxla.org/xla/pjrt)
-- [PJRT Plugin Integration Guide](https://openxla.org/xla/pjrt/pjrt_integration)
-- [MPSGraph Documentation](https://developer.apple.com/documentation/metalperformanceshadersgraph)
-- [JAX Documentation](https://jax.readthedocs.io/)
-
-## License
-
-Apache License 2.0
