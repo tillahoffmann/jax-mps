@@ -415,9 +415,7 @@ static MPSGraphTensor* Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation*
     MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
     // Cast indices to int32 if needed
-    if (indices.dataType != MPSDataTypeInt32) {
-        indices = [g castTensor:indices toType:MPSDataTypeInt32 name:nil];
-    }
+    indices = EnsureInt32(g, indices);
 
     // Use scatterND to update the operand at the specified indices
     return [g scatterNDWithDataTensor:operand
@@ -479,9 +477,7 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
                                                       name:nil];
 
         // Cast indices to int32 if needed (MPS gather requires int32)
-        if (squeezedIndices.dataType != MPSDataTypeInt32) {
-            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
-        }
+        squeezedIndices = EnsureInt32(g, squeezedIndices);
 
         // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
         // This gathers slices from operand along the specified axis using indices
@@ -556,9 +552,7 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
                                                       name:nil];
 
         // Cast indices to int32 if needed
-        if (squeezedIndices.dataType != MPSDataTypeInt32) {
-            squeezedIndices = [g castTensor:squeezedIndices toType:MPSDataTypeInt32 name:nil];
-        }
+        squeezedIndices = EnsureInt32(g, squeezedIndices);
 
         // Determine the scatter mode based on the update computation
         // Check if it's an add operation (common for gradients)

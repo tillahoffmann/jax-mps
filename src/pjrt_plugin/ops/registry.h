@@ -127,6 +127,14 @@ inline NSArray<NSNumber*>* GetOutputShape(mlir::Operation* op, unsigned resultIn
     return shape;
 }
 
+// Helper to cast tensor to Int32 if needed (for indices)
+inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
+    if (tensor.dataType != MPSDataTypeInt32) {
+        return [g castTensor:tensor toType:MPSDataTypeInt32 name:nil];
+    }
+    return tensor;
+}
+
 // Macro for registering ops - use in .mm files
 // Use the full MLIR op name (e.g., "stablehlo.add")
 #define REGISTER_MPS_OP(mlir_op_name, handler_fn) \
