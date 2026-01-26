@@ -114,12 +114,17 @@ print(x + y)
 ## Supported Operations
 
 Currently implemented:
-- **Binary ops**: `add`, `subtract`, `multiply`, `divide`
-- **Matrix ops**: `dot`, `dot_general` (matrix multiplication)
-- **Unary ops**: `tanh`, `exp`, `log`, `negate`, `abs`
-- **Shape ops**: `broadcast_in_dim`, `reshape`, `convert`
+- **Binary ops**: `add`, `subtract`, `multiply`, `divide`, `maximum`, `minimum`, `remainder`, `power`
+- **Matrix ops**: `dot`, `dot_general` (matrix multiplication), `convolution`
+- **Unary ops**: `tanh`, `exp`, `log`, `log_plus_one`, `negate`, `abs`, `sqrt`, `rsqrt`, `erf`, `floor`, `sign`, `is_finite`
+- **Comparison/selection**: `compare`, `select`, `clamp`
+- **Shape ops**: `broadcast`, `broadcast_in_dim`, `reshape`, `transpose`, `convert`, `bitcast_convert`, `reverse`
+- **Slicing/indexing**: `slice`, `dynamic_slice`, `dynamic_update_slice`, `gather`, `scatter`, `pad`, `iota`
+- **Reduction ops**: `reduce` (sum, product, max, min, and, or)
+- **Bitwise ops**: `and`, `or`, `xor`, `shift_left`, `shift_right_logical`
+- **Other**: `concatenate`, `constant`, `custom_call`
 
-Adding new operations is straightforward - just add an entry to the `kOpHandlers` dispatch table in `src/pjrt_plugin/mps_executable.mm`.
+Adding new operations: see `src/pjrt_plugin/ops/` for examples.
 
 ## Project Structure
 
@@ -132,13 +137,22 @@ jax-mps/
 │   ├── mps_device.h/mm         # Device abstraction
 │   ├── mps_buffer.h/mm         # Buffer management
 │   ├── mps_executable.h/mm     # StableHLO compilation & execution
-│   └── stablehlo_parser.h/mm   # MLIR-based StableHLO parsing
+│   ├── stablehlo_parser.h/mm   # MLIR-based StableHLO parsing
+│   └── ops/                    # Operation implementations
+│       ├── binary_ops.mm       # Arithmetic operations
+│       ├── unary_ops.mm        # Math functions
+│       ├── shape_ops.mm        # Reshape, transpose, etc.
+│       ├── convolution_ops.mm  # Convolution operations
+│       ├── reduction_ops.mm    # Reduction operations
+│       └── bitwise_ops.mm      # Bitwise operations
 ├── python/
 │   └── jax_plugins/
 │       └── mps/
 │           └── __init__.py     # JAX plugin registration
 └── tests/
-    └── test_basic.py
+    ├── test_ops.py             # Operation tests
+    ├── test_flax.py            # Flax integration tests
+    └── test_rng.py             # RNG tests
 ```
 
 ## How It Works
@@ -164,8 +178,7 @@ Operations are mapped to MPSGraph equivalents:
 
 ## Limitations
 
-- **Subset of operations**: Core ops implemented, more can be added
-- **No autodiff**: Gradients not yet supported through this backend
+- **Subset of operations**: Many ops implemented, more can be added
 - **Synchronous execution**: No async support yet
 - **Single device**: Multi-GPU not supported
 
