@@ -119,6 +119,13 @@ static const char* const kPlatformVersion = "0.1.0";
 
 static PJRT_Client* g_default_client = nullptr;
 
+static PJRT_Client* GetOrCreateDefaultClient();
+
+// Returns the client from args, falling back to default client if nullptr
+static inline PJRT_Client* GetClient(PJRT_Client* client) {
+    return client ? client : GetOrCreateDefaultClient();
+}
+
 static PJRT_Client* GetOrCreateDefaultClient() {
     if (g_default_client)
         return g_default_client;
@@ -287,10 +294,7 @@ PJRT_Error* MPS_Client_PlatformVersion(PJRT_Client_PlatformVersion_Args* args) {
 
 PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
     MPS_LOG(" PJRT_Client_Devices called, client=%p\n", (void*)args->client);
-    PJRT_Client* client = args->client;
-    if (!client) {
-        client = GetOrCreateDefaultClient();
-    }
+    PJRT_Client* client = GetClient(args->client);
     if (!client) {
         args->devices = nullptr;
         args->num_devices = 0;
@@ -310,10 +314,7 @@ PJRT_Error* MPS_Client_Devices(PJRT_Client_Devices_Args* args) {
 
 PJRT_Error* MPS_Client_AddressableDevices(PJRT_Client_AddressableDevices_Args* args) {
     MPS_LOG(" PJRT_Client_AddressableDevices called\n");
-    PJRT_Client* client = args->client;
-    if (!client) {
-        client = GetOrCreateDefaultClient();
-    }
+    PJRT_Client* client = GetClient(args->client);
     if (!client) {
         args->addressable_devices = nullptr;
         args->num_addressable_devices = 0;
@@ -327,7 +328,7 @@ PJRT_Error* MPS_Client_AddressableDevices(PJRT_Client_AddressableDevices_Args* a
 
 PJRT_Error* MPS_Client_LookupDevice(PJRT_Client_LookupDevice_Args* args) {
     MPS_LOG(" PJRT_Client_LookupDevice called, id=%d\n", (int)args->id);
-    PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
+    PJRT_Client* client = GetClient(args->client);
     if (client && args->id < client->devices.size()) {
         args->device = client->devices[args->id];
         MPS_LOG(" Returning device %p\n", (void*)args->device);
@@ -338,7 +339,7 @@ PJRT_Error* MPS_Client_LookupDevice(PJRT_Client_LookupDevice_Args* args) {
 }
 
 PJRT_Error* MPS_Client_LookupAddressableDevice(PJRT_Client_LookupAddressableDevice_Args* args) {
-    PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
+    PJRT_Client* client = GetClient(args->client);
     if (client && args->local_hardware_id < client->devices.size()) {
         args->addressable_device = client->devices[args->local_hardware_id];
     } else {
@@ -349,7 +350,7 @@ PJRT_Error* MPS_Client_LookupAddressableDevice(PJRT_Client_LookupAddressableDevi
 
 PJRT_Error* MPS_Client_AddressableMemories(PJRT_Client_AddressableMemories_Args* args) {
     MPS_LOG(" PJRT_Client_AddressableMemories called\n");
-    PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
+    PJRT_Client* client = GetClient(args->client);
     if (client && !client->memories.empty()) {
         args->addressable_memories = client->memories.data();
         args->num_addressable_memories = client->memories.size();
@@ -363,7 +364,7 @@ PJRT_Error* MPS_Client_AddressableMemories(PJRT_Client_AddressableMemories_Args*
 PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     MPS_LOG(" PJRT_Client_Compile\n");
 
-    PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
+    PJRT_Client* client = GetClient(args->client);
     if (!client || !client->client) {
         return MakeError("No MPS client available for compilation. Metal GPU may not be present.");
     }
@@ -456,7 +457,7 @@ PJRT_Error* MPS_Client_DefaultDeviceAssignment(PJRT_Client_DefaultDeviceAssignme
 PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Args* args) {
     MPS_LOG(" PJRT_Client_BufferFromHostBuffer\n");
 
-    PJRT_Client* client = args->client ? args->client : GetOrCreateDefaultClient();
+    PJRT_Client* client = GetClient(args->client);
     if (!client || !client->client) {
         return MakeError("No MPS client available. Metal GPU may not be present.");
     }
