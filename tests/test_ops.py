@@ -194,33 +194,30 @@ _rng_conv = np.random.default_rng(45)
             (1, 1),
             1,
         ),
-        # Asymmetric strides - gradient has spatial offset bug in MPS transposed conv
-        pytest.param(
+        # Asymmetric strides (fixed - cross-dimensional padding shift correction)
+        (
             _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
             _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (2, 1),
             "SAME",
             (1, 1),
             1,
-            marks=pytest.mark.xfail(reason="MPS asymmetric stride gradient bug"),
         ),
-        pytest.param(
+        (
             _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
             _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 2),
             "SAME",
             (1, 1),
             1,
-            marks=pytest.mark.xfail(reason="MPS asymmetric stride gradient bug"),
         ),
-        pytest.param(
+        (
             _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
             _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (3, 2),
             "VALID",
             (1, 1),
             1,
-            marks=pytest.mark.xfail(reason="MPS asymmetric stride gradient bug"),
         ),
         # Stride + dilation combination - gradient has bug in MPS
         pytest.param(

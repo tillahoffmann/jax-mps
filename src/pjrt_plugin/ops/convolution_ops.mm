@@ -273,13 +273,34 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
-        // When using explicit outputShape, MPS computes the needed padding internally.
-        // The StableHLO padding on transposed conv is for adding zeros to the dilated
-        // input, which MPS handles differently via the outputShape parameter.
-        // Setting explicit padding with outputShape can cause incorrect results.
-        transposeDesc.paddingLeft = 0;
+        // For transposed convolution with explicit outputShape, MPS computes
+        // padding internally based on input/output shapes and stride. However,
+        // when strides are asymmetric (inputDilationH != inputDilationW), MPS's
+        // default alignment doesn't match StableHLO's expected output position.
+        //
+        // For symmetric strides (2,2), (3,3), etc., MPS's default alignment is
+        // correct and we don't need any padding adjustment.
+        //
+        // For asymmetric strides like (2,1) or (1,2), MPS produces spatially
+        // shifted output. The shift direction and amount are determined by the
+        // padding asymmetry in the StableHLO operation:
+        // - padTop - padBottom gives the H direction shift amount
+        // - padLeft - padRight gives the W direction shift amount
+        //
+        // Empirically, MPS transposed conv applies these shifts in swapped
+        // dimensions: H padding asymmetry affects W output position and vice versa.
+        // We only apply this correction when strides are actually asymmetric.
+        int64_t shiftH = 0;
+        int64_t shiftW = 0;
+        if (inputDilationH != inputDilationW) {
+            // Asymmetric strides - apply cross-dimensional shift correction
+            shiftH = padLeft - padRight;  // W padding asymmetry -> H shift
+            shiftW = padTop - padBottom;  // H padding asymmetry -> W shift
+        }
+
+        transposeDesc.paddingLeft = (NSUInteger)(shiftW > 0 ? shiftW : 0);
         transposeDesc.paddingRight = 0;
-        transposeDesc.paddingTop = 0;
+        transposeDesc.paddingTop = (NSUInteger)(shiftH > 0 ? shiftH : 0);
         transposeDesc.paddingBottom = 0;
 
         result = [g convolutionTranspose2DWithSourceTensor:convInput
