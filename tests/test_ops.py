@@ -540,3 +540,28 @@ def test_dynamic_update_slice(
 def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updates):
     # Gradient fails with "Memory kinds and dtypes have different sizes" error
     return operand.at[indices].add(updates)
+
+
+# Non-contiguous array transfer (regression test for CIFAR loader bug)
+# Create non-contiguous test data - transpose creates view with non-standard strides
+_noncontig_rng = np.random.default_rng(42)
+_noncontig_array = (
+    _noncontig_rng.standard_normal((256, 3, 32, 32))
+    .astype(np.float32)
+    .transpose(0, 2, 3, 1)
+)
+assert not _noncontig_array.flags["C_CONTIGUOUS"], "Test data must be non-contiguous"
+
+
+@pytest.mark.xfail(reason="MPS corrupts non-contiguous arrays during transfer")
+@pytest.mark.parametrize("x", [_noncontig_array])
+@assert_cpu_mps_allclose
+def test_noncontiguous_array_transfer(request: pytest.FixtureRequest, device, x):
+    """Test that non-contiguous arrays are transferred correctly to MPS.
+
+    This is a regression test for a bug where transpose() created a non-contiguous
+    array that was corrupted when transferred to MPS, causing training divergence.
+    """
+    # The decorator already transfers x to the device via jax.device_put.
+    # Just return it - the comparison will catch corruption.
+    return x
