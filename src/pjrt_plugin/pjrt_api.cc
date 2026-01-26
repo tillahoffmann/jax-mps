@@ -459,10 +459,14 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
     }
 
     std::vector<int64_t> dims(args->dims, args->dims + args->num_dims);
+    std::vector<int64_t> byte_strides;
+    if (args->byte_strides && args->num_byte_strides > 0) {
+        byte_strides.assign(args->byte_strides, args->byte_strides + args->num_byte_strides);
+    }
 
-    auto mps_buffer =
-        client->client->BufferFromHostBuffer(args->data, static_cast<int>(args->type), dims,
-                                             args->device ? args->device->device : nullptr);
+    auto mps_buffer = client->client->BufferFromHostBuffer(
+        args->data, static_cast<int>(args->type), dims, byte_strides,
+        args->device ? args->device->device : nullptr);
 
     if (!mps_buffer) {
         return MakeError("Failed to create Metal buffer. GPU memory may be exhausted.");

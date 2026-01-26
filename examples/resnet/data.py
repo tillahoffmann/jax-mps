@@ -39,7 +39,4 @@ def load_cifar10() -> tuple[np.ndarray, np.ndarray]:
     std = images.std(axis=(0, 1, 2))
     images = (images - mean) / std
 
-    # Ensure contiguous memory layout for MPS compatibility.
-    images = np.ascontiguousarray(images)
-
     return images, labels

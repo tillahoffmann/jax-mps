@@ -48,9 +48,12 @@ public:
     MpsDevice* LookupDevice(int device_id);
 
     // Buffer operations
+    // byte_strides: number of bytes between elements in each dimension.
+    // If empty, assumes dense row-major layout.
     std::unique_ptr<MpsBuffer> BufferFromHostBuffer(const void* data,
                                                     int dtype,  // PJRT dtype enum
                                                     const std::vector<int64_t>& dims,
+                                                    const std::vector<int64_t>& byte_strides,
                                                     MpsDevice* device);
 
     // Compilation - takes ownership of ParsedModule

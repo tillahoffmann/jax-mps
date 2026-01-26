@@ -553,14 +553,14 @@ _noncontig_array = (
 assert not _noncontig_array.flags["C_CONTIGUOUS"], "Test data must be non-contiguous"
 
 
-@pytest.mark.xfail(reason="MPS corrupts non-contiguous arrays during transfer")
 @pytest.mark.parametrize("x", [_noncontig_array])
 @assert_cpu_mps_allclose
 def test_noncontiguous_array_transfer(request: pytest.FixtureRequest, device, x):
     """Test that non-contiguous arrays are transferred correctly to MPS.
 
-    This is a regression test for a bug where transpose() created a non-contiguous
-    array that was corrupted when transferred to MPS, causing training divergence.
+    Regression test for a bug where transpose() created a non-contiguous array
+    that was corrupted when transferred to MPS. Fixed by handling byte_strides
+    in BufferFromHostBuffer to copy strided data to contiguous layout.
     """
     # The decorator already transfers x to the device via jax.device_put.
     # Just return it - the comparison will catch corruption.
