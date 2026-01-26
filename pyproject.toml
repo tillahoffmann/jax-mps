@@ -17,16 +17,12 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 [project.urls]
-Homepage = "https://github.com/till/jax-mps"
-Repository = "https://github.com/till/jax-mps"
+Homepage = "https://github.com/tillahoffmann/jax-mps"
+Repository = "https://github.com/tillahoffmann/jax-mps"
 
 [project.entry-points."jax_plugins"]
 mps = "jax_plugins.mps"
@@ -67,19 +63,3 @@ dev = [
     "pytest",
     "ruff>=0.14.13",
 ]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 88
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
-
-[tool.ruff.format]
-quote-style = "double"
-
-
