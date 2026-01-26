@@ -28,7 +28,7 @@ static bool _reg_dot = ::jax_mps::OpRegistry::Register("stablehlo.dot", Handle_d
 static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
     if (!dotOp) {
-        NSLog(@"ERROR: Expected DotGeneralOp");
+        MPS_LOG_ERROR(" Expected DotGeneralOp\n");
         return nullptr;
     }
 
@@ -91,12 +91,10 @@ static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, Valu
     }
 
     // Fall back to simple matmul for unhandled cases
-    NSLog(
-        @"WARNING: dot_general with complex contracting/batch dims, falling back to simple matmul");
-    NSLog(@"  LHS shape: %@, RHS shape: %@", lhsShape, rhsShape);
-    NSLog(@"  LHS contracting: %lld, RHS contracting: %lld",
-          lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
-          rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
+    MPS_LOG_WARN("dot_general with complex contracting/batch dims, falling back to simple matmul. "
+                 "LHS contracting: %lld, RHS contracting: %lld\n",
+                 lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
+                 rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
     return [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
 }
 static bool _reg_dot_general =

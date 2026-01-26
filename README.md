@@ -2,8 +2,6 @@
 
 A JAX backend for Apple Metal Performance Shaders (MPS), enabling GPU-accelerated JAX computations on Apple Silicon.
 
-> **Status**: Early development / proof of concept
-
 ## Architecture
 
 ```

@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
+#include "pjrt_plugin/logging.h"
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/mps_device.h"
 #import "pjrt_plugin/mps_executable.h"
@@ -62,7 +63,7 @@ bool MpsClient::Initialize() {
                                                   [name UTF8String]);
     devices_.push_back(std::move(mps_device));
 
-    NSLog(@"Initialized MPS client with device: %@", name);
+    MPS_LOG_INFO("Initialized MPS client with device: %s\n", [name UTF8String]);
     return true;
 }
 

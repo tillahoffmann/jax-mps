@@ -12,6 +12,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
+#include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/type_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 

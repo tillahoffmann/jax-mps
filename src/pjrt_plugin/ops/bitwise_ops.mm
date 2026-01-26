@@ -102,7 +102,7 @@ REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
 static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
     if (!concatOp) {
-        NSLog(@"ERROR: Expected ConcatenateOp");
+        MPS_LOG_ERROR(" Expected ConcatenateOp\n");
         return nullptr;
     }
 
@@ -116,7 +116,7 @@ static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, Valu
     }
 
     if (input_tensors.count == 0) {
-        NSLog(@"ERROR: Concatenate operation has no valid inputs");
+        MPS_LOG_ERROR(" Concatenate operation has no valid inputs\n");
         return nullptr;
     }
 
