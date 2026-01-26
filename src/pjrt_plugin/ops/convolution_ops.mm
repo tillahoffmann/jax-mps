@@ -250,13 +250,22 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // - MPS transpose conv expects source_channels == kernel_O
         // - But StableHLO kernel has source_channels == kernel_I
         // So we need to swap I and O: OIHW [O, I, H, W] -> [I, O, H, W]
-        MPSGraphTensor* transposeKernel = [g transposeTensor:mpsKernel
+        //
+        // Additionally, MPS transposed conv correlates (no kernel flip) while
+        // StableHLO expects convolution semantics (kernel flipped).
+        // We must flip the kernel in both spatial dimensions to match.
+        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3).
+        MPSGraphTensor* flippedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
+        MPSGraphTensor* transposeKernel = [g transposeTensor:flippedKernel
                                                  permutation:@[@1, @0, @2, @3]
                                                         name:nil];
 
+        // For transposed convolution, MPS stride controls upsampling factor.
+        // This corresponds to StableHLO's lhs_dilation (input dilation).
+        // For backward pass of stride=N forward conv, inputDilation=N.
         MPSGraphConvolution2DOpDescriptor* transposeDesc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:1
-                          strideInY:1
+            descriptorWithStrideInX:(NSUInteger)inputDilationW
+                          strideInY:(NSUInteger)inputDilationH
                     dilationRateInX:(NSUInteger)dilationW
                     dilationRateInY:(NSUInteger)dilationH
                              groups:(NSUInteger)featureGroupCount
@@ -264,10 +273,14 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
-        transposeDesc.paddingLeft = (NSUInteger)padLeft;
-        transposeDesc.paddingRight = (NSUInteger)padRight;
-        transposeDesc.paddingTop = (NSUInteger)padTop;
-        transposeDesc.paddingBottom = (NSUInteger)padBottom;
+        // When using explicit outputShape, MPS computes the needed padding internally.
+        // The StableHLO padding on transposed conv is for adding zeros to the dilated
+        // input, which MPS handles differently via the outputShape parameter.
+        // Setting explicit padding with outputShape can cause incorrect results.
+        transposeDesc.paddingLeft = 0;
+        transposeDesc.paddingRight = 0;
+        transposeDesc.paddingTop = 0;
+        transposeDesc.paddingBottom = 0;
 
         result = [g convolutionTranspose2DWithSourceTensor:convInput
                                              weightsTensor:transposeKernel

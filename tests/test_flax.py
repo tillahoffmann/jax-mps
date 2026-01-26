@@ -282,14 +282,14 @@ _strided_net_rng = np.random.default_rng(42)
 _strided_net_x = _strided_net_rng.standard_normal((2, 16, 16, 3)).astype(np.float32)
 
 
-@pytest.mark.xfail(reason="MPS gradient divergence with strided conv in deep networks")
 @pytest.mark.parametrize("x", [_strided_net_x])
 @assert_cpu_mps_allclose
 def test_strided_conv_network_gradients(request: pytest.FixtureRequest, device, x):
     """Test gradients flow correctly through network with strided convolutions.
 
-    This is a regression test for MPS gradient divergence when backpropagating
-    through strided convolution layers with projection shortcuts.
+    Regression test for MPS gradient divergence when backpropagating through
+    strided convolution layers with projection shortcuts. Fixed by correcting
+    transposed convolution kernel flip in convolution_ops.mm.
     """
     model = _TwoStageNet(nnx.Rngs(0))
     labels = jax.nn.one_hot(jnp.array([0, 1]), 10)
