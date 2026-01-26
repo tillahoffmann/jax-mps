@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-"""Benchmark comparing JAX CPU vs MPS (Apple Silicon GPU) backends."""
+"""Micro-benchmark comparing JAX CPU vs MPS (Apple Silicon GPU) backends."""
 
+import itertools
 import time
 
 import numpy as np
@@ -42,21 +42,10 @@ def run_benchmarks():
     import jax
     import jax.numpy as jnp
 
-    # Force CPU backend
+    # Get the devices.
     cpu_device = jax.devices("cpu")[0]
-
-    # Try to get MPS backend
-    try:
-        mps_device = jax.devices("mps")[0]
-        print(f"CPU Device: {cpu_device}")
-        print(f"MPS Device: {mps_device}")
-    except Exception as e:
-        mps_device = None
-        print(f"CPU Device: {cpu_device}")
-        print(f"MPS Device: Not available ({e})")
-
-    print()
-    print("-" * 70)
+    mps_device = jax.devices("mps")[0]
+    devices = [cpu_device, mps_device]
 
     # Define benchmark sizes
     sizes = [
@@ -65,116 +54,68 @@ def run_benchmarks():
         ("Large (4000x4000)", 4000),
     ]
 
-    results = []
+    results = {}
 
-    for name, size in sizes:
+    for (name, size), device in itertools.product(sizes, devices):
         print(f"\n{name} matrices ({size}x{size}):")
         print("-" * 50)
 
         # Generate random data
         np.random.seed(42)
-        a_np = np.random.randn(size, size).astype(np.float32)
-        b_np = np.random.randn(size, size).astype(np.float32)
+        a = jax.device_put(np.random.randn(size, size).astype(np.float32), device)
+        b = jax.device_put(np.random.randn(size, size).astype(np.float32), device)
 
         # === Matrix Multiplication ===
         print("\n  Matrix Multiplication (matmul):")
 
-        # CPU benchmark
-        a_cpu = jax.device_put(a_np, cpu_device)
-        b_cpu = jax.device_put(b_np, cpu_device)
-
         @jax.jit
-        def matmul_cpu(a, b):
+        def matmul(a, b):
             return jnp.matmul(a, b)
 
-        cpu_mean, cpu_std, cpu_result = benchmark_fn(matmul_cpu, a_cpu, b_cpu)
-        print(f"    CPU:  {cpu_mean * 1000:8.2f} ms ± {cpu_std * 1000:.2f} ms")
-
-        if mps_device is not None:
-            a_mps = jax.device_put(a_np, mps_device)
-            b_mps = jax.device_put(b_np, mps_device)
-
-            @jax.jit
-            def matmul_mps(a, b):
-                return jnp.matmul(a, b)
-
-            mps_mean, mps_std, mps_result = benchmark_fn(matmul_mps, a_mps, b_mps)
-            print(f"    MPS:  {mps_mean * 1000:8.2f} ms ± {mps_std * 1000:.2f} ms")
-
-            speedup = cpu_mean / mps_mean if mps_mean > 0 else 0
-            print(f"    Speedup: {speedup:.2f}x")
-
-            results.append(("matmul", name, cpu_mean, mps_mean, speedup))
-        else:
-            a_mps = b_mps = None
+        mean, std, _ = benchmark_fn(matmul, a, b)
+        print(f"    {device.platform}:  {mean * 1000:8.2f} ms ± {std * 1000:.2f} ms")
+        results.setdefault(("matmul", name), []).append((device.platform, mean))
 
         # === Element-wise Addition ===
         print("\n  Element-wise Addition (add):")
 
         @jax.jit
-        def add_cpu(a, b):
+        def add(a, b):
             return a + b
 
-        cpu_mean, cpu_std, _ = benchmark_fn(add_cpu, a_cpu, b_cpu)
-        print(f"    CPU:  {cpu_mean * 1000:8.2f} ms ± {cpu_std * 1000:.2f} ms")
-
-        if mps_device is not None:
-
-            @jax.jit
-            def add_mps(a, b):
-                return a + b
-
-            mps_mean, mps_std, _ = benchmark_fn(add_mps, a_mps, b_mps)
-            print(f"    MPS:  {mps_mean * 1000:8.2f} ms ± {mps_std * 1000:.2f} ms")
-
-            speedup = cpu_mean / mps_mean if mps_mean > 0 else 0
-            print(f"    Speedup: {speedup:.2f}x")
-
-            results.append(("add", name, cpu_mean, mps_mean, speedup))
+        mean, std, _ = benchmark_fn(add, a, b)
+        print(f"    {device.platform}:  {mean * 1000:8.2f} ms ± {std * 1000:.2f} ms")
+        results.setdefault(("add", name), []).append((device.platform, mean))
 
         # === Tanh ===
         print("\n  Tanh activation:")
 
         @jax.jit
-        def tanh_cpu(a):
+        def tanh(a):
             return jnp.tanh(a)
 
-        cpu_mean, cpu_std, _ = benchmark_fn(tanh_cpu, a_cpu)
-        print(f"    CPU:  {cpu_mean * 1000:8.2f} ms ± {cpu_std * 1000:.2f} ms")
-
-        if mps_device is not None:
-
-            @jax.jit
-            def tanh_mps(a):
-                return jnp.tanh(a)
-
-            mps_mean, mps_std, _ = benchmark_fn(tanh_mps, a_mps)
-            print(f"    MPS:  {mps_mean * 1000:8.2f} ms ± {mps_std * 1000:.2f} ms")
-
-            speedup = cpu_mean / mps_mean if mps_mean > 0 else 0
-            print(f"    Speedup: {speedup:.2f}x")
-
-            results.append(("tanh", name, cpu_mean, mps_mean, speedup))
+        mean, std, _ = benchmark_fn(tanh, a)
+        print(f"    {device.platform}:  {mean * 1000:8.2f} ms ± {std * 1000:.2f} ms")
+        results.setdefault(("tanh", name), []).append((device.platform, mean))
 
     # Summary
-    if mps_device is not None and results:
-        print("\n" + "=" * 70)
-        print("SUMMARY")
-        print("=" * 70)
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(
+        f"\n{'Operation':<15} {'Size':<20} {'CPU (ms)':<12} {'MPS (ms)':<12} {'Speedup':<10}"
+    )
+    print("-" * 70)
+    for (op, size_name), rows in results.items():
+        assert len(rows) == 2
+        (platform_cpu, mean_cpu) = rows[0]
+        assert platform_cpu == "cpu"
+        (platform_mps, mean_mps) = rows[1]
+        assert platform_mps == "mps"
+        speedup = mean_cpu / mean_mps
         print(
-            f"\n{'Operation':<15} {'Size':<20} {'CPU (ms)':<12} {'MPS (ms)':<12} {'Speedup':<10}"
+            f"{op:<15} {size_name:<20} {mean_cpu * 1000:<12.2f} {mean_mps * 1000:<12.2f} {speedup:<10.2f}x"
         )
-        print("-" * 70)
-        for op, size_name, cpu_t, mps_t, speedup in results:
-            print(
-                f"{op:<15} {size_name:<20} {cpu_t * 1000:<12.2f} {mps_t * 1000:<12.2f} {speedup:<10.2f}x"
-            )
-
-        avg_speedup = np.mean([r[4] for r in results])
-        print("-" * 70)
-        print(f"Average speedup: {avg_speedup:.2f}x")
-
-    print()
 
 
 if __name__ == "__main__":
