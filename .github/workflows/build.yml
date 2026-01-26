@@ -1,4 +1,4 @@
-name: Build and Release
+name: jax-mps
 
 on:
   push:
@@ -6,13 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
 
 jobs:
   build-deps:
-    name: Build MLIR/StableHLO
+    name: Build MLIR & StableHLO
     runs-on: macos-14  # Apple Silicon runner
-    timeout-minutes: 180  # LLVM build can take ~2-3 hours
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +20,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          # v2: pinned to jaxlib 0.9.0 compatible LLVM/StableHLO versions
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
 
       - name: Install build tools
@@ -36,9 +34,9 @@ jobs:
 
       - name: Verify deps installation
         run: |
-          echo "Checking MLIR installation..."
+          echo "Checking MLIR installation ..."
           ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -5
-          echo "Checking StableHLO installation..."
+          echo "Checking StableHLO installation ..."
           ls -la ${{ github.workspace }}/.jax-mps-deps/include/stablehlo/dialect/ | head -5
 
       - name: Upload deps artifact
