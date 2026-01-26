@@ -28,20 +28,18 @@ _uint_2d_b = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
 _uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
 
 # Additional seeded test data for various shapes
-_rng2 = np.random.default_rng(43)
-_float_1d = _rng2.standard_normal((10,)).astype(np.float32)
-_float_2d_small = _rng2.standard_normal((4, 8)).astype(np.float32)
-_float_3d = _rng2.standard_normal((2, 3, 4)).astype(np.float32)
-_float_4d = _rng2.standard_normal((2, 3, 4, 5)).astype(np.float32)
-_float_8x8 = _rng2.standard_normal((8, 8)).astype(np.float32)
-_float_4x8x8 = _rng2.standard_normal((4, 8, 8)).astype(np.float32)
+_float_1d = _rng.standard_normal((10,)).astype(np.float32)
+_float_2d_small = _rng.standard_normal((4, 8)).astype(np.float32)
+_float_3d = _rng.standard_normal((2, 3, 4)).astype(np.float32)
+_float_4d = _rng.standard_normal((2, 3, 4, 5)).astype(np.float32)
+_float_8x8 = _rng.standard_normal((8, 8)).astype(np.float32)
+_float_4x8x8 = _rng.standard_normal((4, 8, 8)).astype(np.float32)
 
 # Matmul test data
-_rng_matmul = np.random.default_rng(44)
-_matmul_a1 = _rng_matmul.standard_normal((32, 64)).astype(np.float32)
-_matmul_b1 = _rng_matmul.standard_normal((64, 32)).astype(np.float32)
-_matmul_a2 = _rng_matmul.standard_normal((16, 16)).astype(np.float32)
-_matmul_b2 = _rng_matmul.standard_normal((16, 16)).astype(np.float32)
+_matmul_a1 = _rng.standard_normal((32, 64)).astype(np.float32)
+_matmul_b1 = _rng.standard_normal((64, 32)).astype(np.float32)
+_matmul_a2 = _rng.standard_normal((16, 16)).astype(np.float32)
+_matmul_b2 = _rng.standard_normal((16, 16)).astype(np.float32)
 
 
 # Unary operations
@@ -150,18 +148,14 @@ def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
     return result, grad
 
 
-# Convolution operations
-_rng_conv = np.random.default_rng(45)
-
-
 @register_op_test("stablehlo.convolution")
 @pytest.mark.parametrize(
     "x, kernel, strides, padding, dilation, groups",
     [
         # Basic 3x3 conv, SAME padding
         (
-            _rng_conv.standard_normal((2, 28, 28, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 28, 28, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -169,8 +163,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Strided conv (stride=2)
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 16)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 16)).astype(np.float32),
             (2, 2),
             "SAME",
             (1, 1),
@@ -178,8 +172,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Strided conv (stride=2) with VALID padding
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (2, 2),
             "VALID",
             (1, 1),
@@ -187,8 +181,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Strided conv (stride=3)
         (
-            _rng_conv.standard_normal((2, 33, 33, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 33, 33, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (3, 3),
             "SAME",
             (1, 1),
@@ -196,24 +190,24 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Asymmetric strides (fixed - cross-dimensional padding shift correction)
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (2, 1),
             "SAME",
             (1, 1),
             1,
         ),
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 2),
             "SAME",
             (1, 1),
             1,
         ),
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (3, 2),
             "VALID",
             (1, 1),
@@ -221,8 +215,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Stride + dilation combination - gradient has bug in MPS
         pytest.param(
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (2, 2),
             "SAME",
             (2, 2),
@@ -231,8 +225,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # VALID padding (no stride)
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((5, 5, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((5, 5, 3, 8)).astype(np.float32),
             (1, 1),
             "VALID",
             (1, 1),
@@ -240,8 +234,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Dilated conv
         (
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (1, 1),
             "SAME",
             (2, 2),
@@ -249,8 +243,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # 1x1 pointwise conv
         (
-            _rng_conv.standard_normal((2, 16, 16, 64)).astype(np.float32),
-            _rng_conv.standard_normal((1, 1, 64, 128)).astype(np.float32),
+            _rng.standard_normal((2, 16, 16, 64)).astype(np.float32),
+            _rng.standard_normal((1, 1, 64, 128)).astype(np.float32),
             (1, 1),
             "VALID",
             (1, 1),
@@ -258,8 +252,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Large kernel with stride - gradient has bug in MPS
         pytest.param(
-            _rng_conv.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng_conv.standard_normal((7, 7, 3, 16)).astype(np.float32),
+            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
+            _rng.standard_normal((7, 7, 3, 16)).astype(np.float32),
             (2, 2),
             "SAME",
             (1, 1),
@@ -268,8 +262,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Small input with stride
         (
-            _rng_conv.standard_normal((2, 8, 8, 3)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 3, 8)).astype(np.float32),
+            _rng.standard_normal((2, 8, 8, 3)).astype(np.float32),
+            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
             (2, 2),
             "VALID",
             (1, 1),
@@ -277,8 +271,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Depthwise conv (groups = in_channels)
         (
-            _rng_conv.standard_normal((2, 28, 28, 16)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 1, 16)).astype(np.float32),
+            _rng.standard_normal((2, 28, 28, 16)).astype(np.float32),
+            _rng.standard_normal((3, 3, 1, 16)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -286,8 +280,8 @@ _rng_conv = np.random.default_rng(45)
         ),
         # Grouped conv
         (
-            _rng_conv.standard_normal((2, 28, 28, 16)).astype(np.float32),
-            _rng_conv.standard_normal((3, 3, 4, 32)).astype(np.float32),
+            _rng.standard_normal((2, 28, 28, 16)).astype(np.float32),
+            _rng.standard_normal((3, 3, 4, 32)).astype(np.float32),
             (1, 1),
             "SAME",
             (1, 1),
@@ -482,21 +476,14 @@ def test_dynamic_slice(
     return result, grad
 
 
-# Concatenate operation
-_rng_concat = np.random.default_rng(46)
-
-
 @register_op_test("stablehlo.concatenate")
 @pytest.mark.parametrize(
     "arrays, axis",
     [
-        ([_rng_concat.standard_normal((4, 8)).astype(np.float32) for _ in range(3)], 0),
-        ([_rng_concat.standard_normal((4, 8)).astype(np.float32) for _ in range(2)], 1),
+        ([_rng.standard_normal((4, 8)).astype(np.float32) for _ in range(3)], 0),
+        ([_rng.standard_normal((4, 8)).astype(np.float32) for _ in range(2)], 1),
         (
-            [
-                _rng_concat.standard_normal((2, 3, 4)).astype(np.float32)
-                for _ in range(2)
-            ],
+            [_rng.standard_normal((2, 3, 4)).astype(np.float32) for _ in range(2)],
             2,
         ),
     ],
@@ -523,38 +510,34 @@ def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
     return jnp.arange(start, stop, dtype=dtype)
 
 
-# Reduce operations (stablehlo.reduce and stablehlo.return are used internally)
-_rng_reduce = np.random.default_rng(47)
-
-
 @register_op_test("stablehlo.reduce", "stablehlo.return")
 @pytest.mark.parametrize(
     "op, x, axis",
     [
         # Basic reductions
-        (jnp.sum, _rng_reduce.standard_normal((16, 16)).astype(np.float32), None),
-        (jnp.sum, _rng_reduce.standard_normal((8, 4, 2)).astype(np.float32), 1),
+        (jnp.sum, _rng.standard_normal((16, 16)).astype(np.float32), None),
+        (jnp.sum, _rng.standard_normal((8, 4, 2)).astype(np.float32), 1),
         (
             jnp.prod,
-            _rng_reduce.standard_normal((4, 4)).astype(np.float32) * 0.5 + 1,
+            _rng.standard_normal((4, 4)).astype(np.float32) * 0.5 + 1,
             None,
         ),
-        (jnp.max, _rng_reduce.standard_normal((16, 16)).astype(np.float32), 0),
-        (jnp.min, _rng_reduce.standard_normal((16, 16)).astype(np.float32), -1),
-        (jnp.all, _rng_reduce.random((8, 8)) > 0.5, None),
-        (jnp.any, _rng_reduce.random((8, 8)) > 0.5, 0),
+        (jnp.max, _rng.standard_normal((16, 16)).astype(np.float32), 0),
+        (jnp.min, _rng.standard_normal((16, 16)).astype(np.float32), -1),
+        (jnp.all, _rng.random((8, 8)) > 0.5, None),
+        (jnp.any, _rng.random((8, 8)) > 0.5, 0),
         # Multi-axis reductions (tuple of axes)
-        (jnp.sum, _rng_reduce.standard_normal((4, 8, 16)).astype(np.float32), (0, 2)),
-        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), (1, 3)),
-        (jnp.max, _rng_reduce.standard_normal((8, 8, 8)).astype(np.float32), (0, 1)),
-        (jnp.min, _rng_reduce.standard_normal((4, 4, 4, 4)).astype(np.float32), (0, 2)),
+        (jnp.sum, _rng.standard_normal((4, 8, 16)).astype(np.float32), (0, 2)),
+        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), (1, 3)),
+        (jnp.max, _rng.standard_normal((8, 8, 8)).astype(np.float32), (0, 1)),
+        (jnp.min, _rng.standard_normal((4, 4, 4, 4)).astype(np.float32), (0, 2)),
         # 4D tensor reductions
-        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), None),
-        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), 2),
-        (jnp.max, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), 3),
+        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), None),
+        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), 2),
+        (jnp.max, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), 3),
         # Negative axis
-        (jnp.sum, _rng_reduce.standard_normal((8, 4, 2)).astype(np.float32), -2),
-        (jnp.sum, _rng_reduce.standard_normal((2, 3, 4, 5)).astype(np.float32), -1),
+        (jnp.sum, _rng.standard_normal((8, 4, 2)).astype(np.float32), -2),
+        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), -1),
     ],
 )
 @assert_cpu_mps_allclose
@@ -568,22 +551,18 @@ def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
     return result, grad
 
 
-# Gather operation (embedding lookup pattern)
-_rng_gather = np.random.default_rng(48)
-
-
 @register_op_test("stablehlo.gather")
 @pytest.mark.parametrize(
     "operand, indices",
     [
         # Simple embedding lookup (1D indices - gradient works)
         (
-            _rng_gather.standard_normal((100, 16)).astype(np.float32),
+            _rng.standard_normal((100, 16)).astype(np.float32),
             np.array([0, 5, 10, 50, 99], dtype=np.int32),
         ),
         # Batched embedding lookup (2D indices - gradient crashes MPS scatter)
         (
-            _rng_gather.standard_normal((50, 8)).astype(np.float32),
+            _rng.standard_normal((50, 8)).astype(np.float32),
             np.array([[0, 1, 2], [10, 20, 30]], dtype=np.int32),
         ),
     ],
@@ -599,17 +578,13 @@ def test_gather(request: pytest.FixtureRequest, device, operand, indices):
     return result, grad
 
 
-# Pad operation
-_rng_pad = np.random.default_rng(49)
-
-
 @register_op_test("stablehlo.pad")
 @pytest.mark.parametrize(
     "x, pad_width, constant_value",
     [
-        (_rng_pad.standard_normal((4, 4)).astype(np.float32), ((1, 1), (2, 2)), 0.0),
-        (_rng_pad.standard_normal((3, 5)).astype(np.float32), ((0, 2), (1, 0)), 1.0),
-        (_rng_pad.standard_normal((8,)).astype(np.float32), ((3, 3),), -1.0),
+        (_rng.standard_normal((4, 4)).astype(np.float32), ((1, 1), (2, 2)), 0.0),
+        (_rng.standard_normal((3, 5)).astype(np.float32), ((0, 2), (1, 0)), 1.0),
+        (_rng.standard_normal((8,)).astype(np.float32), ((3, 3),), -1.0),
     ],
 )
 @assert_cpu_mps_allclose
@@ -667,11 +642,8 @@ def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updat
 
 # Non-contiguous array transfer (regression test for CIFAR loader bug)
 # Create non-contiguous test data - transpose creates view with non-standard strides
-_noncontig_rng = np.random.default_rng(42)
 _noncontig_array = (
-    _noncontig_rng.standard_normal((256, 3, 32, 32))
-    .astype(np.float32)
-    .transpose(0, 2, 3, 1)
+    _rng.standard_normal((256, 3, 32, 32)).astype(np.float32).transpose(0, 2, 3, 1)
 )
 assert not _noncontig_array.flags["C_CONTIGUOUS"], "Test data must be non-contiguous"
 

@@ -177,21 +177,21 @@ class LogisticRegression(nnx.Module):
         return jax.nn.sigmoid(logits)
 
 
-_linear_sigmoid_rng = np.random.default_rng(42)
+_rng = np.random.default_rng(42)
 
 
 @pytest.mark.parametrize(
     "x, kernel, bias",
     [
         (
-            _linear_sigmoid_rng.standard_normal((32, 16)).astype(np.float32),
-            _linear_sigmoid_rng.standard_normal((16, 1)).astype(np.float32),
-            _linear_sigmoid_rng.standard_normal((1,)).astype(np.float32),
+            _rng.standard_normal((32, 16)).astype(np.float32),
+            _rng.standard_normal((16, 1)).astype(np.float32),
+            _rng.standard_normal((1,)).astype(np.float32),
         ),
         (
-            _linear_sigmoid_rng.standard_normal((4, 16)).astype(np.float32),
-            _linear_sigmoid_rng.standard_normal((16, 1)).astype(np.float32),
-            _linear_sigmoid_rng.standard_normal((1,)).astype(np.float32),
+            _rng.standard_normal((4, 16)).astype(np.float32),
+            _rng.standard_normal((16, 1)).astype(np.float32),
+            _rng.standard_normal((1,)).astype(np.float32),
         ),
     ],
 )
@@ -278,8 +278,7 @@ class _TwoStageNet(nnx.Module):
         return self.dense(x)
 
 
-_strided_net_rng = np.random.default_rng(42)
-_strided_net_x = _strided_net_rng.standard_normal((2, 16, 16, 3)).astype(np.float32)
+_strided_net_x = _rng.standard_normal((2, 16, 16, 3)).astype(np.float32)
 
 
 @pytest.mark.parametrize("x", [_strided_net_x])
