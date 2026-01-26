@@ -156,25 +156,31 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         return nullptr;
     }
 
-    // Transpose kernel to OHWI format for MPS
-    MPSGraphTensor* transposedKernel = kernel;
+    // Transpose kernel directly to OIHW format for MPS
+    // MPS weightsLayout OIHW expects [outputChannels, inputChannels/groups, kH, kW]
+    // Fused transpose: combine intermediate OHWI step into single permutation
+    MPSGraphTensor* mpsKernel = kernel;
     if (kernelIsHWIO) {
-        // HWIO [H, W, I, O] -> OHWI [O, H, W, I]
-        // Permutation: [3, 0, 1, 2]
-        transposedKernel = [g transposeTensor:kernel permutation:@[@3, @0, @1, @2] name:nil];
+        // HWIO [H, W, I, O] -> OIHW [O, I, H, W] directly
+        // Fused permutation: [3, 0, 1, 2] then [0, 3, 1, 2] = [3, 2, 0, 1]
+        mpsKernel = [g transposeTensor:kernel permutation:@[@3, @2, @0, @1] name:nil];
     } else if (kernelIsOIHW) {
-        // OIHW [O, I, H, W] -> OHWI [O, H, W, I]
-        // Permutation: [0, 2, 3, 1]
-        transposedKernel = [g transposeTensor:kernel permutation:@[@0, @2, @3, @1] name:nil];
+        // OIHW [O, I, H, W] -> OIHW: no transpose needed (identity)
+        // Fused permutation: [0, 2, 3, 1] then [0, 3, 1, 2] = [0, 1, 2, 3]
+        mpsKernel = kernel;
     } else if (kernelIsIHWO) {
-        // IHWO [I, H, W, O] -> OHWI [O, H, W, I]
-        // Permutation: [3, 1, 2, 0]
-        transposedKernel = [g transposeTensor:kernel permutation:@[@3, @1, @2, @0] name:nil];
+        // IHWO [I, H, W, O] -> OIHW [O, I, H, W] directly
+        // Fused permutation: [3, 1, 2, 0] then [0, 3, 1, 2] = [3, 0, 1, 2]
+        mpsKernel = [g transposeTensor:kernel permutation:@[@3, @0, @1, @2] name:nil];
     } else if (kernelIsHWOI) {
-        // HWOI [H, W, O, I] -> OHWI [O, H, W, I]
-        // Permutation: [2, 0, 1, 3]
-        transposedKernel = [g transposeTensor:kernel permutation:@[@2, @0, @1, @3] name:nil];
-    } else if (!kernelIsOHWI) {
+        // HWOI [H, W, O, I] -> OIHW [O, I, H, W] directly
+        // Fused permutation: [2, 0, 1, 3] then [0, 3, 1, 2] = [2, 3, 0, 1]
+        mpsKernel = [g transposeTensor:kernel permutation:@[@2, @3, @0, @1] name:nil];
+    } else if (kernelIsOHWI) {
+        // OHWI [O, H, W, I] -> OIHW [O, I, H, W]
+        // Permutation: [0, 3, 1, 2]
+        mpsKernel = [g transposeTensor:kernel permutation:@[@0, @3, @1, @2] name:nil];
+    } else {
         NSLog(@"ERROR: Unsupported kernel layout. Got output=%lld, input=%lld, "
               @"spatial=[%lld,%lld]",
               kernelOutputFeatureDim, kernelInputFeatureDim, kernelSpatialDims[0],
@@ -192,23 +198,13 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                    paddingStyle:MPSGraphPaddingStyleExplicit
                      dataLayout:inputIsNHWC ? MPSGraphTensorNamedDataLayoutNHWC
                                             : MPSGraphTensorNamedDataLayoutNCHW
-                  weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];  // After transpose: OHWI
+                  weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
     // Set explicit padding
     desc.paddingLeft = (NSUInteger)padLeft;
     desc.paddingRight = (NSUInteger)padRight;
     desc.paddingTop = (NSUInteger)padTop;
     desc.paddingBottom = (NSUInteger)padBottom;
-
-    // MPS weightsLayout OIHW means [outputChannels, inputChannels/groups, kH, kW]
-    // But we transposed to OHWI format, so we need to transpose again for MPS
-    // Actually, let's reconsider: MPS with weightsLayout OIHW expects [O, I, H, W]
-    // We have OHWI after our transpose. Need to go OHWI -> OIHW
-    // OHWI [O, H, W, I] -> OIHW [O, I, H, W]
-    // Permutation: [0, 3, 1, 2]
-    MPSGraphTensor* mpsKernel = [g transposeTensor:transposedKernel
-                                       permutation:@[@0, @3, @1, @2]
-                                              name:nil];
 
     // Handle input layout - transpose to NHWC for MPS
     MPSGraphTensor* convInput = input;
