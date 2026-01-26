@@ -37,6 +37,7 @@ def load_cifar10() -> tuple[np.ndarray, np.ndarray]:
     with tarfile.open(tarball_path, "r:gz") as tar:
         for i in range(1, 6):
             member = tar.extractfile(f"cifar-10-batches-py/data_batch_{i}")
+            assert member is not None
             batch = pickle.load(member, encoding="bytes")
             images.append(batch[b"data"])
             labels.append(batch[b"labels"])
