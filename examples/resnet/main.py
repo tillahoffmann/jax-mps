@@ -85,8 +85,9 @@ def main():
         steps.set_description(f"loss = {loss:.3f}")
 
     print(f"Final training loss: {loss:.3f}")
+    times_per_step = times_per_step[len(times_per_step) // 2 :]
     print(
-        f"Time per step (after first step): {sum(times_per_step) / len(times_per_step):.3f}"
+        f"Time per step (second half): {sum(times_per_step) / len(times_per_step):.3f}"
     )
 
 

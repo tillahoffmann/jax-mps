@@ -4,29 +4,19 @@ A JAX backend for Apple Metal Performance Shaders (MPS), enabling GPU-accelerate
 
 ## Example
 
-jax-mps achieves a modest 2.5x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using a M4 MacBook Air.
+jax-mps achieves a modest 3x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using an M4 MacBook Air.
 
 ```bash
-$ JAX_PLATFORMS=cpu uv run examples/resnet/main.py --steps=10
-JAX devices: [CpuDevice(id=0)]
-Loading CIFAR-10...
-Loaded 50,000 training samples
-Preparing 195 batches on device...
-Starting training for 10 steps ...
-loss = 1.339: 100%|██████████████████████████████████████████████████| 10/10 [00:28<00:00,  2.84s/it]
-Final training loss: 1.339
-Time per step (after first step): 2.844
+$ JAX_PLATFORMS=cpu uv run examples/resnet/main.py --steps=30
+loss = 0.029: 100%|██████████| 30/30 [01:29<00:00,  2.99s/it]
+Final training loss: 0.029
+Time per step (second half): 3.041
 
-$ JAX_PLATFORMS=mps uv run examples/resnet/main.py --steps=10
-WARNING:2026-01-26 15:39:50,179:jax._src.xla_bridge:905: Platform 'mps' is experimental and not all JAX functionality may be correctly supported!
-JAX devices: [MpsDevice(id=0)]
-Loading CIFAR-10...
-Loaded 50,000 training samples
-Preparing 195 batches on device...
-Starting training for 10 steps ...
-loss = 1.339: 100%|██████████████████████████████████████████████████| 10/10 [00:11<00:00,  1.16s/it]
-Final training loss: 1.339
-Time per step (after first step): 1.156
+$ JAX_PLATFORMS=mps uv run examples/resnet/main.py --steps=30
+WARNING:2026-01-26 17:32:53,989:jax._src.xla_bridge:905: Platform 'mps' is experimental and not all JAX functionality may be correctly supported!
+loss = 0.028: 100%|██████████| 30/30 [00:30<00:00,  1.03s/it]
+Final training loss: 0.028
+Time per step (second half): 0.991
 ```
 
 ## Architecture
