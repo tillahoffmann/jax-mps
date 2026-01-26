@@ -40,7 +40,7 @@ cmake.build-type = "Release"
 build.verbose = true
 
 # Install the built library to the package
-wheel.packages = ["python/jax_plugins"]
+wheel.packages = ["src/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
 [tool.cibuildwheel]

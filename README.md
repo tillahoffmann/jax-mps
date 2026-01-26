@@ -128,29 +128,16 @@ Adding new operations: see `src/pjrt_plugin/ops/` for examples.
 
 ```
 jax-mps/
-├── CMakeLists.txt              # Build configuration
-├── src/pjrt_plugin/
-│   ├── pjrt_api.cc             # PJRT C API entry point
-│   ├── mps_client.h/mm         # Metal client management
-│   ├── mps_device.h/mm         # Device abstraction
-│   ├── mps_buffer.h/mm         # Buffer management
-│   ├── mps_executable.h/mm     # StableHLO compilation & execution
-│   ├── stablehlo_parser.h/mm   # MLIR-based StableHLO parsing
-│   └── ops/                    # Operation implementations
-│       ├── binary_ops.mm       # Arithmetic operations
-│       ├── unary_ops.mm        # Math functions
-│       ├── shape_ops.mm        # Reshape, transpose, etc.
-│       ├── convolution_ops.mm  # Convolution operations
-│       ├── reduction_ops.mm    # Reduction operations
-│       └── bitwise_ops.mm      # Bitwise operations
-├── python/
-│   └── jax_plugins/
-│       └── mps/
-│           └── __init__.py     # JAX plugin registration
+├── CMakeLists.txt
+├── src/
+│   ├── jax_plugins/mps/        # Python JAX plugin
+│   ├── pjrt_plugin/            # C++ PJRT implementation
+│   │   ├── pjrt_api.cc         # PJRT C API entry point
+│   │   ├── mps_client.h/mm     # Metal client management
+│   │   ├── mps_executable.h/mm # StableHLO compilation & execution
+│   │   └── ops/                # Operation implementations
+│   └── proto/                  # Protobuf definitions
 └── tests/
-    ├── test_ops.py             # Operation tests
-    ├── test_flax.py            # Flax integration tests
-    └── test_rng.py             # RNG tests
 ```
 
 ## How It Works

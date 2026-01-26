@@ -27,7 +27,7 @@ find_package(absl REQUIRED)
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
 
 # Generate C++ from proto files
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS proto/device_assignment.proto)
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS src/proto/device_assignment.proto)
 
 # Find MLIR and LLVM packages
 find_package(MLIR REQUIRED CONFIG)
