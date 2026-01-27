@@ -554,27 +554,31 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
         // Cast indices to int32 if needed
         squeezedIndices = EnsureInt32(g, squeezedIndices);
 
-        // Determine the scatter mode based on the update computation
-        // Check if it's an add operation (common for gradients)
-        MPSGraphScatterMode mode = MPSGraphScatterModeAdd;
+        // Determine the scatter mode based on the update computation.
+        // Default to Set (plain assignment); arithmetic ops override below.
+        MPSGraphScatterMode mode = MPSGraphScatterModeSet;
 
         auto& updateRegion = scatterOp.getUpdateComputation();
         if (!updateRegion.empty()) {
             auto& block = updateRegion.front();
-            // Check if the block has a single operation that's an add
-            // followed by a return
             for (auto& innerOp : block) {
                 if (mlir::isa<mlir::stablehlo::AddOp>(innerOp)) {
                     mode = MPSGraphScatterModeAdd;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::SubtractOp>(innerOp)) {
+                    mode = MPSGraphScatterModeSub;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::MulOp>(innerOp)) {
+                    mode = MPSGraphScatterModeMul;
+                    break;
+                } else if (mlir::isa<mlir::stablehlo::DivOp>(innerOp)) {
+                    mode = MPSGraphScatterModeDiv;
                     break;
                 } else if (mlir::isa<mlir::stablehlo::MaxOp>(innerOp)) {
                     mode = MPSGraphScatterModeMax;
                     break;
                 } else if (mlir::isa<mlir::stablehlo::MinOp>(innerOp)) {
                     mode = MPSGraphScatterModeMin;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::MulOp>(innerOp)) {
-                    mode = MPSGraphScatterModeMul;
                     break;
                 }
             }

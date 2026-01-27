@@ -16,6 +16,7 @@ wheels/
 
 # Third-party (cloned separately, not tracked)
 third_party/stablehlo/
+third_party/xla/
 
 # IDE
 .vscode/

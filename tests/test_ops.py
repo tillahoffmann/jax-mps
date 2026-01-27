@@ -407,14 +407,11 @@ def _make_shape_op_configs():
             numpy.random.normal(size=(5, 3)),
             numpy.array([0, 2, 4]),
         ),
-        pytest.param(
-            OperationTestConfig(
-                lambda x, idx, val: x.at[idx].set(val),
-                numpy.random.normal(size=(5, 3)),
-                numpy.array([0, 2]),
-                numpy.random.normal(size=(2, 3)),
-            ),
-            marks=pytest.mark.xfail(reason="scatter uses Add mode instead of Set"),
+        OperationTestConfig(
+            lambda x, idx, val: x.at[idx].set(val),
+            numpy.random.normal(size=(5, 3)),
+            numpy.array([0, 2]),
+            numpy.random.normal(size=(2, 3)),
         ),
         OperationTestConfig(
             lambda x, update: lax.dynamic_update_slice(x, update, (1, 0)),
@@ -426,7 +423,42 @@ def _make_shape_op_configs():
             numpy.zeros((10, 4), dtype=numpy.float32),
             numpy.array([0, 2, 5], dtype=numpy.int32),
             numpy.ones((3, 4), dtype=numpy.float32),
-            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].subtract(updates),
+            numpy.ones((10, 4), dtype=numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.full((3, 4), 0.1, dtype=numpy.float32),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].mul(updates, unique_indices=True),
+            numpy.ones((10, 4), dtype=numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.full((3, 4), 2.0, dtype=numpy.float32),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].divide(updates, unique_indices=True),
+            numpy.ones((10, 4), dtype=numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.full((3, 4), 2.0, dtype=numpy.float32),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].power(updates, unique_indices=True),
+            numpy.full((10, 4), 2.0, dtype=numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.full((3, 4), 3.0, dtype=numpy.float32),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].min(updates),
+            numpy.random.normal(size=(10, 4)).astype(numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.random.normal(size=(3, 4)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].max(updates),
+            numpy.random.normal(size=(10, 4)).astype(numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.random.normal(size=(3, 4)).astype(numpy.float32),
         ),
         OperationTestConfig(
             lambda x, kernel: lax.conv_general_dilated(

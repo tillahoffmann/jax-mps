@@ -18,8 +18,8 @@ find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
 find_library(MPSGRAPH_FRAMEWORK MetalPerformanceShadersGraph REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 
-# Use vendored XLA PJRT headers
-set(XLA_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party)
+# XLA PJRT headers (cloned into third_party/xla)
+set(XLA_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/xla)
 
 # Find Protobuf and Abseil (static builds from setup_deps.sh for wheel distribution)
 # Prefer static libraries to avoid runtime dependencies
