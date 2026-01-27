@@ -38,14 +38,9 @@ jobs:
           ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -5
           echo "Checking StableHLO installation ..."
           ls -la ${{ github.workspace }}/.jax-mps-deps/include/stablehlo/dialect/ | head -5
-
-      - name: Upload deps artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlir-stablehlo-deps
-          path: ${{ github.workspace }}/.jax-mps-deps
-          retention-days: 7
-          include-hidden-files: true
+          echo "Checking protobuf installation ..."
+          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/libprotobuf.a
+          ${{ github.workspace }}/.jax-mps-deps/bin/protoc --version
 
   build-and-test:
     name: Build and test (Python ${{ matrix.python }})
@@ -63,18 +58,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Download deps artifact
-        uses: actions/download-artifact@v4
+      - name: Restore deps from cache
+        uses: actions/cache/restore@v4
         with:
-          name: mlir-stablehlo-deps
           path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          fail-on-cache-miss: true
 
-      - name: Verify deps downloaded
+      - name: Verify deps
         run: |
-          echo "MLIR cmake config:"
-          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -3
-
-      # protobuf and abseil are built from source via setup_deps.sh for static linking
+          echo "Checking protoc ..."
+          ${{ github.workspace }}/.jax-mps-deps/bin/protoc --version
 
       - name: Install project and dev dependencies
         run: uv sync --all-groups
