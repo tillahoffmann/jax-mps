@@ -14,6 +14,7 @@ REGISTER_MLIR_UNARY_OP("stablehlo.abs", absolute, abs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.rsqrt", reciprocalSquareRoot, rsqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
+REGISTER_MLIR_UNARY_OP("chlo.erf", erf, chlo_erf);
 REGISTER_MLIR_UNARY_OP("stablehlo.floor", floor, floor);
 REGISTER_MLIR_UNARY_OP("stablehlo.sign", sign, sign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);

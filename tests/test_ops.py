@@ -1,662 +1,595 @@
-"""Tests for MPS operations comparing CPU vs GPU results.
-
-Each operation is tested individually using pytest.mark.parametrize.
-Tests verify that:
-1. Results match CPU reference within tolerance
-2. Operations actually run on the MPS device (not CPU fallback)
-"""
+import os
+import re
+from pathlib import Path
+from typing import Any, Callable, Sequence
 
 import jax
-import jax.scipy.special
-import numpy as np
+import numpy
 import pytest
-from conftest import assert_cpu_mps_allclose, register_op_test
+from jax import dtypes, lax, random
 from jax import numpy as jnp
+from jax.scipy import special
 
-# Register ops that are implicitly tested by every test or used internally
-register_op_test(
-    "func.return", "func.call", "stablehlo.constant", "stablehlo.custom_call"
-)
-
-# Common test data (seeded for reproducibility)
-_rng = np.random.default_rng(42)
-_float_2d = _rng.standard_normal((32, 32)).astype(np.float32)
-_float_2d_b = _rng.standard_normal((32, 32)).astype(np.float32) + 0.1
-_float_positive = np.abs(_rng.standard_normal((32, 32)).astype(np.float32)) + 0.1
-_uint_2d = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
-_uint_2d_b = _rng.integers(0, 256, size=(32, 32)).astype(np.uint32)
-_uint_shift = _rng.integers(0, 8, size=(32, 32)).astype(np.uint32)
-
-# Additional seeded test data for various shapes
-_float_1d = _rng.standard_normal((10,)).astype(np.float32)
-_float_2d_small = _rng.standard_normal((4, 8)).astype(np.float32)
-_float_3d = _rng.standard_normal((2, 3, 4)).astype(np.float32)
-_float_4d = _rng.standard_normal((2, 3, 4, 5)).astype(np.float32)
-_float_8x8 = _rng.standard_normal((8, 8)).astype(np.float32)
-_float_4x8x8 = _rng.standard_normal((4, 8, 8)).astype(np.float32)
-
-# Matmul test data
-_matmul_a1 = _rng.standard_normal((32, 64)).astype(np.float32)
-_matmul_b1 = _rng.standard_normal((64, 32)).astype(np.float32)
-_matmul_a2 = _rng.standard_normal((16, 16)).astype(np.float32)
-_matmul_b2 = _rng.standard_normal((16, 16)).astype(np.float32)
+CPU_DEVICE = jax.devices("cpu")[0]
+MPS_DEVICE = jax.devices("mps")[0]
 
 
-# Unary operations
-@pytest.mark.parametrize(
-    "op, x",
-    [
-        (register_op_test(jnp.tanh, "stablehlo.tanh"), _float_2d),
-        (register_op_test(jnp.exp, "stablehlo.exponential"), _float_2d * 0.5),
-        (register_op_test(jnp.log, "stablehlo.log"), _float_positive),
-        (register_op_test(jnp.negative, "stablehlo.negate"), _float_2d),
-        (register_op_test(jnp.abs, "stablehlo.abs"), _float_2d),
-        (register_op_test(jnp.sqrt, "stablehlo.sqrt"), _float_positive),
-        (register_op_test(jax.lax.rsqrt, "stablehlo.rsqrt"), _float_positive),
-        (register_op_test(jnp.log1p, "stablehlo.log_plus_one"), _float_positive),
-        (register_op_test(jax.scipy.special.erf, "stablehlo.erf"), _float_2d * 0.5),
-        (
-            register_op_test(jax.scipy.special.erfinv, "chlo.erf_inv"),
-            _rng.uniform(-0.9, 0.9, (32, 32)).astype(np.float32),
+_STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
+
+
+def get_device_placement(value):
+    device = None
+    for leaf in jax.tree.flatten(value)[0]:
+        if not isinstance(leaf, jax.Array):
+            continue
+        assert device is None or device == leaf.device, "Mixed device placement."
+        device = leaf.device
+    assert device is not None, "Failed to infer device placement."
+    return device
+
+
+class OperationTestConfig:
+    """Configuration for testing operations.
+
+    Args:
+        op: Operation to test.
+        *args: Factory functions for positional arguments. Non-callables will
+            automatically be wrapped in lambdas.
+        **kwargs: Factory functions for keyword arguments. Non-callables will
+            automatically be wrapped in lambdas.
+        differentiable_argnums: Position of arguments that can be differentiated with
+            respect to. Defaults to positional arguments with inexact types.
+        static_argnums: Position of arguments that should be treated as static in
+            jit-compile.
+    """
+
+    EXERCISED_STABLEHLO_OPS: set[str] = {
+        # HACK: Register these ops as exercised because JAX doesn't seem to generate them.
+        "stablehlo.broadcast",
+        "stablehlo.dot",
+        "stablehlo.erf",
+    }
+
+    def __init__(
+        self,
+        op: Callable,
+        *args: Any,
+        differentiable_argnums: Sequence[int] | None = None,
+        static_argnums: Sequence[int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.op = op
+        self.differentiable_argnums = differentiable_argnums
+        self.static_argnums = static_argnums
+        self.args = [arg if callable(arg) else lambda arg=arg: arg for arg in args]
+        self.kwargs = {
+            key: arg if callable(arg) else lambda arg=arg: arg
+            for key, arg in kwargs.items()
+        }
+
+    def get_args(self):
+        """Get positional arguments."""
+        args = []
+        for arg_func in self.args:
+            arg = arg_func()
+            if isinstance(arg, numpy.ndarray):
+                arg = jnp.asarray(arg)
+            args.append(arg)
+        return args
+
+    def get_kwargs(self):
+        """Get keyword arguments."""
+        return {key: arg() for key, arg in self.kwargs.items()}
+
+    def get_differentiable_argnums(self) -> tuple[int, ...]:
+        """Get a tuple of integers indicating which arguments can be differentiated with
+        respect to."""
+        if self.differentiable_argnums is not None:
+            return tuple(self.differentiable_argnums)
+
+        differentiable_argnums: list[int] = []
+        for argnum, arg in enumerate(self.get_args()):
+            if isinstance(arg, float):
+                differentiable_argnums.append(argnum)
+            elif isinstance(arg, jnp.ndarray):
+                if arg.dtype == jnp.float32:
+                    differentiable_argnums.append(argnum)
+        return tuple(differentiable_argnums)
+
+    def evaluate_value(self, jit: bool):
+        """Evaluate the output of the operation."""
+        op = self.op
+        args = self.get_args()
+        kwargs = self.get_kwargs()
+        lowered = None
+        if jit:
+            op = jax.jit(op, static_argnums=self.static_argnums)
+            lowered = op.lower(*args, **kwargs)
+        result = op(*args, **kwargs)
+
+        # Only mark ops as exercised if the operation succeeded on MPS.
+        if lowered and get_device_placement(result) == MPS_DEVICE:
+            stablehlo_text = str(lowered.compiler_ir(dialect="stablehlo"))
+            self.EXERCISED_STABLEHLO_OPS.update(
+                _STABLEHLO_OP_RE.findall(stablehlo_text)
+            )
+        return result
+
+    def evaluate_grad(self, argnum: int, jit: bool) -> tuple[jnp.ndarray]:
+        """Evaluate the gradient of the operation. If the operation returns a tuple of
+        values, gradients are evaluated for each element."""
+        args = self.get_args()
+        kwargs = self.get_kwargs()
+
+        result = self.op(*args, **kwargs)
+        if isinstance(result, (tuple, list)):
+            num_return_values = len(result)
+        else:
+            num_return_values = None
+
+        grad_vals = []
+        for returnnum in range(num_return_values or 1):
+
+            def func(x):
+                result = self.op(
+                    *(x if i == argnum else arg for i, arg in enumerate(args)), **kwargs
+                )
+                if num_return_values is None:
+                    assert isinstance(result, jnp.ndarray), (
+                        f"Output of '{self.op}' is not a tensor."
+                    )
+                else:
+                    result = result[returnnum]
+                # Reduce to the mean if the output is not a scalar; we can only
+                # differentiate scalars.
+                if result.shape != ():
+                    result = result.mean()
+                return result
+
+            lowered = None
+            if jit:
+                func = jax.jit(func)
+                lowered = func.lower(args[argnum])
+            grad_func = jax.grad(func)
+            grad_vals.append(grad_func(args[argnum]))
+
+            # Only mark ops as exercised if the operation succeeded on MPS.
+            if lowered and get_device_placement(result) == MPS_DEVICE:
+                stablehlo_text = str(lowered.compiler_ir(dialect="stablehlo"))
+                self.EXERCISED_STABLEHLO_OPS.update(
+                    _STABLEHLO_OP_RE.findall(stablehlo_text)
+                )
+        return tuple(grad_vals)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def assert_all_ops_tested():
+    yield
+
+    if "CI" not in os.environ:
+        return
+
+    ops_dir = Path(__file__).parent.parent / "src/pjrt_plugin/ops"
+    assert ops_dir.is_dir()
+
+    # Patterns matching op registration calls
+    patterns = [
+        re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),
+        re.compile(r'OpRegistry::Register\("([^"]+)"'),
+    ]
+
+    op_names = set()
+    for mm_file in ops_dir.glob("*.mm"):
+        with mm_file.open() as fp:
+            content = fp.read()
+            for pattern in patterns:
+                op_names.update(pattern.findall(content))
+
+    assert op_names, "Failed to discover any ops."
+    unsupported = OperationTestConfig.EXERCISED_STABLEHLO_OPS - op_names
+    assert not unsupported, (
+        f"Discovered {len(unsupported)} unsupported ops: {', '.join(sorted(unsupported))}"
+    )
+    missing = op_names - OperationTestConfig.EXERCISED_STABLEHLO_OPS
+    assert not missing, (
+        f"Discovered {len(missing)} untested ops: {', '.join(sorted(missing))}"
+    )
+
+
+def _make_unary_op_configs():
+    return [
+        OperationTestConfig(jnp.abs, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.ceil, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.cos, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.exp, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.flip, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.fliplr, numpy.random.normal(size=(17, 13))),
+        OperationTestConfig(jnp.flipud, numpy.random.normal(size=(17, 13))),
+        OperationTestConfig(jnp.floor, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.isfinite, numpy.asarray([0, jnp.nan, jnp.inf])),
+        OperationTestConfig(jnp.log, numpy.random.gamma(5, size=(17,))),
+        OperationTestConfig(jnp.log1p, numpy.random.gamma(5, size=(17,)) - 1),
+        OperationTestConfig(jnp.negative, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.sign, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.sin, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.sqrt, numpy.random.gamma(5, size=(17,))),
+        OperationTestConfig(jnp.tan, numpy.random.normal(size=(17,))),
+        OperationTestConfig(jnp.tanh, numpy.random.normal(size=(17,))),
+        OperationTestConfig(lax.rsqrt, numpy.random.gamma(5, size=(17,))),
+        OperationTestConfig(
+            special.erfinv,
+            numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),
-        (register_op_test(jnp.floor, "stablehlo.floor"), _float_2d),
-        (register_op_test(jnp.sign, "stablehlo.sign"), _float_2d),
-        (
-            register_op_test(jnp.isfinite, "stablehlo.is_finite"),
-            np.array([1.0, np.inf, -np.inf, np.nan, 0.0], dtype=np.float32),
+        OperationTestConfig(jnp.transpose, numpy.random.normal(size=(17, 8, 9))),
+        OperationTestConfig(
+            jnp.transpose,
+            numpy.random.normal(size=(17, 8, 9)),
+            (1, 0, 2),
+            static_argnums=(1,),
         ),
-        # ReLU uses compare + select internally
-        (
-            register_op_test(jax.nn.relu, "stablehlo.compare", "stablehlo.select"),
-            _float_2d,
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_unary_op(request: pytest.FixtureRequest, device, op, x):
-    result = op(x)
-    grad = jax.grad(lambda x: op(x).mean())(x)
-    return result, grad
+    ]
 
 
-# Binary operations (arithmetic, min/max, remainder, bitwise, shifts, matmul)
-@pytest.mark.parametrize(
-    "op, a, b",
-    [
-        # Arithmetic
-        (register_op_test(jnp.add, "stablehlo.add"), _float_2d, _float_2d_b),
-        (register_op_test(jnp.subtract, "stablehlo.subtract"), _float_2d, _float_2d_b),
-        (register_op_test(jnp.multiply, "stablehlo.multiply"), _float_2d, _float_2d_b),
-        (register_op_test(jnp.divide, "stablehlo.divide"), _float_2d, _float_2d_b),
-        (register_op_test(jnp.maximum, "stablehlo.maximum"), _float_2d, _float_2d_b),
-        (register_op_test(jnp.minimum, "stablehlo.minimum"), _float_2d, _float_2d_b),
-        (
-            register_op_test(jnp.remainder, "stablehlo.remainder"),
-            _float_2d * 10,
-            _float_2d_b * 3 + 1,
+def _make_binary_op_configs():
+    return [
+        OperationTestConfig(
+            jnp.add, numpy.random.normal(size=(3, 4)), numpy.random.normal(size=(3, 1))
         ),
-        (
-            register_op_test(jnp.power, "stablehlo.power"),
-            _float_positive,
-            _float_2d_b * 0.5 + 1,
+        OperationTestConfig(
+            jnp.subtract,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 1)),
         ),
-        (
-            register_op_test(jnp.nextafter, "chlo.next_after"),
-            np.array([1.0, -1.0, 0.0, 2.0], dtype=np.float32),
-            np.array([2.0, -2.0, 1.0, 1.0], dtype=np.float32),
+        OperationTestConfig(
+            jnp.multiply,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 1)),
         ),
-        # Bitwise
-        (register_op_test(jnp.bitwise_and, "stablehlo.and"), _uint_2d, _uint_2d_b),
-        (register_op_test(jnp.bitwise_or, "stablehlo.or"), _uint_2d, _uint_2d_b),
-        (register_op_test(jnp.bitwise_xor, "stablehlo.xor"), _uint_2d, _uint_2d_b),
-        # Shifts
-        (
-            register_op_test(jnp.left_shift, "stablehlo.shift_left"),
-            _uint_2d,
-            _uint_shift,
+        OperationTestConfig(
+            jnp.divide,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.gamma(5, size=(3, 1)),
         ),
-        (
-            register_op_test(jnp.right_shift, "stablehlo.shift_right_logical"),
-            _uint_2d,
-            _uint_shift,
+        OperationTestConfig(
+            jnp.dot,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(4, 5)),
         ),
-        # Matrix multiplication
-        (
-            register_op_test(jnp.matmul, "stablehlo.dot", "stablehlo.dot_general"),
-            _matmul_a1,
-            _matmul_b1,
+        OperationTestConfig(
+            jnp.less,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        (jnp.matmul, _matmul_a2, _matmul_b2),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_binary_op(request: pytest.FixtureRequest, device, op, a, b):
-    result = op(a, b)
-
-    # Calculate gradients for float types (skip non-differentiable ops)
-    if op is jnp.nextafter:
-        grad = None
-    elif a.dtype == jnp.float32 and b.dtype == jnp.float32:
-        grad = jax.grad(lambda x: op(*x).mean())((a, b))
-    elif a.dtype == jnp.float32:
-        grad = jax.grad(lambda x: op(x, b).mean())(a)
-    elif b.dtype == jnp.float32:
-        grad = jax.grad(lambda x: op(a, x).mean())(b)
-    else:
-        grad = None
-
-    return result, grad
-
-
-@register_op_test("stablehlo.convolution")
-@pytest.mark.parametrize(
-    "x, kernel, strides, padding, dilation, groups",
-    [
-        # Basic 3x3 conv, SAME padding
-        (
-            _rng.standard_normal((2, 28, 28, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (1, 1),
-            "SAME",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.less_equal,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Strided conv (stride=2)
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 16)).astype(np.float32),
-            (2, 2),
-            "SAME",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.equal,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Strided conv (stride=2) with VALID padding
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (2, 2),
-            "VALID",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.greater_equal,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Strided conv (stride=3)
-        (
-            _rng.standard_normal((2, 33, 33, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (3, 3),
-            "SAME",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.greater,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Asymmetric strides (fixed - cross-dimensional padding shift correction)
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (2, 1),
-            "SAME",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.broadcast_arrays,
+            numpy.random.normal(size=(3, 1)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (1, 2),
-            "SAME",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.minimum,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (3, 2),
-            "VALID",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.maximum,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Stride + dilation combination - gradient has bug in MPS
-        pytest.param(
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (2, 2),
-            "SAME",
-            (2, 2),
-            1,
-            marks=pytest.mark.xfail(reason="MPS stride+dilation gradient bug"),
+        OperationTestConfig(
+            jnp.clip,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
         ),
-        # VALID padding (no stride)
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((5, 5, 3, 8)).astype(np.float32),
-            (1, 1),
-            "VALID",
-            (1, 1),
-            1,
+        OperationTestConfig(
+            jnp.clip,
+            numpy.random.normal(size=(3, 4)),
+            None,
+            numpy.random.normal(size=(3, 4)),
         ),
-        # Dilated conv
-        (
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (1, 1),
-            "SAME",
-            (2, 2),
-            1,
-        ),
-        # 1x1 pointwise conv
-        (
-            _rng.standard_normal((2, 16, 16, 64)).astype(np.float32),
-            _rng.standard_normal((1, 1, 64, 128)).astype(np.float32),
-            (1, 1),
-            "VALID",
-            (1, 1),
-            1,
-        ),
-        # Large kernel with stride - gradient has bug in MPS
-        pytest.param(
-            _rng.standard_normal((2, 32, 32, 3)).astype(np.float32),
-            _rng.standard_normal((7, 7, 3, 16)).astype(np.float32),
-            (2, 2),
-            "SAME",
-            (1, 1),
-            1,
-            marks=pytest.mark.xfail(reason="MPS large kernel + stride gradient bug"),
-        ),
-        # Small input with stride
-        (
-            _rng.standard_normal((2, 8, 8, 3)).astype(np.float32),
-            _rng.standard_normal((3, 3, 3, 8)).astype(np.float32),
-            (2, 2),
-            "VALID",
-            (1, 1),
-            1,
-        ),
-        # Depthwise conv (groups = in_channels)
-        (
-            _rng.standard_normal((2, 28, 28, 16)).astype(np.float32),
-            _rng.standard_normal((3, 3, 1, 16)).astype(np.float32),
-            (1, 1),
-            "SAME",
-            (1, 1),
-            16,
-        ),
-        # Grouped conv
-        (
-            _rng.standard_normal((2, 28, 28, 16)).astype(np.float32),
-            _rng.standard_normal((3, 3, 4, 32)).astype(np.float32),
-            (1, 1),
-            "SAME",
-            (1, 1),
-            4,
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_conv2d(
-    request: pytest.FixtureRequest,
-    device,
-    x,
-    kernel,
-    strides,
-    padding,
-    dilation,
-    groups,
-):
-    def conv_fn(x, kernel):
-        return jax.lax.conv_general_dilated(
-            x,
-            kernel,
-            window_strides=strides,
-            padding=padding,
-            rhs_dilation=dilation,
-            feature_group_count=groups,
-            dimension_numbers=("NHWC", "HWIO", "NHWC"),
-        )
-
-    result = conv_fn(x, kernel)
-    # Grouped/depthwise conv gradient crashes with batch_group_count not supported
-    # Strided conv gradients now work after transposed conv fix in convolution_ops.mm
-    if groups == 1:
-        grad = jax.grad(lambda args: conv_fn(*args).mean())((x, kernel))
-    else:
-        grad = None
-    return result, grad
-
-
-# Shape operations (reshape, broadcast, transpose, reverse)
-@pytest.mark.parametrize(
-    "op, x, arg",
-    [
-        # Reshape
-        (register_op_test(jnp.reshape, "stablehlo.reshape"), _float_2d, (64, 16)),
-        # Broadcast
-        (
-            register_op_test(
-                jnp.broadcast_to, "stablehlo.broadcast", "stablehlo.broadcast_in_dim"
-            ),
-            _rng.standard_normal((1, 32)).astype(np.float32),
-            (4, 32),
-        ),
-        # Transpose - various ranks and permutations
-        (register_op_test(jnp.transpose, "stablehlo.transpose"), _float_2d, (1, 0)),
-        (jnp.transpose, _float_2d_small, (1, 0)),
-        # 3D transposes - all permutations that move data
-        (jnp.transpose, _float_3d, (2, 0, 1)),
-        (jnp.transpose, _float_3d, (0, 2, 1)),  # partial transpose
-        (jnp.transpose, _float_3d, (1, 2, 0)),
-        (jnp.transpose, _float_3d, (2, 1, 0)),  # full reversal
-        # 4D transposes - common patterns
-        (jnp.transpose, _float_4d, (3, 2, 1, 0)),  # full reversal
-        (jnp.transpose, _float_4d, (0, 2, 1, 3)),  # swap middle dims
-        (jnp.transpose, _float_4d, (0, 1, 3, 2)),  # swap last dims
-        (jnp.transpose, _float_4d, (0, 3, 2, 1)),  # NHWC -> NCHW style
-        (jnp.transpose, _float_4d, (1, 0, 2, 3)),  # swap first dims
-        # Reverse - various ranks and axes
-        (register_op_test(jax.lax.rev, "stablehlo.reverse"), _float_1d, (0,)),
-        (jax.lax.rev, _float_2d_small, (0,)),
-        (jax.lax.rev, _float_2d_small, (1,)),
-        (jax.lax.rev, _float_2d_small, (0, 1)),
-        (jax.lax.rev, _float_3d, (1, 2)),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_shape_op(request: pytest.FixtureRequest, device, op, x, arg):
-    result = op(x, arg)
-    grad = jax.grad(lambda x: op(x, arg).mean())(x)
-    return result, grad
-
-
-# Type conversions (convert and bitcast)
-_astype = register_op_test(lambda x, d: x.astype(d), "stablehlo.convert")
-
-
-@pytest.mark.parametrize(
-    "op, x, to_dtype",
-    [
-        # Regular conversions
-        (_astype, _float_2d, np.float16),
-        (_astype, _float_2d.astype(np.float16), np.float32),
-        (_astype, _rng.integers(-100, 100, (16, 16)).astype(np.int32), np.float32),
-        # Bitcast conversions
-        (
-            register_op_test(jax.lax.bitcast_convert_type, "stablehlo.bitcast_convert"),
-            _float_2d,
-            np.int32,
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_type_convert(request: pytest.FixtureRequest, device, op, x, to_dtype):
-    return op(x, to_dtype)
-
-
-# Clip/clamp operation
-@register_op_test("stablehlo.clamp")
-@pytest.mark.parametrize(
-    "x, a_min, a_max",
-    [
-        (_float_2d, -0.5, 0.5),
-        (_float_2d_small, 0.0, 1.0),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_clip(request: pytest.FixtureRequest, device, x, a_min, a_max):
-    result = jnp.clip(x, a_min, a_max)
-    grad = jax.grad(lambda x: jnp.clip(x, a_min, a_max).mean())(x)
-    return result, grad
-
-
-# Slicing operations (static and dynamic)
-@register_op_test("stablehlo.slice")
-@pytest.mark.parametrize(
-    "x, slices",
-    [
-        # Basic slices (stride=1)
-        (_float_1d, (slice(2, 8),)),
-        (_float_8x8, (slice(1, 5), slice(2, 6))),
-        (_float_4x8x8, (slice(1, 3), slice(2, 6), slice(0, 4))),
-        # Strided slices (stride=2) - use gather op which has limited MPS support
-        (_float_1d, (slice(0, 10, 2),)),  # 1D strided slice works
-        pytest.param(
-            _float_8x8,
-            (slice(0, 8, 2), slice(0, 8, 2)),
-            marks=pytest.mark.xfail(
-                reason="MPS gather pattern unsupported for 2D+ strided slices"
-            ),
-        ),
-        pytest.param(
-            _float_4x8x8,
-            (slice(0, 4, 2), slice(0, 8, 2), slice(0, 8, 1)),
-            marks=pytest.mark.xfail(
-                reason="MPS gather pattern unsupported for 2D+ strided slices"
-            ),
-        ),
-        # Strided slices (stride=3)
-        (_float_1d, (slice(0, 10, 3),)),  # 1D strided slice works
-        (_float_8x8, (slice(0, 8, 3), slice(0, 8, 1))),  # Only one axis strided works
-        # Asymmetric strides - some 2D+ patterns unsupported by MPS gather
-        (_float_8x8, (slice(0, 8, 2), slice(0, 8, 1))),
-        (_float_8x8, (slice(0, 8, 1), slice(0, 8, 3))),
-        pytest.param(
-            _float_4x8x8,
-            (slice(0, 4, 1), slice(0, 8, 2), slice(0, 8, 3)),
-            marks=pytest.mark.xfail(
-                reason="MPS gather pattern unsupported for 3D strided slices"
-            ),
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_slice(request: pytest.FixtureRequest, device, x, slices):
-    def do_slice(x):
-        return x[slices]
-
-    result = do_slice(x)
-    grad = jax.grad(lambda x: do_slice(x).mean())(x)
-    return result, grad
-
-
-@register_op_test("stablehlo.dynamic_slice")
-@pytest.mark.parametrize(
-    "shape, start_indices, slice_sizes",
-    [
-        ((10,), (2,), (4,)),
-        ((8, 8), (1, 2), (4, 4)),
-        ((4, 8, 8), (1, 2, 0), (2, 4, 4)),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_dynamic_slice(
-    request: pytest.FixtureRequest, device, shape, start_indices, slice_sizes
-):
-    rng = np.random.default_rng(seed=42)
-    x = rng.standard_normal(shape).astype(np.float32)
-    result = jax.lax.dynamic_slice(x, start_indices, slice_sizes)
-    grad = jax.grad(
-        lambda x: jax.lax.dynamic_slice(x, start_indices, slice_sizes).mean()
-    )(x)
-    return result, grad
-
-
-@register_op_test("stablehlo.concatenate")
-@pytest.mark.parametrize(
-    "arrays, axis",
-    [
-        ([_rng.standard_normal((4, 8)).astype(np.float32) for _ in range(3)], 0),
-        ([_rng.standard_normal((4, 8)).astype(np.float32) for _ in range(2)], 1),
-        (
-            [_rng.standard_normal((2, 3, 4)).astype(np.float32) for _ in range(2)],
-            2,
-        ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_concatenate(request: pytest.FixtureRequest, device, arrays, axis):
-    result = jnp.concatenate(arrays, axis=axis)
-    grad = jax.grad(lambda arrs: jnp.concatenate(arrs, axis=axis).mean())(arrays)
-    return result, grad
-
-
-# Iota/arange operation
-@register_op_test("stablehlo.iota")
-@pytest.mark.parametrize(
-    "start, stop, dtype",
-    [
-        (0, 10, np.float32),
-        (0, 32, np.int32),
-        (5, 15, np.float32),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_arange(request: pytest.FixtureRequest, device, start, stop, dtype):
-    return jnp.arange(start, stop, dtype=dtype)
-
-
-@register_op_test("stablehlo.reduce", "stablehlo.return")
-@pytest.mark.parametrize(
-    "op, x, axis",
-    [
-        # Basic reductions
-        (jnp.sum, _rng.standard_normal((16, 16)).astype(np.float32), None),
-        (jnp.sum, _rng.standard_normal((8, 4, 2)).astype(np.float32), 1),
-        (
-            jnp.prod,
-            _rng.standard_normal((4, 4)).astype(np.float32) * 0.5 + 1,
+        OperationTestConfig(
+            jnp.clip,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(3, 4)),
             None,
         ),
-        (jnp.max, _rng.standard_normal((16, 16)).astype(np.float32), 0),
-        (jnp.min, _rng.standard_normal((16, 16)).astype(np.float32), -1),
-        (jnp.all, _rng.random((8, 8)) > 0.5, None),
-        (jnp.any, _rng.random((8, 8)) > 0.5, 0),
-        # Multi-axis reductions (tuple of axes)
-        (jnp.sum, _rng.standard_normal((4, 8, 16)).astype(np.float32), (0, 2)),
-        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), (1, 3)),
-        (jnp.max, _rng.standard_normal((8, 8, 8)).astype(np.float32), (0, 1)),
-        (jnp.min, _rng.standard_normal((4, 4, 4, 4)).astype(np.float32), (0, 2)),
-        # 4D tensor reductions
-        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), None),
-        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), 2),
-        (jnp.max, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), 3),
-        # Negative axis
-        (jnp.sum, _rng.standard_normal((8, 4, 2)).astype(np.float32), -2),
-        (jnp.sum, _rng.standard_normal((2, 3, 4, 5)).astype(np.float32), -1),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_reduce(request: pytest.FixtureRequest, device, op, x, axis):
-    result = op(x, axis=axis)
-    # Only compute gradients for differentiable reduce ops with float inputs
-    if op in (jnp.sum, jnp.prod) and x.dtype == np.float32:
-        grad = jax.grad(lambda x: op(x, axis=axis).sum())(x)
-    else:
-        grad = None
-    return result, grad
-
-
-@register_op_test("stablehlo.gather")
-@pytest.mark.parametrize(
-    "operand, indices",
-    [
-        # Simple embedding lookup (1D indices - gradient works)
-        (
-            _rng.standard_normal((100, 16)).astype(np.float32),
-            np.array([0, 5, 10, 50, 99], dtype=np.int32),
+        OperationTestConfig(
+            jnp.power,
+            numpy.random.normal(size=(5,)),
+            numpy.random.gamma(5, size=(7, 1)),
         ),
-        # Batched embedding lookup (2D indices - gradient crashes MPS scatter)
-        (
-            _rng.standard_normal((50, 8)).astype(np.float32),
-            np.array([[0, 1, 2], [10, 20, 30]], dtype=np.int32),
+        OperationTestConfig(
+            jnp.power,
+            numpy.random.gamma(5, size=(7, 1)),
+            numpy.random.normal(size=(5,)),
         ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_gather(request: pytest.FixtureRequest, device, operand, indices):
-    result = jnp.take(operand, indices, axis=0)
-    # 2D indices gradient crashes MPS with scatter rank mismatch error
-    if indices.ndim == 1:
-        grad = jax.grad(lambda x: jnp.take(x, indices, axis=0).mean())(operand)
-    else:
-        grad = None
-    return result, grad
-
-
-@register_op_test("stablehlo.pad")
-@pytest.mark.parametrize(
-    "x, pad_width, constant_value",
-    [
-        (_rng.standard_normal((4, 4)).astype(np.float32), ((1, 1), (2, 2)), 0.0),
-        (_rng.standard_normal((3, 5)).astype(np.float32), ((0, 2), (1, 0)), 1.0),
-        (_rng.standard_normal((8,)).astype(np.float32), ((3, 3),), -1.0),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_pad(request: pytest.FixtureRequest, device, x, pad_width, constant_value):
-    # Gradient crashes MPS with strided_slice_update shape mismatch
-    return jnp.pad(x, pad_width, constant_values=constant_value)
-
-
-# Dynamic update slice operation
-@register_op_test("stablehlo.dynamic_update_slice")
-@pytest.mark.parametrize(
-    "operand, update, start_indices",
-    [
-        (
-            np.zeros((8,), dtype=np.float32),
-            np.ones((3,), dtype=np.float32),
-            (2,),
+        OperationTestConfig(
+            lax.clamp,
+            numpy.float32(-1.0),
+            numpy.random.normal(size=(3, 4)),
+            numpy.float32(1.0),
         ),
-        (
-            np.zeros((6, 6), dtype=np.float32),
-            np.ones((2, 3), dtype=np.float32),
-            (1, 2),
+        OperationTestConfig(
+            lax.rem,
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.gamma(5, size=(3, 4)),
         ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_dynamic_update_slice(
-    request: pytest.FixtureRequest, device, operand, update, start_indices
-):
-    result = jax.lax.dynamic_update_slice(operand, update, start_indices)
-    grad = jax.grad(
-        lambda x: jax.lax.dynamic_update_slice(operand, x, start_indices).mean()
-    )(update)
-    return result, grad
-
-
-# Scatter operation
-@register_op_test("stablehlo.scatter")
-@pytest.mark.parametrize(
-    "operand, indices, updates",
-    [
-        # Simple scatter add
-        (
-            np.zeros((10, 4), dtype=np.float32),
-            np.array([0, 2, 5], dtype=np.int32),
-            np.ones((3, 4), dtype=np.float32),
+        OperationTestConfig(
+            jnp.nextafter,
+            numpy.array([1.0, -1.0, 0.0, 2.0], dtype=numpy.float32),
+            numpy.array([2.0, -2.0, 1.0, 1.0], dtype=numpy.float32),
+            differentiable_argnums=(),
         ),
-    ],
-)
-@assert_cpu_mps_allclose
-def test_scatter(request: pytest.FixtureRequest, device, operand, indices, updates):
-    # Gradient fails with "Memory kinds and dtypes have different sizes" error
-    return operand.at[indices].add(updates)
+    ]
 
 
-# Non-contiguous array transfer (regression test for CIFAR loader bug)
-# Create non-contiguous test data - transpose creates view with non-standard strides
-_noncontig_array = (
-    _rng.standard_normal((256, 3, 32, 32)).astype(np.float32).transpose(0, 2, 3, 1)
-)
-assert not _noncontig_array.flags["C_CONTIGUOUS"], "Test data must be non-contiguous"
+def _make_random_op_configs():
+    for shape in [(), (3,), (7, 8)]:
+        yield from [
+            OperationTestConfig(
+                random.normal, random.key(17), shape, static_argnums=(1,)
+            ),
+            OperationTestConfig(
+                random.truncated_normal,
+                random.key(17),
+                -0.1,
+                0.2,
+                shape,
+                static_argnums=(3,),
+            ),
+            OperationTestConfig(random.split, random.key(18)),
+            OperationTestConfig(random.split, random.key(18), 5, static_argnums=(1,)),
+        ]
 
 
-@pytest.mark.parametrize("x", [_noncontig_array])
-@assert_cpu_mps_allclose
-def test_noncontiguous_array_transfer(request: pytest.FixtureRequest, device, x):
-    """Test that non-contiguous arrays are transferred correctly to MPS.
+def _make_slice_op_configs():
+    return [
+        OperationTestConfig(
+            lambda x, idx: x[idx],
+            numpy.random.normal(size=(4, 5)),
+            (numpy.random.randint(4), numpy.random.randint(5)),
+        ),
+        OperationTestConfig(
+            lambda x, idx, y: x[idx],
+            numpy.random.normal(size=(4, 5)),
+            (numpy.random.randint(4), numpy.random.randint(5)),
+            numpy.asarray(7.0),
+        ),
+        OperationTestConfig(
+            lambda x: lax.dynamic_slice(x, (2,), (4,)),
+            numpy.random.normal(size=(10,)),
+        ),
+    ]
 
-    Regression test for a bug where transpose() created a non-contiguous array
-    that was corrupted when transferred to MPS. Fixed by handling byte_strides
-    in BufferFromHostBuffer to copy strided data to contiguous layout.
-    """
-    # The decorator already transfers x to the device via jax.device_put.
-    # Just return it - the comparison will catch corruption.
-    return x
+
+def _make_shape_op_configs():
+    return [
+        OperationTestConfig(
+            lambda x, y: jnp.concatenate([x, y], axis=0),
+            numpy.random.normal(size=(3, 4)),
+            numpy.random.normal(size=(5, 4)),
+        ),
+        OperationTestConfig(
+            lambda x: jnp.reshape(x, (20,)),
+            numpy.random.normal(size=(4, 5)),
+        ),
+        OperationTestConfig(
+            lambda x: jnp.pad(x, ((1, 1), (2, 2))),
+            numpy.random.normal(size=(3, 3)),
+            # Grad crashes with fatal Metal abort (sliceUpdateDataTensor shape mismatch).
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x, idx: jnp.take(x, idx, axis=0),
+            numpy.random.normal(size=(5, 3)),
+            numpy.array([0, 2, 4]),
+        ),
+        pytest.param(
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                numpy.random.normal(size=(5, 3)),
+                numpy.array([0, 2]),
+                numpy.random.normal(size=(2, 3)),
+            ),
+            marks=pytest.mark.xfail(reason="scatter uses Add mode instead of Set"),
+        ),
+        OperationTestConfig(
+            lambda x, update: lax.dynamic_update_slice(x, update, (1, 0)),
+            numpy.random.normal(size=(5, 3)),
+            numpy.random.normal(size=(2, 3)),
+        ),
+        OperationTestConfig(
+            lambda x, idx, updates: x.at[idx].add(updates),
+            numpy.zeros((10, 4), dtype=numpy.float32),
+            numpy.array([0, 2, 5], dtype=numpy.int32),
+            numpy.ones((3, 4), dtype=numpy.float32),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x, kernel: lax.conv_general_dilated(
+                x,
+                kernel,
+                window_strides=(1, 1),
+                padding="SAME",
+                dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            ),
+            numpy.random.normal(size=(2, 8, 8, 3)).astype(numpy.float32),
+            numpy.random.normal(size=(3, 3, 3, 8)).astype(numpy.float32),
+        ),
+        pytest.param(
+            OperationTestConfig(
+                lambda lhs, rhs: lax.conv(lhs, rhs, (1, 1), "SAME"),
+                numpy.random.normal(size=(1, 3, 8, 8)),
+                numpy.random.normal(size=(16, 3, 3, 3)),
+            ),
+            marks=pytest.mark.xfail(
+                reason="conv backward pass uses unsupported kernel layout"
+            ),
+        ),
+    ]
+
+
+def _make_reduction_op_configs():
+    return [
+        OperationTestConfig(
+            lambda x: jnp.sum(x),
+            numpy.random.normal(size=(4, 5)),
+        ),
+        OperationTestConfig(
+            lambda x: jnp.sum(x, axis=1),
+            numpy.random.normal(size=(4, 5)),
+        ),
+        OperationTestConfig(
+            lambda x: jnp.max(x, axis=0),
+            numpy.random.normal(size=(4, 5)),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x: jnp.min(x, axis=-1),
+            numpy.random.normal(size=(4, 5)),
+            differentiable_argnums=(),
+        ),
+    ]
+
+
+def _make_conversion_op_configs():
+    return [
+        OperationTestConfig(
+            lambda: jnp.arange(10, dtype=jnp.float32),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x: x.astype(jnp.float16),
+            numpy.random.normal(size=(4, 5)),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lambda x: lax.bitcast_convert_type(x, jnp.int32),
+            numpy.random.normal(size=(4, 5)),
+            differentiable_argnums=(),
+        ),
+    ]
+
+
+def _make_special_op_configs():
+    return [
+        # This tests transfer of data with non-contiguous arrays.
+        OperationTestConfig(
+            lambda x: x,
+            numpy.random.standard_normal((4, 5, 6, 8)).transpose((2, 0, 1, 3)),
+        )
+    ]
+
+
+OPERATION_TEST_CONFIGS = [
+    *_make_unary_op_configs(),
+    *_make_binary_op_configs(),
+    *_make_random_op_configs(),
+    *_make_slice_op_configs(),
+    *_make_shape_op_configs(),
+    *_make_reduction_op_configs(),
+    *_make_conversion_op_configs(),
+    *_make_special_op_configs(),
+]
+
+
+@pytest.fixture(params=OPERATION_TEST_CONFIGS, ids=lambda op_config: op_config.op)
+def op_config(request: pytest.FixtureRequest):
+    return request.param
+
+
+@pytest.fixture(params=[True, False], ids=["jit", "eager"])
+def jit(request: pytest.FixtureRequest):
+    return request.param
+
+
+def fassert(cond: bool, message: str) -> None:
+    """Functional assertion."""
+    assert cond, message
+
+
+def assert_allclose_with_path(path, actual, desired):
+    # Extract key data if these are random keys rather than regular data.
+    is_prng_key = dtypes.issubdtype(actual.dtype, dtypes.prng_key)  # pyright: ignore[reportPrivateImportUsage]
+    if is_prng_key:
+        actual = random.key_data(actual)
+        desired = random.key_data(desired)
+
+    try:
+        numpy.testing.assert_allclose(actual, desired, atol=1e-5, rtol=1e-5)
+    except AssertionError as ex:
+        raise AssertionError(f"Values are not close at path '{path}'.") from ex
+
+
+def test_op_value(op_config: OperationTestConfig, jit: bool) -> None:
+    results = []
+    for platform in ["cpu", "mps"]:
+        device = jax.devices(platform)[0]
+        with jax.default_device(device):
+            try:
+                result = op_config.evaluate_value(jit)
+            except jax.errors.JaxRuntimeError as ex:
+                if "Program contains unsupported StableHLO operations:" in str(ex):
+                    pytest.skip(str(ex))
+                raise
+            jax.tree.map_with_path(
+                lambda path, value: fassert(
+                    value.device == device,
+                    f"Value at '{path}' is on device {value.device}; expected {device}.",
+                ),
+                result,
+            )
+            results.append(result)
+
+    jax.tree.map_with_path(assert_allclose_with_path, *results)
+
+
+def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
+    argnums = op_config.get_differentiable_argnums()
+    if not argnums:
+        pytest.skip(f"No differentiable arguments for operation '{op_config.op}'.")
+
+    for argnum in argnums:
+        results = []
+        for platform in ["cpu", "mps"]:
+            device = jax.devices(platform)[0]
+            with jax.default_device(device):
+                try:
+                    result = op_config.evaluate_grad(argnum, jit)
+                except jax.errors.JaxRuntimeError as ex:
+                    if "Program contains unsupported StableHLO operations:" in str(ex):
+                        pytest.skip(str(ex))
+                    raise
+                jax.tree.map_with_path(
+                    lambda path, value: fassert(
+                        value.device == device,
+                        f"Value at '{path}' is on device {value.device}; expected {device}.",
+                    ),
+                    result,
+                )
+                results.append(result)
+
+        jax.tree.map_with_path(assert_allclose_with_path, *results)

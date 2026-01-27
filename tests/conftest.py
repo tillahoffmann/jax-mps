@@ -1,10 +1,7 @@
 """Shared pytest fixtures and utilities for MPS tests."""
 
 import functools
-import os
-import re
 from collections.abc import Callable
-from pathlib import Path
 
 import jax
 import numpy as np
@@ -78,51 +75,3 @@ def assert_cpu_mps_allclose(func: Callable):
             raise ValueError
 
     return _wrapper
-
-
-_TESTED_OPS: set[str] = set()
-
-
-def register_op_test(arg: str | Callable, *args: str) -> Callable:
-    # If the first argument is a callable, return it. If not, return a decorator that
-    # returns the function verbatim.
-    if isinstance(arg, str):
-        _TESTED_OPS.add(arg)
-        _TESTED_OPS.update(args)
-        return lambda x: x
-    elif callable(arg):
-        assert args, "Arguments cannot be empty."
-        _TESTED_OPS.update(args)
-        return arg
-    else:
-        raise ValueError
-
-
-@pytest.fixture(autouse=True, scope="session")
-def assert_all_ops_tested():
-    yield
-
-    if "CI" not in os.environ:
-        return
-
-    ops_dir = Path(__file__).parent.parent / "src/pjrt_plugin/ops"
-    assert ops_dir.is_dir()
-
-    # Patterns matching op registration calls
-    patterns = [
-        re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
-        re.compile(r'OpRegistry::Register\("([^"]+)"'),
-    ]
-
-    op_names = set()
-    for mm_file in ops_dir.glob("*.mm"):
-        with mm_file.open() as fp:
-            content = fp.read()
-            for pattern in patterns:
-                op_names.update(pattern.findall(content))
-
-    assert op_names, "Failed to discover any ops."
-    missing = op_names - _TESTED_OPS
-    assert not missing, f"Discovered {len(missing)} untested ops: {', '.join(missing)}"
