@@ -74,8 +74,7 @@ jobs:
           echo "MLIR cmake config:"
           ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -3
 
-      - name: Install system dependencies
-        run: brew install protobuf abseil
+      # protobuf and abseil are built from source via setup_deps.sh for static linking
 
       - name: Install project and dev dependencies
         run: uv sync --all-groups

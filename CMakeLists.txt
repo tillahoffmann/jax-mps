@@ -21,10 +21,16 @@ find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 # Use vendored XLA PJRT headers
 set(XLA_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
-# Find Protobuf and Abseil (protobuf depends on abseil)
-find_package(Protobuf REQUIRED)
+# Find Protobuf and Abseil (static builds from setup_deps.sh for wheel distribution)
+# Prefer static libraries to avoid runtime dependencies
+set(CMAKE_FIND_LIBRARY_SUFFIXES_ORIG ${CMAKE_FIND_LIBRARY_SUFFIXES})
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+
 find_package(absl REQUIRED)
+find_package(Protobuf REQUIRED)
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
+
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_ORIG})
 
 # Generate C++ from proto files
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS src/proto/device_assignment.proto)
@@ -161,6 +167,40 @@ endforeach()
 
 message(STATUS "StableHLO libraries: ${STABLEHLO_LIBS}")
 
+# Abseil libraries needed by protobuf and our code (for static linking)
+set(ABSL_LIBS
+    absl::log
+    absl::log_internal_check_op
+    absl::log_internal_message
+    # Required by protobuf when statically linked
+    absl::cord
+    absl::strings
+    absl::str_format
+    absl::synchronization
+    absl::hash
+    absl::raw_hash_set
+    absl::status
+    absl::statusor
+    absl::span
+    absl::optional
+    absl::variant
+    absl::any
+    absl::flat_hash_map
+    absl::flat_hash_set
+    absl::inlined_vector
+)
+
+# Find utf8_range libraries (required by protobuf)
+find_library(UTF8_RANGE_LIB utf8_range HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+find_library(UTF8_VALIDITY_LIB utf8_validity HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+set(UTF8_LIBS "")
+if(UTF8_RANGE_LIB)
+    list(APPEND UTF8_LIBS ${UTF8_RANGE_LIB})
+endif()
+if(UTF8_VALIDITY_LIB)
+    list(APPEND UTF8_LIBS ${UTF8_VALIDITY_LIB})
+endif()
+
 target_link_libraries(pjrt_plugin_mps PRIVATE
     ${METAL_FRAMEWORK}
     ${MPS_FRAMEWORK}
@@ -169,9 +209,8 @@ target_link_libraries(pjrt_plugin_mps PRIVATE
     ${STABLEHLO_LIBS}
     ${MLIR_LIBS}
     protobuf::libprotobuf
-    absl::log
-    absl::log_internal_check_op
-    absl::log_internal_message
+    ${UTF8_LIBS}
+    ${ABSL_LIBS}
 )
 
 # For wheel distribution: ensure RPATH is set correctly
