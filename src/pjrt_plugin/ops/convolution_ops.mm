@@ -122,6 +122,12 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         (inputBatchDim == 3 && inputFeatureDim == 0 && inputSpatialDims.size() == 2 &&
          inputSpatialDims[0] == 1 && inputSpatialDims[1] == 2);
 
+    // Check if input is CNHW (batch=1, feature=0, spatial=[2,3]) - used in kernel gradient of NCHW
+    // conv
+    bool inputIsCNHW =
+        (inputBatchDim == 1 && inputFeatureDim == 0 && inputSpatialDims.size() == 2 &&
+         inputSpatialDims[0] == 2 && inputSpatialDims[1] == 3);
+
     // MPS kernel layout is OHWI (output_features, height, width, input_features)
     // StableHLO default is often HWIO (height, width, input_features, output_features)
     // Check kernel layout: HWIO means spatial=[0,1], input=2, output=3
@@ -149,10 +155,16 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         (kernelOutputFeatureDim == 0 && kernelSpatialDims.size() == 2 &&
          kernelSpatialDims[0] == 1 && kernelSpatialDims[1] == 2 && kernelInputFeatureDim == 3);
 
-    if (!inputIsNHWC && !inputIsNCHW && !inputIsCHWN) {
-        MPS_LOG_ERROR("Unsupported input layout. Expected NHWC, NCHW, or CHWN. Got batch=%lld, "
-                      "feature=%lld, spatial=[%lld,%lld]\n",
-                      inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
+    // Check for IOHW (used in gradient computation of NCHW conv) - input=0, output=1, spatial=[2,3]
+    bool kernelIsIOHW =
+        (kernelInputFeatureDim == 0 && kernelOutputFeatureDim == 1 &&
+         kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 2 && kernelSpatialDims[1] == 3);
+
+    if (!inputIsNHWC && !inputIsNCHW && !inputIsCHWN && !inputIsCNHW) {
+        MPS_LOG_ERROR(
+            "Unsupported input layout. Expected NHWC, NCHW, CHWN, or CNHW. Got batch=%lld, "
+            "feature=%lld, spatial=[%lld,%lld]\n",
+            inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
         return nullptr;
     }
 
@@ -180,6 +192,10 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // OHWI [O, H, W, I] -> OIHW [O, I, H, W]
         // Permutation: [0, 3, 1, 2]
         mpsKernel = [g transposeTensor:kernel permutation:@[@0, @3, @1, @2] name:nil];
+    } else if (kernelIsIOHW) {
+        // IOHW [I, O, H, W] -> OIHW [O, I, H, W]
+        // Swap dims 0 and 1
+        mpsKernel = [g transposeTensor:kernel permutation:@[@1, @0, @2, @3] name:nil];
     } else {
         MPS_LOG_ERROR("Unsupported kernel layout. Got output=%lld, input=%lld, "
                       "spatial=[%lld,%lld]\n",
@@ -217,6 +233,11 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // For CHWN (used in gradient computation), transpose to NHWC
         // CHWN [C, H, W, N] -> NHWC [N, H, W, C]: [3, 1, 2, 0]
         convInput = [g transposeTensor:input permutation:@[@3, @1, @2, @0] name:nil];
+        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
+    } else if (inputIsCNHW) {
+        // For CNHW (used in kernel gradient of NCHW conv), transpose to NHWC
+        // CNHW [C, N, H, W] -> NHWC [N, H, W, C]: [1, 2, 3, 0]
+        convInput = [g transposeTensor:input permutation:@[@1, @2, @3, @0] name:nil];
         desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
     }
 
@@ -333,6 +354,11 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     // The "batch" dim represents input features, "feature" dim represents output features
     bool outputIsHWIO = (outputSpatialDims.size() == 2 && outputSpatialDims[0] == 0 &&
                          outputSpatialDims[1] == 1 && outputBatchDim == 2 && outputFeatureDim == 3);
+    // For kernel gradient of NCHW conv: CNHW layout (feature=0, batch=1, spatial=[2,3])
+    // "feature" dim (0) holds output channels, "batch" dim (1) holds input channels
+    bool outputIsCNHW =
+        (outputFeatureDim == 0 && outputBatchDim == 1 && outputSpatialDims.size() == 2 &&
+         outputSpatialDims[0] == 2 && outputSpatialDims[1] == 3);
 
     if (outputIsNCHW) {
         // NHWC -> NCHW: [0, 3, 1, 2]
@@ -346,6 +372,11 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // So [N, H, W, C] -> [H, W, N, C] which is HWIO
         // Permutation: [1, 2, 0, 3]
         result = [g transposeTensor:result permutation:@[@1, @2, @0, @3] name:nil];
+    } else if (outputIsCNHW) {
+        // NHWC [N, H, W, C] -> CNHW [C, N, H, W]
+        // For kernel gradient of NCHW conv, N=I (input features), C=O (output features)
+        // Permutation: [3, 0, 1, 2]
+        result = [g transposeTensor:result permutation:@[@3, @0, @1, @2] name:nil];
     } else if (!outputIsNHWC) {
         MPS_LOG_WARN("Unexpected output layout batch=%lld, feature=%lld, spatial=[%lld,%lld]\n",
                      outputBatchDim, outputFeatureDim, outputSpatialDims[0], outputSpatialDims[1]);

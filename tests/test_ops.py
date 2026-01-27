@@ -41,6 +41,7 @@ class OperationTestConfig:
             respect to. Defaults to positional arguments with inexact types.
         static_argnums: Position of arguments that should be treated as static in
             jit-compile.
+        name: Display name of the operation test config.
     """
 
     EXERCISED_STABLEHLO_OPS: set[str] = {
@@ -56,6 +57,7 @@ class OperationTestConfig:
         *args: Any,
         differentiable_argnums: Sequence[int] | None = None,
         static_argnums: Sequence[int] | None = None,
+        name: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.op = op
@@ -66,6 +68,7 @@ class OperationTestConfig:
             key: arg if callable(arg) else lambda arg=arg: arg
             for key, arg in kwargs.items()
         }
+        self.name = name
 
     def get_args(self):
         """Get positional arguments."""
@@ -471,15 +474,11 @@ def _make_shape_op_configs():
             numpy.random.normal(size=(2, 8, 8, 3)).astype(numpy.float32),
             numpy.random.normal(size=(3, 3, 3, 8)).astype(numpy.float32),
         ),
-        pytest.param(
-            OperationTestConfig(
-                lambda lhs, rhs: lax.conv(lhs, rhs, (1, 1), "SAME"),
-                numpy.random.normal(size=(1, 3, 8, 8)),
-                numpy.random.normal(size=(16, 3, 3, 3)),
-            ),
-            marks=pytest.mark.xfail(
-                reason="conv backward pass uses unsupported kernel layout"
-            ),
+        OperationTestConfig(
+            lambda lhs, rhs: lax.conv(lhs, rhs, (1, 1), "SAME"),
+            numpy.random.normal(size=(1, 3, 8, 8)),
+            numpy.random.normal(size=(16, 3, 3, 3)),
+            name="lax.conv-SAME",
         ),
     ]
 
@@ -548,7 +547,9 @@ OPERATION_TEST_CONFIGS = [
 ]
 
 
-@pytest.fixture(params=OPERATION_TEST_CONFIGS, ids=lambda op_config: op_config.op)
+@pytest.fixture(
+    params=OPERATION_TEST_CONFIGS, ids=lambda op_config: op_config.name or op_config.op
+)
 def op_config(request: pytest.FixtureRequest):
     return request.param
 
