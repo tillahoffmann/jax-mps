@@ -27,8 +27,15 @@ set(CMAKE_FIND_LIBRARY_SUFFIXES_ORIG ${CMAKE_FIND_LIBRARY_SUFFIXES})
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 
 find_package(absl REQUIRED)
+
+# Find protoc executable from our prefix path before finding Protobuf package
+find_program(Protobuf_PROTOC_EXECUTABLE protoc
+    HINTS ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES bin
+)
 find_package(Protobuf REQUIRED)
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
+message(STATUS "Found protoc: ${Protobuf_PROTOC_EXECUTABLE}")
 
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_ORIG})
 
