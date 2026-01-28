@@ -1,31 +1,12 @@
-# Python-generated files
 __pycache__/
-*.py[oc]
+.DS_Store
+.venv/
+.vscode/
+*.egg-info
+*~
 build/
 dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Build artifacts
-*.dylib
-*.o
-*.a
-
-# Third-party (cloned separately, not tracked)
-third_party/stablehlo/
-third_party/xla/
-
-# IDE
-.vscode/
-.idea/
-*.xcodeproj/
-
-# macOS
-.DS_Store
-
-# Custom.
 playground/
+third_party/
 tickets/
+wheels/
