@@ -1,16 +1,27 @@
 # Guidelines
 
 - You may NEVER skip or xfail tests without my explicit approval.
-- You MUST use `uv` to manage dependencies and for execution.
+- You MUST use `uv` to manage dependencies.
+- You MUST use `uv run ...` to execute commands.
 - You MUST check the comprehensive list of MPS Graph operations in `mps_ops/` before implementing a custom operation.
 - You may NEVER use `--no-verify` for git commits.
 - You may NEVER delete operations or tests without my explicit approval.
-- For each op, you MUST add a test to `tests/test_ops.py`, including the `assert_cpu_mps_allclose` decorator for test functions.
+- For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See @tests/configs/unary.py for an example and @tests/configs/util.py for the signature of `OperationTestConfig`.
+
+# Adding New Ops
+
+1. Run `uv run pytest | grep XFAIL` to find missing ops. The error message contains the StableHLO op name (e.g., `stablehlo.cosine`).
+2. Find the matching MPS Graph method in `mps_ops/` (e.g., `cosWithTensor:name:` in `mps_ops/arithmetic.txt`).
+3. For simple unary ops, add a `REGISTER_MLIR_UNARY_OP` line in `src/pjrt_plugin/ops/unary_ops.mm`:
+   `REGISTER_MLIR_UNARY_OP("stablehlo.<name>", <mpsMethod>, <suffix>);`
+   where `<mpsMethod>` is the method prefix before `WithTensor:name:`.
+4. For binary/complex ops, write a handler function and use `REGISTER_MPS_OP` (see existing examples in `src/pjrt_plugin/ops/`).
+5. Rebuild with `uv pip install -e .` and run `uv run pytest` to confirm the XFAILs become PASSes.
 
 # Build and Test
 
 ```bash
-uv sync
+uv sync --all-groups
 uv pip install -e .
 uv run pytest
 ```
