@@ -14,9 +14,15 @@ REGISTER_MLIR_UNARY_OP("stablehlo.abs", absolute, abs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.rsqrt", reciprocalSquareRoot, rsqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
+REGISTER_MLIR_UNARY_OP("chlo.erf", erf, chlo_erf);
 REGISTER_MLIR_UNARY_OP("stablehlo.floor", floor, floor);
 REGISTER_MLIR_UNARY_OP("stablehlo.sign", sign, sign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);
+REGISTER_MLIR_UNARY_OP("chlo.square", square, chlo_square);
+REGISTER_MLIR_UNARY_OP("stablehlo.ceil", ceil, ceil);
+REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
+REGISTER_MLIR_UNARY_OP("stablehlo.sine", sin, sine);
+REGISTER_MLIR_UNARY_OP("stablehlo.tan", tan, tan);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
 static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {

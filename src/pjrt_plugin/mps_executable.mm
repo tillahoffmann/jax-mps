@@ -32,8 +32,6 @@ MpsExecutable::MpsExecutable(MpsClient* client, mps::ParsedModule module)
 
     // Set the number of outputs based on result types
     num_outputs_ = entry_func_.getNumResults();
-    if (num_outputs_ == 0)
-        num_outputs_ = 1;
 
     valid_ = true;
 }
@@ -265,6 +263,7 @@ bool MpsExecutable::BuildGraph() {
                 error_ = "Return value not found in tensors";
                 return false;
             }
+
             cached_targets_.push_back((__bridge void*)ret_tensor);  // Graph owns the tensor
             cached_return_types_.push_back(ret_value.getType());
         }
@@ -370,8 +369,9 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             return result;
         }
 
+        // Function with no outputs (e.g., side-effect-only or token functions)
         if (target_tensors.count == 0) {
-            return ExecutionResult::Error("No result tensor produced.");
+            return result;
         }
 
         // Get cached command queue from client
