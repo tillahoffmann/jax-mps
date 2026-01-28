@@ -21,6 +21,7 @@ BUILD_DIR="${BUILD_DIR:-/tmp/jax-mps-deps-build}"
 
 # Pin to versions matching jaxlib 0.9.0 for bytecode compatibility
 # These are extracted from XLA commit bb760b047bdbfeff962f0366ad5cc782c98657e0
+XLA_COMMIT="${XLA_COMMIT:-bb760b047bdbfeff962f0366ad5cc782c98657e0}"
 STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-127d2f238010589ac96f2f402a27afc9dccbb7ab}"
 LLVM_COMMIT_OVERRIDE="${LLVM_COMMIT_OVERRIDE:-f6d0a512972a74ef100723b9526a6a0ddb23f894}"
 
@@ -67,6 +68,7 @@ echo "Jobs:         $JOBS"
 echo "Build dir:    $BUILD_DIR"
 echo "Abseil:       $ABSEIL_VERSION"
 echo "Protobuf:     $PROTOBUF_VERSION"
+echo "XLA:          $XLA_COMMIT"
 echo "StableHLO:    $STABLEHLO_COMMIT"
 echo "LLVM:         $LLVM_COMMIT_OVERRIDE"
 echo "Force:        $FORCE_REBUILD"
@@ -258,6 +260,26 @@ print(re.sub(pattern, wrap, content, flags=re.DOTALL))
     echo "StableHLO installed to $PREFIX"
 else
     echo "=== StableHLO already installed ==="
+fi
+
+# Install XLA PJRT headers (only the C API header is needed)
+if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
+    XLA_DIR="$BUILD_DIR/xla"
+    echo "=== Fetching XLA headers at commit $XLA_COMMIT ==="
+    if [ ! -d "$XLA_DIR" ]; then
+        mkdir -p "$XLA_DIR"
+        cd "$XLA_DIR"
+        git init
+        git remote add origin https://github.com/openxla/xla.git
+        git fetch --depth 1 origin "$XLA_COMMIT"
+        git checkout FETCH_HEAD
+    fi
+
+    mkdir -p "$PREFIX/include/xla/pjrt/c"
+    cp "$XLA_DIR/xla/pjrt/c/pjrt_c_api.h" "$PREFIX/include/xla/pjrt/c/"
+    echo "XLA PJRT headers installed to $PREFIX"
+else
+    echo "=== XLA PJRT headers already installed ==="
 fi
 
 echo ""
