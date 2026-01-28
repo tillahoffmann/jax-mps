@@ -547,6 +547,10 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
             [squeezedShape addObject:indicesShape[i]];
         }
 
+        // If squeezing produces a scalar, keep as [1] so MPS has a valid rank for the axis
+        if (squeezedShape.count == 0)
+            [squeezedShape addObject:@1];
+
         MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
                                                  withShape:squeezedShape
                                                       name:nil];
@@ -583,6 +587,10 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
                 }
             }
         }
+
+        // Ensure updates is at least rank 1 (MPS doesn't support scalar updates)
+        if (updates.shape.count == 0)
+            updates = [g reshapeTensor:updates withShape:@[@1] name:nil];
 
         // Use scatterWithDataTensor to scatter updates into input
         return [g scatterWithDataTensor:input

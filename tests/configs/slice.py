@@ -35,6 +35,18 @@ def make_slice_op_configs():
                 numpy.random.normal(size=(2, 3)),
             ),
             OperationTestConfig(
+                lambda x: x.at[0].set(1.0),
+                numpy.random.normal(size=(10,)),
+            ),
+            OperationTestConfig(
+                lambda x: x.at[0].add(1.0),
+                numpy.random.normal(size=(10,)),
+            ),
+            OperationTestConfig(
+                lambda x: x.at[0].divide(2.0),
+                numpy.random.normal(size=(10,)),
+            ),
+            OperationTestConfig(
                 lambda x, update: lax.dynamic_update_slice(x, update, (1, 0)),
                 numpy.random.normal(size=(5, 3)),
                 numpy.random.normal(size=(2, 3)),
