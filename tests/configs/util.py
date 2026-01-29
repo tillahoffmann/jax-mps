@@ -4,6 +4,7 @@ from typing import Any, Callable, ClassVar, Sequence
 
 import jax
 import numpy
+import pytest
 from jax import numpy as jnp
 
 CPU_DEVICE = jax.devices("cpu")[0]
@@ -139,8 +140,13 @@ class OperationTestConfig:
         result = func(*args, **kwargs)
         if isinstance(result, (tuple, list)):
             num_return_values = len(result)
+            for x in result:
+                if x.dtype == jnp.complex64:
+                    pytest.skip("Gradient check skipped due to complex output.")
         else:
             num_return_values = None
+            if result.dtype == jnp.complex64:
+                pytest.skip("Gradient check skipped due to complex output.")
 
         grad_vals = []
         for returnnum in range(num_return_values or 1):
@@ -173,3 +179,12 @@ class OperationTestConfig:
                     STABLEHLO_OP_RE.findall(stablehlo_text)
                 )
         return tuple(grad_vals)
+
+
+def complex_standard_normal(shape: tuple[int, ...], complex: bool) -> numpy.ndarray:
+    if complex:
+        return numpy.random.standard_normal(shape) + 1j * numpy.random.standard_normal(
+            shape
+        )
+    else:
+        return numpy.random.standard_normal(shape)
