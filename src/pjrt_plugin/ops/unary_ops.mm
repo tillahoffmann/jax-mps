@@ -71,6 +71,7 @@ REGISTER_MPS_OP("stablehlo.sign", Handle_sign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);
 REGISTER_MLIR_UNARY_OP("chlo.square", square, chlo_square);
 REGISTER_MLIR_UNARY_OP("stablehlo.ceil", ceil, ceil);
+REGISTER_MLIR_UNARY_OP("stablehlo.round_nearest_even", rint, round_nearest_even);
 REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
 REGISTER_MLIR_UNARY_OP("stablehlo.sine", sin, sine);
 REGISTER_MLIR_UNARY_OP("stablehlo.tan", tan, tan);
