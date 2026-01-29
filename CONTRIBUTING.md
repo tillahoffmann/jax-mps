@@ -25,7 +25,7 @@ Pre-commit hooks run clang-format, ruff, pyright, a rebuild, and the full test s
 
 1. **Find the MPS Graph method matching the operation you want to implement.** The `mps_ops/` directory contains a categorised list of all MPSGraph methods, extracted from the framework headers under `MPSGraph.framework/Headers/`. Apple's [MPSGraph documentation](https://developer.apple.com/documentation/metalperformanceshadersgraph) is the authoritative reference.
 
-2. **Register the op.** For simple unary ops, a one-liner in `src/pjrt_plugin/ops/unary_ops.mm` is enough:
+2. **Register the op.** For simple unary ops, a one-liner in `src/pjrt_plugin/ops/unary_ops.mm` is enough (see [#12](https://github.com/tillahoffmann/jax-mps/pull/12) for an example):
 
 ```objc
 REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
