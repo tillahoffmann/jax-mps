@@ -68,12 +68,7 @@ def test_op_value(op_config: OperationTestConfig, jit: bool) -> None:
     for platform in ["cpu", "mps"]:
         device = jax.devices(platform)[0]
         with jax.default_device(device):
-            try:
-                result = op_config.evaluate_value(jit)
-            except jax.errors.JaxRuntimeError as ex:
-                if "Program contains unsupported StableHLO operations:" in str(ex):
-                    pytest.xfail(str(ex))
-                raise
+            result = op_config.evaluate_value(jit)
             jax.tree.map_with_path(
                 lambda path, value: fassert(
                     value.device == device,
@@ -96,12 +91,7 @@ def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
         for platform in ["cpu", "mps"]:
             device = jax.devices(platform)[0]
             with jax.default_device(device):
-                try:
-                    result = op_config.evaluate_grad(argnum, jit)
-                except jax.errors.JaxRuntimeError as ex:
-                    if "Program contains unsupported StableHLO operations:" in str(ex):
-                        pytest.xfail(str(ex))
-                    raise
+                result = op_config.evaluate_grad(argnum, jit)
                 jax.tree.map_with_path(
                     lambda path, value: fassert(
                         value.device == device,

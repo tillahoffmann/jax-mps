@@ -10,7 +10,7 @@
 
 # Adding New Ops
 
-1. Run `uv run pytest | grep XFAIL` to find missing ops. The error message contains the StableHLO op name (e.g., `stablehlo.cosine`).
+1. Identify an op to implement and find its StableHLO op name (e.g., `stablehlo.cosine`). The simplest approach is to implement a test for the op and look for failures (the error message includes the StableHLO op name).
 2. Find the matching MPS Graph method in `mps_ops/` (e.g., `cosWithTensor:name:` in `mps_ops/arithmetic.txt`).
 3. For simple unary ops, add a `REGISTER_MLIR_UNARY_OP` line in `src/pjrt_plugin/ops/unary_ops.mm`:
    `REGISTER_MLIR_UNARY_OP("stablehlo.<name>", <mpsMethod>, <suffix>);`
