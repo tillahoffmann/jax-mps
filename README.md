@@ -1,4 +1,4 @@
-# jax-mps [![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml)
+# jax-mps [![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/)
 
 A JAX backend for Apple Metal Performance Shaders (MPS), enabling GPU-accelerated JAX computations on Apple Silicon.
 
@@ -18,6 +18,18 @@ loss = 0.028: 100%|██████████| 30/30 [00:30<00:00,  1.03s/it
 Final training loss: 0.028
 Time per step (second half): 0.991
 ```
+
+## Installation
+
+jax-mps requires macOS on Apple Silicon and Python 3.13. Install it with pip:
+
+```bash
+pip install jax-mps
+```
+
+The plugin registers itself with JAX automatically and is enabled by default. Set `JAX_PLATFORMS=mps` to select the MPS backend explicitly.
+
+jax-mps is built against the StableHLO bytecode format matching jaxlib 0.9.x. Using a different jaxlib version will likely cause deserialization failures at JIT compile time. See [Version Pinning](#version-pinning) for details.
 
 ## Architecture
 
