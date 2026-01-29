@@ -4,7 +4,6 @@ from typing import Any, Callable, ClassVar, Sequence
 
 import jax
 import numpy
-import pytest
 from jax import numpy as jnp
 
 CPU_DEVICE = jax.devices("cpu")[0]
@@ -109,7 +108,7 @@ class OperationTestConfig:
             if isinstance(arg, float):
                 differentiable_argnums.append(argnum)
             elif isinstance(arg, jnp.ndarray):
-                if arg.dtype == jnp.float32:
+                if arg.dtype == jnp.float32 or arg.dtype == jnp.complex64:
                     differentiable_argnums.append(argnum)
         return tuple(differentiable_argnums)
 
@@ -140,13 +139,8 @@ class OperationTestConfig:
         result = func(*args, **kwargs)
         if isinstance(result, (tuple, list)):
             num_return_values = len(result)
-            for x in result:
-                if x.dtype == jnp.complex64:
-                    pytest.skip("Gradient check skipped due to complex output.")
         else:
             num_return_values = None
-            if result.dtype == jnp.complex64:
-                pytest.skip("Gradient check skipped due to complex output.")
 
         grad_vals = []
         for returnnum in range(num_return_values or 1):
@@ -159,6 +153,13 @@ class OperationTestConfig:
                     )
                 else:
                     result = result[returnnum]
+
+                # FIXME: Reduce to the magnitude if the function is complex-valued so we
+                # don't have to deal with complex derivatives. This isn't ideal but
+                # pragmatic.
+                if result.dtype == jnp.complex64:
+                    result = jnp.abs(result)
+
                 # Reduce to the mean if the output is not a scalar; we can only
                 # differentiate scalars.
                 if result.shape != ():
