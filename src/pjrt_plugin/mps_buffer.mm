@@ -2,53 +2,34 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <xla/pjrt/c/pjrt_c_api.h>
 
 #import "pjrt_plugin/mps_client.h"
 #import "pjrt_plugin/mps_device.h"
 
 namespace jax_mps {
 
-// PJRT dtype enum values (from pjrt_c_api.h)
-enum PjrtDtype {
-    PJRT_INVALID = 0,
-    PJRT_PRED = 1,
-    PJRT_S8 = 2,
-    PJRT_S16 = 3,
-    PJRT_S32 = 4,
-    PJRT_S64 = 5,
-    PJRT_U8 = 6,
-    PJRT_U16 = 7,
-    PJRT_U32 = 8,
-    PJRT_U64 = 9,
-    PJRT_F16 = 10,
-    PJRT_F32 = 11,
-    PJRT_F64 = 12,
-    PJRT_BF16 = 16,
-    PJRT_C64 = 15,
-    PJRT_C128 = 18,
-};
-
 size_t DtypeByteSize(int dtype) {
     switch (dtype) {
-        case PJRT_PRED:
-        case PJRT_S8:
-        case PJRT_U8:
+        case PJRT_Buffer_Type_PRED:
+        case PJRT_Buffer_Type_S8:
+        case PJRT_Buffer_Type_U8:
             return 1;
-        case PJRT_S16:
-        case PJRT_U16:
-        case PJRT_F16:
-        case PJRT_BF16:
+        case PJRT_Buffer_Type_S16:
+        case PJRT_Buffer_Type_U16:
+        case PJRT_Buffer_Type_F16:
+        case PJRT_Buffer_Type_BF16:
             return 2;
-        case PJRT_S32:
-        case PJRT_U32:
-        case PJRT_F32:
+        case PJRT_Buffer_Type_S32:
+        case PJRT_Buffer_Type_U32:
+        case PJRT_Buffer_Type_F32:
             return 4;
-        case PJRT_S64:
-        case PJRT_U64:
-        case PJRT_F64:
-        case PJRT_C64:
+        case PJRT_Buffer_Type_S64:
+        case PJRT_Buffer_Type_U64:
+        case PJRT_Buffer_Type_F64:
+        case PJRT_Buffer_Type_C64:
             return 8;
-        case PJRT_C128:
+        case PJRT_Buffer_Type_C128:
             return 16;
         default:
             // Unknown dtype - return 0 to make failures obvious

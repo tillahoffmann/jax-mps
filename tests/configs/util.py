@@ -108,7 +108,7 @@ class OperationTestConfig:
             if isinstance(arg, float):
                 differentiable_argnums.append(argnum)
             elif isinstance(arg, jnp.ndarray):
-                if arg.dtype == jnp.float32:
+                if arg.dtype == jnp.float32 or arg.dtype == jnp.complex64:
                     differentiable_argnums.append(argnum)
         return tuple(differentiable_argnums)
 
@@ -153,6 +153,13 @@ class OperationTestConfig:
                     )
                 else:
                     result = result[returnnum]
+
+                # FIXME: Reduce to the magnitude if the function is complex-valued so we
+                # don't have to deal with complex derivatives. This isn't ideal but
+                # pragmatic.
+                if result.dtype == jnp.complex64:
+                    result = jnp.abs(result)
+
                 # Reduce to the mean if the output is not a scalar; we can only
                 # differentiate scalars.
                 if result.shape != ():
@@ -173,3 +180,12 @@ class OperationTestConfig:
                     STABLEHLO_OP_RE.findall(stablehlo_text)
                 )
         return tuple(grad_vals)
+
+
+def complex_standard_normal(shape: tuple[int, ...], complex: bool) -> numpy.ndarray:
+    if complex:
+        return numpy.random.standard_normal(shape) + 1j * numpy.random.standard_normal(
+            shape
+        )
+    else:
+        return numpy.random.standard_normal(shape)

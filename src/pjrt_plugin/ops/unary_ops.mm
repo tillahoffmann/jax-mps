@@ -10,13 +10,64 @@ REGISTER_MLIR_UNARY_OP("stablehlo.tanh", tanh, tanh);
 REGISTER_MLIR_UNARY_OP("stablehlo.exponential", exponent, exp);
 REGISTER_MLIR_UNARY_OP("stablehlo.log", logarithm, log);
 REGISTER_MLIR_UNARY_OP("stablehlo.negate", negative, negate);
-REGISTER_MLIR_UNARY_OP("stablehlo.abs", absolute, abs);
+// abs: MPS absoluteWithTensor: on complex input returns complex (magnitude in
+// real part, zero imaginary). StableHLO expects a real-valued result, so we
+// extract the real part for complex inputs.
+static MPSGraphTensor* Handle_abs(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    MPSGraphTensor* result = [g absoluteWithTensor:input name:nil];
+    if (input.dataType == MPSDataTypeComplexFloat32 || input.dataType == MPSDataTypeComplexFloat16)
+        result = [g realPartOfTensor:result name:nil];
+    return result;
+}
+REGISTER_MPS_OP("stablehlo.abs", Handle_abs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.rsqrt", reciprocalSquareRoot, rsqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
 REGISTER_MLIR_UNARY_OP("chlo.erf", erf, chlo_erf);
 REGISTER_MLIR_UNARY_OP("stablehlo.floor", floor, floor);
-REGISTER_MLIR_UNARY_OP("stablehlo.sign", sign, sign);
+// sign: for complex inputs, stablehlo.sign returns x / |x| (or 0 for x == 0).
+// MPS signWithTensor: applies component-wise sign which is wrong for complex.
+static MPSGraphTensor* Handle_sign(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    if (input.dataType != MPSDataTypeComplexFloat32 && input.dataType != MPSDataTypeComplexFloat16)
+        return [g signWithTensor:input name:nil];
+
+    MPSGraphTensor* re = [g realPartOfTensor:input name:nil];
+    MPSGraphTensor* im = [g imaginaryPartOfTensor:input name:nil];
+    MPSDataType floatType = re.dataType;
+
+    // magnitude = |x| (as real)
+    MPSGraphTensor* magnitude = [g realPartOfTensor:[g absoluteWithTensor:input name:nil] name:nil];
+
+    // Avoid division by zero: use 1 where magnitude is 0, then mask result to 0.
+    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:floatType];
+    MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:floatType];
+    MPSGraphTensor* is_zero = [g equalWithPrimaryTensor:magnitude secondaryTensor:zero name:nil];
+    MPSGraphTensor* safe_mag = [g selectWithPredicateTensor:is_zero
+                                        truePredicateTensor:one
+                                       falsePredicateTensor:magnitude
+                                                       name:nil];
+
+    // x / |x|, zeroed where |x| == 0
+    MPSGraphTensor* norm_re = [g divisionWithPrimaryTensor:re secondaryTensor:safe_mag name:nil];
+    MPSGraphTensor* norm_im = [g divisionWithPrimaryTensor:im secondaryTensor:safe_mag name:nil];
+    norm_re = [g selectWithPredicateTensor:is_zero
+                       truePredicateTensor:zero
+                      falsePredicateTensor:norm_re
+                                      name:nil];
+    norm_im = [g selectWithPredicateTensor:is_zero
+                       truePredicateTensor:zero
+                      falsePredicateTensor:norm_im
+                                      name:nil];
+
+    return [g complexTensorWithRealTensor:norm_re imaginaryTensor:norm_im name:nil];
+}
+REGISTER_MPS_OP("stablehlo.sign", Handle_sign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);
 REGISTER_MLIR_UNARY_OP("chlo.square", square, chlo_square);
 REGISTER_MLIR_UNARY_OP("stablehlo.ceil", ceil, ceil);
@@ -24,12 +75,51 @@ REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
 REGISTER_MLIR_UNARY_OP("stablehlo.sine", sin, sine);
 REGISTER_MLIR_UNARY_OP("stablehlo.tan", tan, tan);
 
+// Complex part extraction (methods use OfTensor, not WithTensor, so can't use the macro)
+static MPSGraphTensor* Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    return [g realPartOfTensor:input name:nil];
+}
+REGISTER_MPS_OP("stablehlo.real", Handle_real);
+
+static MPSGraphTensor* Handle_imag(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    return [g imaginaryPartOfTensor:input name:nil];
+}
+REGISTER_MPS_OP("stablehlo.imag", Handle_imag);
+
+// Complex construction from real and imaginary parts
+static MPSGraphTensor* Handle_complex(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* real = GetInputTensor(values, op, 0);
+    MPSGraphTensor* imag = GetInputTensor(values, op, 1);
+    if (!real || !imag)
+        return nullptr;
+    return [g complexTensorWithRealTensor:real imaginaryTensor:imag name:nil];
+}
+REGISTER_MPS_OP("stablehlo.complex", Handle_complex);
+
+// exponential_minus_one: exp(x) - 1
+static MPSGraphTensor* Handle_expm1(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    MPSGraphTensor* exp_x = [g exponentWithTensor:input name:nil];
+    MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:input.dataType];
+    return [g subtractionWithPrimaryTensor:exp_x secondaryTensor:one name:nil];
+}
+REGISTER_MPS_OP("stablehlo.exponential_minus_one", Handle_expm1);
+
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
 static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return nullptr;
 
+    // FIXME: This naive implementation is numerically unstable for small inputs.
     MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:input.dataType];
     MPSGraphTensor* onePlusX = [g additionWithPrimaryTensor:input secondaryTensor:one name:nil];
     return [g logarithmWithTensor:onePlusX name:nil];
@@ -138,6 +228,21 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
         if (denseAttr.isSplat()) {
             auto elemType = denseAttr.getElementType();
             double scalarValue = 0.0;
+
+            // Complex splat: extract real and imaginary parts separately.
+            if (auto complexType = mlir::dyn_cast<mlir::ComplexType>(elemType)) {
+                auto complexVal = denseAttr.getSplatValue<std::complex<float>>();
+                double realPart = complexVal.real();
+                double imagPart = complexVal.imag();
+                if (shape.count == 0) {
+                    return [g constantWithRealPart:realPart imaginaryPart:imagPart dataType:dtype];
+                } else {
+                    return [g constantWithRealPart:realPart
+                                     imaginaryPart:imagPart
+                                             shape:shape
+                                          dataType:dtype];
+                }
+            }
 
             if (elemType.isF32()) {
                 scalarValue = denseAttr.getSplatValue<float>();

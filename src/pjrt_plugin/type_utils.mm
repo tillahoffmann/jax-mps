@@ -4,30 +4,34 @@ namespace jax_mps {
 
 MPSDataType PjrtDtypeToMps(int dtype) {
     switch (dtype) {
-        case kPjrtF32:
+        case PJRT_Buffer_Type_F32:
             return MPSDataTypeFloat32;
-        case kPjrtF16:
+        case PJRT_Buffer_Type_F16:
             return MPSDataTypeFloat16;
-        case kPjrtBF16:
+        case PJRT_Buffer_Type_BF16:
             return MPSDataTypeBFloat16;
-        case kPjrtS32:
+        case PJRT_Buffer_Type_S32:
             return MPSDataTypeInt32;
-        case kPjrtS64:
+        case PJRT_Buffer_Type_S64:
             return MPSDataTypeInt64;
-        case kPjrtU32:
+        case PJRT_Buffer_Type_U32:
             return MPSDataTypeUInt32;
-        case kPjrtU64:
+        case PJRT_Buffer_Type_U64:
             return MPSDataTypeUInt64;
-        case kPjrtS8:
+        case PJRT_Buffer_Type_S8:
             return MPSDataTypeInt8;
-        case kPjrtU8:
+        case PJRT_Buffer_Type_U8:
             return MPSDataTypeUInt8;
-        case kPjrtS16:
+        case PJRT_Buffer_Type_S16:
             return MPSDataTypeInt16;
-        case kPjrtU16:
+        case PJRT_Buffer_Type_U16:
             return MPSDataTypeUInt16;
-        case kPjrtPred:
+        case PJRT_Buffer_Type_PRED:
             return MPSDataTypeBool;
+        case PJRT_Buffer_Type_C64:
+            return MPSDataTypeComplexFloat32;
+        case PJRT_Buffer_Type_C128:
+            return MPSDataTypeComplexFloat32;  // MPS has no complex float64
         default:
             return MPSDataTypeInvalid;
     }
@@ -36,29 +40,31 @@ MPSDataType PjrtDtypeToMps(int dtype) {
 int MpsToPjrtDtype(MPSDataType mps_type) {
     switch (mps_type) {
         case MPSDataTypeFloat32:
-            return kPjrtF32;
+            return PJRT_Buffer_Type_F32;
         case MPSDataTypeFloat16:
-            return kPjrtF16;
+            return PJRT_Buffer_Type_F16;
         case MPSDataTypeBFloat16:
-            return kPjrtBF16;
+            return PJRT_Buffer_Type_BF16;
         case MPSDataTypeInt32:
-            return kPjrtS32;
+            return PJRT_Buffer_Type_S32;
         case MPSDataTypeInt64:
-            return kPjrtS64;
+            return PJRT_Buffer_Type_S64;
         case MPSDataTypeUInt32:
-            return kPjrtU32;
+            return PJRT_Buffer_Type_U32;
         case MPSDataTypeUInt64:
-            return kPjrtU64;
+            return PJRT_Buffer_Type_U64;
         case MPSDataTypeInt8:
-            return kPjrtS8;
+            return PJRT_Buffer_Type_S8;
         case MPSDataTypeUInt8:
-            return kPjrtU8;
+            return PJRT_Buffer_Type_U8;
         case MPSDataTypeInt16:
-            return kPjrtS16;
+            return PJRT_Buffer_Type_S16;
         case MPSDataTypeUInt16:
-            return kPjrtU16;
+            return PJRT_Buffer_Type_U16;
         case MPSDataTypeBool:
-            return kPjrtPred;
+            return PJRT_Buffer_Type_PRED;
+        case MPSDataTypeComplexFloat32:
+            return PJRT_Buffer_Type_C64;
         default:
             return -1;
     }
@@ -71,6 +77,15 @@ MPSDataType MlirTypeToMps(mlir::Type type) {
         return MPSDataTypeFloat16;
     if (type.isBF16())
         return MPSDataTypeBFloat16;
+
+    if (auto complexType = mlir::dyn_cast<mlir::ComplexType>(type)) {
+        mlir::Type elemType = complexType.getElementType();
+        if (elemType.isF32() || elemType.isF64())
+            return MPSDataTypeComplexFloat32;
+        if (elemType.isF16())
+            return MPSDataTypeComplexFloat16;
+        return MPSDataTypeInvalid;
+    }
 
     if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type)) {
         unsigned width = intType.getWidth();
@@ -93,28 +108,37 @@ MPSDataType MlirTypeToMps(mlir::Type type) {
 
 int MlirTypeToPjrtDtype(mlir::Type elemType) {
     if (elemType.isF32())
-        return kPjrtF32;
+        return PJRT_Buffer_Type_F32;
     if (elemType.isF16())
-        return kPjrtF16;
+        return PJRT_Buffer_Type_F16;
     if (elemType.isBF16())
-        return kPjrtBF16;
+        return PJRT_Buffer_Type_BF16;
     if (elemType.isF64())
-        return kPjrtF64;
+        return PJRT_Buffer_Type_F64;
+
+    if (auto complexType = mlir::dyn_cast<mlir::ComplexType>(elemType)) {
+        mlir::Type inner = complexType.getElementType();
+        if (inner.isF32())
+            return PJRT_Buffer_Type_C64;
+        if (inner.isF64())
+            return PJRT_Buffer_Type_C128;
+        return -1;
+    }
 
     if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
         unsigned width = intType.getWidth();
         bool isUnsigned = intType.isUnsigned();
 
         if (width == 1)
-            return kPjrtPred;
+            return PJRT_Buffer_Type_PRED;
         if (width == 8)
-            return isUnsigned ? kPjrtU8 : kPjrtS8;
+            return isUnsigned ? PJRT_Buffer_Type_U8 : PJRT_Buffer_Type_S8;
         if (width == 16)
-            return isUnsigned ? kPjrtU16 : kPjrtS16;
+            return isUnsigned ? PJRT_Buffer_Type_U16 : PJRT_Buffer_Type_S16;
         if (width == 32)
-            return isUnsigned ? kPjrtU32 : kPjrtS32;
+            return isUnsigned ? PJRT_Buffer_Type_U32 : PJRT_Buffer_Type_S32;
         if (width == 64)
-            return isUnsigned ? kPjrtU64 : kPjrtS64;
+            return isUnsigned ? PJRT_Buffer_Type_U64 : PJRT_Buffer_Type_S64;
     }
 
     return -1;
