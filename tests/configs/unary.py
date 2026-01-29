@@ -57,6 +57,7 @@ def make_unary_op_configs():
     yield from [
         OperationTestConfig(jnp.ceil, numpy.random.standard_normal((17,))),
         OperationTestConfig(jnp.floor, numpy.random.standard_normal((17,))),
+        OperationTestConfig(jnp.round, numpy.random.standard_normal((17,))),
     ]
 
     # Ops that don't trivially generalize across real/complex.
