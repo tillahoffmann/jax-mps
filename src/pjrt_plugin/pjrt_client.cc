@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "pjrt_plugin/issue_url.h"
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/pjrt_types.h"
 #include "pjrt_plugin/stablehlo_parser.h"
@@ -201,15 +202,7 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
 
     // Check for unsupported operations discovered during parsing
     if (!parsed_module.unsupported_ops.empty()) {
-        std::string unsupported_list;
-        for (size_t i = 0; i < parsed_module.unsupported_ops.size(); i++) {
-            if (i > 0)
-                unsupported_list += ", ";
-            unsupported_list += parsed_module.unsupported_ops[i];
-        }
-        return MakeError("Program contains unsupported StableHLO operations: " + unsupported_list +
-                         ". "
-                         "The MPS backend does not yet implement these operations.");
+        return MakeError(jax_mps::UnsupportedOpsMessage(parsed_module.unsupported_ops));
     }
 
     // Compile the ParsedModule to MPS executable (takes ownership)

@@ -1,0 +1,20 @@
+name: Missing operation
+description: Request support for a StableHLO/CHLO operation that is not yet implemented.
+labels: ["missing op"]
+body:
+  - type: input
+    id: op-name
+    attributes:
+      label: Operation name
+      description: The StableHLO or CHLO operation name from the error message.
+      placeholder: "stablehlo.example"
+    validations:
+      required: true
+  - type: textarea
+    id: code-snippet
+    attributes:
+      label: Code to reproduce
+      description: A minimal code snippet that triggers the missing operation error.
+      render: python
+    validations:
+      required: true
