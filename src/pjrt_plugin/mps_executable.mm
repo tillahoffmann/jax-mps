@@ -6,6 +6,7 @@
 
 #include <unordered_map>
 
+#import "pjrt_plugin/issue_url.h"
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/mps_client.h"
 #import "pjrt_plugin/mps_device.h"
@@ -164,12 +165,10 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         // Look up handler in registry
         OpHandler handler = OpRegistry::Find(op_name);
         if (!handler) {
-            std::string supported = OpRegistry::ListRegistered();
-            return ProcessResult::Error(
-                "Unsupported operation: '" + op_name +
-                "'. The MPS backend does not have a handler for this operation. "
-                "Supported operations: " +
-                supported);
+            return ProcessResult::Error(UnsupportedOpsMessage({op_name}) +
+                                        "\n\n"
+                                        "Supported operations: " +
+                                        OpRegistry::ListRegistered());
         }
 
         // Check for multi-result operations (not yet supported)

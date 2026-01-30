@@ -104,6 +104,25 @@ def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
         jax.tree.map_with_path(assert_allclose_with_path, *results)
 
 
+def test_unsupported_op_error_message(jit: bool) -> None:
+    """Check that unsupported-op errors link to the issue template and CONTRIBUTING.md."""
+    device = jax.devices("mps")[0]
+    with jax.default_device(device):
+        try:
+            # This is an obscure op. It's unlikely to be implemented, but this test may
+            # break if `clz` gets implemented.
+            func = jax.lax.clz
+            if jit:
+                func = jax.jit(func)
+            func(numpy.int32(7))
+        except Exception as exc:
+            message = str(exc)
+            assert "issues/new?template=missing-op.yml" in message
+            assert "CONTRIBUTING.md" in message
+        else:
+            pytest.skip("clz is now supported; test needs a new unregistered op")
+
+
 @pytest.fixture(autouse=True, scope="module")
 def assert_all_ops_tested():
     yield
