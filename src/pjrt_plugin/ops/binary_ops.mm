@@ -1,4 +1,5 @@
-// Binary operations: add, subtract, multiply, divide, maximum, minimum, dot
+// Binary operations: add, subtract, multiply, divide, maximum, minimum,
+// compare, select, clamp, next_after, dot, dot_general
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -100,5 +101,166 @@ static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, Valu
 }
 static bool _reg_dot_general =
     ::jax_mps::OpRegistry::Register("stablehlo.dot_general", Handle_dot_general);
+
+// Compare operation
+static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
+    if (!compareOp) {
+        MPS_LOG_ERROR(" Expected CompareOp\n");
+        return nullptr;
+    }
+
+    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
+    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
+    if (!lhs || !rhs)
+        return nullptr;
+
+    auto direction = compareOp.getComparisonDirection();
+    using Dir = mlir::stablehlo::ComparisonDirection;
+
+    switch (direction) {
+        case Dir::LT:
+            return [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::LE:
+            return [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::GT:
+            return [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::GE:
+            return [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::EQ:
+            return [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        case Dir::NE:
+            return [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        default:
+            MPS_LOG_ERROR(" Unknown compare direction\n");
+            return nullptr;
+    }
+}
+REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
+
+// Select operation (conditional selection: pred ? true_val : false_val)
+static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* pred = GetInputTensor(values, op, 0);
+    MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
+    MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
+    if (!pred || !onTrue || !onFalse)
+        return nullptr;
+
+    return [g selectWithPredicateTensor:pred
+                    truePredicateTensor:onTrue
+                   falsePredicateTensor:onFalse
+                                   name:nil];
+}
+REGISTER_MPS_OP("stablehlo.select", Handle_select);
+
+// Clamp operation: clamp(min, x, max)
+static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
+    MPSGraphTensor* operand = GetInputTensor(values, op, 1);
+    MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
+    if (!minVal || !operand || !maxVal)
+        return nullptr;
+
+    return [g clampWithTensor:operand minValueTensor:minVal maxValueTensor:maxVal name:nil];
+}
+REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
+
+// next_after(x, y) - returns the next representable floating point value from x towards y
+// Implementation follows IEEE 754 nextafter semantics:
+// 1. If x == y, return y
+// 2. If x or y is NaN, return NaN
+// 3. If x == 0, return smallest subnormal with sign of y
+// 4. Otherwise, treat x as integer bits and increment/decrement based on direction
+static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* x = GetInputTensor(values, op, 0);
+    MPSGraphTensor* y = GetInputTensor(values, op, 1);
+    if (!x || !y)
+        return nullptr;
+
+    MPSDataType dtype = x.dataType;
+
+    // Handle scalar tensors - MPS reinterpretCast doesn't support rank-0
+    NSArray<NSNumber*>* xShape = x.shape;
+    bool isScalar = (xShape.count == 0);
+    if (isScalar) {
+        x = [g reshapeTensor:x withShape:@[@1] name:nil];
+        y = [g reshapeTensor:y withShape:@[@1] name:nil];
+    }
+
+    // Constants
+    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:dtype];
+    MPSGraphTensor* one_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* neg_one_int = [g constantWithScalar:-1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_positive_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_negative_int = [g constantWithScalar:0x80000001 dataType:MPSDataTypeInt32];
+
+    // Bitcast x to int32 (reinterpret bits)
+    MPSGraphTensor* x_as_int = [g reinterpretCastTensor:x toType:MPSDataTypeInt32 name:nil];
+
+    // Check if x == y
+    MPSGraphTensor* x_eq_y = [g equalWithPrimaryTensor:x secondaryTensor:y name:nil];
+
+    // Check if x is zero
+    MPSGraphTensor* x_is_zero = [g equalWithPrimaryTensor:x secondaryTensor:zero name:nil];
+
+    // Check if y > 0 (to determine direction when x == 0)
+    MPSGraphTensor* y_gt_zero = [g greaterThanWithPrimaryTensor:y secondaryTensor:zero name:nil];
+
+    // When x == 0, return smallest positive or negative subnormal
+    MPSGraphTensor* zero_result_int = [g selectWithPredicateTensor:y_gt_zero
+                                               truePredicateTensor:min_positive_int
+                                              falsePredicateTensor:min_negative_int
+                                                              name:nil];
+    MPSGraphTensor* zero_result = [g reinterpretCastTensor:zero_result_int toType:dtype name:nil];
+
+    // For non-zero x, determine direction and increment/decrement
+    // If x > 0 and y > x, or x < 0 and y > x: increment (add 1 to int representation)
+    // If x > 0 and y < x, or x < 0 and y < x: decrement (subtract 1 from int representation)
+    MPSGraphTensor* y_gt_x = [g greaterThanWithPrimaryTensor:y secondaryTensor:x name:nil];
+
+    // x > 0
+    MPSGraphTensor* x_gt_zero = [g greaterThanWithPrimaryTensor:x secondaryTensor:zero name:nil];
+
+    // Determine if we should increment the int representation
+    // Increment when: (x > 0 && y > x) || (x < 0 && y < x)
+    // Which simplifies to: (x > 0) == (y > x)
+    MPSGraphTensor* should_increment = [g equalWithPrimaryTensor:x_gt_zero
+                                                 secondaryTensor:y_gt_x
+                                                            name:nil];
+
+    // Compute the delta (+1 or -1)
+    MPSGraphTensor* delta = [g selectWithPredicateTensor:should_increment
+                                     truePredicateTensor:one_int
+                                    falsePredicateTensor:neg_one_int
+                                                    name:nil];
+
+    // Add delta to x_as_int
+    MPSGraphTensor* result_int = [g additionWithPrimaryTensor:x_as_int
+                                              secondaryTensor:delta
+                                                         name:nil];
+
+    // Bitcast back to float
+    MPSGraphTensor* non_zero_result = [g reinterpretCastTensor:result_int toType:dtype name:nil];
+
+    // Select between zero and non-zero cases
+    MPSGraphTensor* non_equal_result = [g selectWithPredicateTensor:x_is_zero
+                                                truePredicateTensor:zero_result
+                                               falsePredicateTensor:non_zero_result
+                                                               name:nil];
+
+    // If x == y, return y; otherwise return the computed result
+    MPSGraphTensor* result = [g selectWithPredicateTensor:x_eq_y
+                                      truePredicateTensor:y
+                                     falsePredicateTensor:non_equal_result
+                                                     name:nil];
+
+    // Reshape back to scalar if needed
+    if (isScalar) {
+        result = [g reshapeTensor:result withShape:@[] name:nil];
+    }
+
+    return result;
+}
+REGISTER_MPS_OP("chlo.next_after", Handle_next_after);
 
 }  // namespace jax_mps

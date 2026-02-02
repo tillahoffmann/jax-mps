@@ -1,4 +1,5 @@
-// Shape operations: broadcast, reshape, convert, slice, iota, etc.
+// Shape operations: broadcast, reshape, convert, slice, iota, constant,
+// concatenate, custom_call, etc.
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -263,7 +264,137 @@ static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, 
 }
 REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
 
-// Custom call - handle specific JAX custom operations
+// Constant creation - creates a constant tensor from MLIR constant op
+static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
+    if (!constantOp) {
+        MPS_LOG_ERROR(" Expected ConstantOp\n");
+        return nullptr;
+    }
+
+    MPSDataType dtype = GetResultMpsType(op);
+    if (dtype == MPSDataTypeInvalid) {
+        MPS_LOG_ERROR(" Invalid dtype for constant operation\n");
+        return nullptr;
+    }
+
+    NSArray<NSNumber*>* shape = GetOutputShape(op);
+    auto value = constantOp.getValue();
+
+    // Check for empty tensor (any dimension is 0)
+    // MPSGraph doesn't support empty tensors, so create a minimal [1] tensor instead
+    // The scatter handler will detect empty indices based on MLIR types and handle appropriately
+    bool isEmpty = false;
+    for (NSNumber* dim in shape) {
+        if ([dim integerValue] == 0) {
+            isEmpty = true;
+            break;
+        }
+    }
+    if (isEmpty) {
+        // Create a minimal tensor with shape [1] and a dummy value
+        // This is safe because operations that use this tensor will detect
+        // empty dimensions from the MLIR types and not actually use the tensor values
+        return [g constantWithScalar:0 shape:@[@1] dataType:dtype];
+    }
+
+    if (auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(value)) {
+        // Check if it's a splat (single value broadcast to all elements)
+        if (denseAttr.isSplat()) {
+            auto elemType = denseAttr.getElementType();
+            double scalarValue = 0.0;
+
+            // Complex splat: extract real and imaginary parts separately.
+            if (auto complexType = mlir::dyn_cast<mlir::ComplexType>(elemType)) {
+                auto complexVal = denseAttr.getSplatValue<std::complex<float>>();
+                double realPart = complexVal.real();
+                double imagPart = complexVal.imag();
+                if (shape.count == 0) {
+                    return [g constantWithRealPart:realPart imaginaryPart:imagPart dataType:dtype];
+                } else {
+                    return [g constantWithRealPart:realPart
+                                     imaginaryPart:imagPart
+                                             shape:shape
+                                          dataType:dtype];
+                }
+            }
+
+            if (elemType.isF32()) {
+                scalarValue = denseAttr.getSplatValue<float>();
+            } else if (elemType.isF64()) {
+                scalarValue = denseAttr.getSplatValue<double>();
+            } else if (elemType.isF16()) {
+                auto apVal = denseAttr.getSplatValue<llvm::APFloat>();
+                scalarValue = apVal.convertToFloat();
+            } else if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+                auto apInt = denseAttr.getSplatValue<llvm::APInt>();
+                // For signless integers (the default in MLIR/StableHLO), use sign-extend
+                // to preserve the two's complement representation.
+                // Only use zero-extend for explicitly unsigned types.
+                if (intType.isUnsigned()) {
+                    scalarValue = static_cast<double>(apInt.getZExtValue());
+                } else {
+                    // Signless or signed - use sign-extend
+                    scalarValue = static_cast<double>(apInt.getSExtValue());
+                }
+            }
+
+            if (shape.count == 0) {
+                // True scalar
+                return [g constantWithScalar:scalarValue dataType:dtype];
+            } else {
+                // Splat to shape
+                return [g constantWithScalar:scalarValue shape:shape dataType:dtype];
+            }
+        } else {
+            // Non-splat dense constant - use raw data
+            auto rawData = denseAttr.getRawData();
+            NSData* data = [NSData dataWithBytes:rawData.data() length:rawData.size()];
+            return [g constantWithData:data shape:shape dataType:dtype];
+        }
+    }
+
+    MPS_LOG_ERROR(" Constant operation has unsupported value type\n");
+    return nullptr;
+}
+REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
+
+// Concatenate - joins tensors along a dimension
+static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
+    if (!concatOp) {
+        MPS_LOG_ERROR(" Expected ConcatenateOp\n");
+        return nullptr;
+    }
+
+    // Gather all input tensors
+    NSMutableArray<MPSGraphTensor*>* input_tensors = [NSMutableArray array];
+    for (mlir::Value operand : op->getOperands()) {
+        MPSGraphTensor* tensor = GetTensor(values, operand);
+        if (tensor) {
+            [input_tensors addObject:tensor];
+        }
+    }
+
+    if (input_tensors.count == 0) {
+        MPS_LOG_ERROR(" Concatenate operation has no valid inputs\n");
+        return nullptr;
+    }
+
+    // Get the concatenate dimension from the op
+    NSInteger dimension = static_cast<NSInteger>(concatOp.getDimension());
+
+    return [g concatTensors:input_tensors dimension:dimension name:nil];
+}
+REGISTER_MPS_OP("stablehlo.concatenate", Handle_concatenate);
+
+// Sharding is a marker used by JAX for partitioning - just pass through the input
+static MPSGraphTensor* Handle_sharding(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    return GetInputTensor(values, op, 0);
+}
+REGISTER_CUSTOM_CALL_TARGET("Sharding", Handle_sharding);
+
+// Custom call - generic dispatcher using CustomCallRegistry
 static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op);
     if (!customCallOp) {
@@ -273,82 +404,11 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
 
     std::string target = customCallOp.getCallTargetName().str();
 
-    // Sharding is a marker used by JAX for partitioning - just pass through the input
-    if (target == "Sharding") {
-        return GetInputTensor(values, op, 0);
+    auto handler = CustomCallRegistry::Find(target);
+    if (handler) {
+        return handler(g, op, values);
     }
 
-    // cu_threefry2x32 - Threefry RNG core operation
-    if (target == "cu_threefry2x32") {
-        MPS_LOG_ERROR("Custom call 'cu_threefry2x32' is not yet implemented\n");
-        return nullptr;
-    }
-
-    // mhlo.erf - Error function
-    if (target == "mhlo.erf") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g erfWithTensor:input name:nil];
-    }
-
-    // mhlo.asin - Arcsine
-    if (target == "mhlo.asin") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g asinWithTensor:input name:nil];
-    }
-
-    // mhlo.acos - Arccosine
-    if (target == "mhlo.acos") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g acosWithTensor:input name:nil];
-    }
-
-    // mhlo.sinh - Hyperbolic sine
-    if (target == "mhlo.sinh") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g sinhWithTensor:input name:nil];
-    }
-
-    // mhlo.cosh - Hyperbolic cosine
-    if (target == "mhlo.cosh") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g coshWithTensor:input name:nil];
-    }
-
-    // mhlo.asinh - Inverse hyperbolic sine
-    if (target == "mhlo.asinh") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g asinhWithTensor:input name:nil];
-    }
-
-    // mhlo.acosh - Inverse hyperbolic cosine
-    if (target == "mhlo.acosh") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g acoshWithTensor:input name:nil];
-    }
-
-    // mhlo.atanh - Inverse hyperbolic tangent
-    if (target == "mhlo.atanh") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g atanhWithTensor:input name:nil];
-    }
-
-    // Unknown custom call
     MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;
 }

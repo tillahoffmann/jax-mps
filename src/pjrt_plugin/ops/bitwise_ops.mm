@@ -1,5 +1,4 @@
 // Bitwise operations: and, or, xor, shift_left, shift_right_logical
-// Also includes concatenate which is needed for RNG
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -97,34 +96,5 @@ static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* 
     return HandleShiftOp(g, op, values, /*isLeftShift=*/false);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
-
-// Concatenate - joins tensors along a dimension
-static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
-    if (!concatOp) {
-        MPS_LOG_ERROR(" Expected ConcatenateOp\n");
-        return nullptr;
-    }
-
-    // Gather all input tensors
-    NSMutableArray<MPSGraphTensor*>* input_tensors = [NSMutableArray array];
-    for (mlir::Value operand : op->getOperands()) {
-        MPSGraphTensor* tensor = GetTensor(values, operand);
-        if (tensor) {
-            [input_tensors addObject:tensor];
-        }
-    }
-
-    if (input_tensors.count == 0) {
-        MPS_LOG_ERROR(" Concatenate operation has no valid inputs\n");
-        return nullptr;
-    }
-
-    // Get the concatenate dimension from the op
-    NSInteger dimension = static_cast<NSInteger>(concatOp.getDimension());
-
-    return [g concatTensors:input_tensors dimension:dimension name:nil];
-}
-REGISTER_MPS_OP("stablehlo.concatenate", Handle_concatenate);
 
 }  // namespace jax_mps
