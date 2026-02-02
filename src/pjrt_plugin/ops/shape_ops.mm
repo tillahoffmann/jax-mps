@@ -1,4 +1,5 @@
-// Shape operations: broadcast, reshape, convert, slice, iota, etc.
+// Shape operations: broadcast, reshape, convert, slice, concatenate,
+// custom_call, etc.
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -200,35 +201,6 @@ static MPSGraphTensor* Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Va
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
 
-// Iota - create an array of indices
-static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op);
-    if (!iotaOp) {
-        MPS_LOG_ERROR("Expected IotaOp\n");
-        return nullptr;
-    }
-
-    MPSDataType dtype = GetResultMpsType(op);
-    if (dtype == MPSDataTypeInvalid) {
-        MPS_LOG_ERROR("Invalid dtype for iota operation\n");
-        return nullptr;
-    }
-
-    NSArray<NSNumber*>* shape = GetOutputShape(op);
-    int64_t iotaDim = iotaOp.getIotaDimension();
-
-    // Create a coordinate tensor along the iota dimension
-    MPSGraphTensor* result = [g coordinateAlongAxis:(NSInteger)iotaDim withShape:shape name:nil];
-
-    // Cast to the target type if needed
-    if (result.dataType != dtype) {
-        result = [g castTensor:result toType:dtype name:nil];
-    }
-
-    return result;
-}
-REGISTER_MPS_OP("stablehlo.iota", Handle_iota);
-
 // Bitcast convert - reinterpret bits as a different type
 static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
@@ -263,7 +235,42 @@ static MPSGraphTensor* Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, 
 }
 REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
 
-// Custom call - handle specific JAX custom operations
+// Concatenate - joins tensors along a dimension
+static MPSGraphTensor* Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
+    if (!concatOp) {
+        MPS_LOG_ERROR(" Expected ConcatenateOp\n");
+        return nullptr;
+    }
+
+    // Gather all input tensors
+    NSMutableArray<MPSGraphTensor*>* input_tensors = [NSMutableArray array];
+    for (mlir::Value operand : op->getOperands()) {
+        MPSGraphTensor* tensor = GetTensor(values, operand);
+        if (tensor) {
+            [input_tensors addObject:tensor];
+        }
+    }
+
+    if (input_tensors.count == 0) {
+        MPS_LOG_ERROR(" Concatenate operation has no valid inputs\n");
+        return nullptr;
+    }
+
+    // Get the concatenate dimension from the op
+    NSInteger dimension = static_cast<NSInteger>(concatOp.getDimension());
+
+    return [g concatTensors:input_tensors dimension:dimension name:nil];
+}
+REGISTER_MPS_OP("stablehlo.concatenate", Handle_concatenate);
+
+// Sharding is a marker used by JAX for partitioning - just pass through the input
+static MPSGraphTensor* Handle_sharding(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    return GetInputTensor(values, op, 0);
+}
+REGISTER_CUSTOM_CALL_TARGET("Sharding", Handle_sharding);
+
+// Custom call - generic dispatcher using CustomCallRegistry
 static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op);
     if (!customCallOp) {
@@ -273,26 +280,11 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
 
     std::string target = customCallOp.getCallTargetName().str();
 
-    // Sharding is a marker used by JAX for partitioning - just pass through the input
-    if (target == "Sharding") {
-        return GetInputTensor(values, op, 0);
+    auto handler = CustomCallRegistry::Find(target);
+    if (handler) {
+        return handler(g, op, values);
     }
 
-    // cu_threefry2x32 - Threefry RNG core operation
-    if (target == "cu_threefry2x32") {
-        MPS_LOG_ERROR("Custom call 'cu_threefry2x32' is not yet implemented\n");
-        return nullptr;
-    }
-
-    // mhlo.erf - Error function
-    if (target == "mhlo.erf") {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input)
-            return nullptr;
-        return [g erfWithTensor:input name:nil];
-    }
-
-    // Unknown custom call
     MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;
 }

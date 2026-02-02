@@ -68,6 +68,38 @@ def make_unary_op_configs():
         ),
         OperationTestConfig(lax.rsqrt, numpy.random.gamma(5, size=(17,))),
         OperationTestConfig(
+            jnp.arcsin,
+            numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.arccos,
+            numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.sinh,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.cosh,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.arcsinh,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.arccosh,
+            (1 + numpy.random.gamma(5, size=(17,))).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.arctanh,
+            numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.cbrt,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
             special.erfinv,
             numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),

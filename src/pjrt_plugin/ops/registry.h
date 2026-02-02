@@ -68,6 +68,27 @@ private:
     }
 };
 
+// Global custom-call-target registry - custom call targets register themselves at static init time
+class CustomCallRegistry {
+public:
+    static bool Register(const char* target, OpHandler handler) {
+        GetMutableHandlers()[target] = handler;
+        return true;
+    }
+
+    static OpHandler Find(const std::string& target) {
+        auto& handlers = GetMutableHandlers();
+        auto it = handlers.find(target);
+        return it != handlers.end() ? it->second : nullptr;
+    }
+
+private:
+    static std::unordered_map<std::string, OpHandler>& GetMutableHandlers() {
+        static std::unordered_map<std::string, OpHandler> handlers;
+        return handlers;
+    }
+};
+
 // Helper to get tensor by mlir::Value
 inline MPSGraphTensor* GetTensor(ValueMap& values, mlir::Value value) {
     auto it = values.find(value.getAsOpaquePointer());
@@ -163,5 +184,22 @@ inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
         return [g mps_method##WithTensor:input name:nil];                             \
     }                                                                                 \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
+
+// Macro for registering custom call targets
+#define REGISTER_CUSTOM_CALL_TARGET(target_name, handler_fn) \
+    static bool _cc_reg_##handler_fn =                       \
+        ::jax_mps::CustomCallRegistry::Register(target_name, handler_fn)
+
+// Convenience macro for simple unary custom call targets
+#define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)          \
+    static MPSGraphTensor* Handle_cc_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
+                                                  ::jax_mps::ValueMap& values) {    \
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);                      \
+        if (!input)                                                                 \
+            return nullptr;                                                         \
+        return [g mps_method##WithTensor:input name:nil];                           \
+    }                                                                               \
+    static bool _cc_reg_##reg_suffix =                                              \
+        ::jax_mps::CustomCallRegistry::Register(target_name, Handle_cc_##reg_suffix)
 
 }  // namespace jax_mps
