@@ -308,6 +308,22 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
         return [g acosWithTensor:input name:nil];
     }
 
+    // mhlo.sinh - Hyperbolic sine
+    if (target == "mhlo.sinh") {
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);
+        if (!input)
+            return nullptr;
+        return [g sinhWithTensor:input name:nil];
+    }
+
+    // mhlo.cosh - Hyperbolic cosine
+    if (target == "mhlo.cosh") {
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);
+        if (!input)
+            return nullptr;
+        return [g coshWithTensor:input name:nil];
+    }
+
     // Unknown custom call
     MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;

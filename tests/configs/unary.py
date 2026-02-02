@@ -76,6 +76,14 @@ def make_unary_op_configs():
             numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),
         OperationTestConfig(
+            jnp.sinh,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
+            jnp.cosh,
+            numpy.random.standard_normal((17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
             special.erfinv,
             numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),
