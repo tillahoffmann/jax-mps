@@ -367,6 +367,19 @@ static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap
 }
 REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
 
+// cbrt: cube root via sign(x) * pow(|x|, 1/3)
+static MPSGraphTensor* Handle_cbrt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+    MPSGraphTensor* abs_input = [g absoluteWithTensor:input name:nil];
+    MPSGraphTensor* third = [g constantWithScalar:(1.0 / 3.0) dataType:input.dataType];
+    MPSGraphTensor* result = [g powerWithPrimaryTensor:abs_input secondaryTensor:third name:nil];
+    MPSGraphTensor* sign = [g signWithTensor:input name:nil];
+    return [g multiplicationWithPrimaryTensor:sign secondaryTensor:result name:nil];
+}
+REGISTER_MPS_OP("stablehlo.cbrt", Handle_cbrt);
+
 // next_after(x, y) - returns the next representable floating point value from x towards y
 // Implementation follows IEEE 754 nextafter semantics:
 // 1. If x == y, return y
