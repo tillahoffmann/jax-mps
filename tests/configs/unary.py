@@ -92,6 +92,10 @@ def make_unary_op_configs():
             (1 + numpy.random.gamma(5, size=(17,))).astype(numpy.float32),
         ),
         OperationTestConfig(
+            jnp.arctanh,
+            numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+        ),
+        OperationTestConfig(
             special.erfinv,
             numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),
