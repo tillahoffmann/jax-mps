@@ -115,6 +115,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/unary_ops.mm
     src/pjrt_plugin/ops/shape_ops.mm
     src/pjrt_plugin/ops/bitwise_ops.mm
+    src/pjrt_plugin/ops/tensor_creation_ops.mm
     src/pjrt_plugin/ops/convolution_ops.mm
     src/pjrt_plugin/ops/reduction_ops.mm
     ${PROTO_SRCS}
