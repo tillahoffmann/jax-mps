@@ -118,6 +118,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/tensor_creation_ops.mm
     src/pjrt_plugin/ops/convolution_ops.mm
     src/pjrt_plugin/ops/reduction_ops.mm
+    src/pjrt_plugin/ops/linalg_ops.mm
     ${PROTO_SRCS}
 )
 
