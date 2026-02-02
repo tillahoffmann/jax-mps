@@ -80,6 +80,7 @@ REGISTER_MLIR_UNARY_OP("chlo.acos", acos, acos);
 REGISTER_MLIR_UNARY_OP("chlo.sinh", sinh, sinh);
 REGISTER_MLIR_UNARY_OP("chlo.cosh", cosh, cosh);
 REGISTER_MLIR_UNARY_OP("chlo.asinh", asinh, asinh);
+REGISTER_MLIR_UNARY_OP("chlo.acosh", acosh, acosh);
 
 // Complex part extraction (methods use OfTensor, not WithTensor, so can't use the macro)
 static MPSGraphTensor* Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {

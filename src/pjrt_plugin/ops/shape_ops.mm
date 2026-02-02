@@ -332,6 +332,14 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
         return [g asinhWithTensor:input name:nil];
     }
 
+    // mhlo.acosh - Inverse hyperbolic cosine
+    if (target == "mhlo.acosh") {
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);
+        if (!input)
+            return nullptr;
+        return [g acoshWithTensor:input name:nil];
+    }
+
     // Unknown custom call
     MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;
