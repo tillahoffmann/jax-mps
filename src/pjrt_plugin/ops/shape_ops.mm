@@ -300,6 +300,14 @@ static MPSGraphTensor* Handle_custom_call(MPSGraph* g, mlir::Operation* op, Valu
         return [g asinWithTensor:input name:nil];
     }
 
+    // mhlo.acos - Arccosine
+    if (target == "mhlo.acos") {
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);
+        if (!input)
+            return nullptr;
+        return [g acosWithTensor:input name:nil];
+    }
+
     // Unknown custom call
     MPS_LOG_ERROR("Unknown custom_call target: %s\n", target.c_str());
     return nullptr;

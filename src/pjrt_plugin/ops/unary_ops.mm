@@ -76,6 +76,7 @@ REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
 REGISTER_MLIR_UNARY_OP("stablehlo.sine", sin, sine);
 REGISTER_MLIR_UNARY_OP("stablehlo.tan", tan, tan);
 REGISTER_MLIR_UNARY_OP("chlo.asin", asin, asin);
+REGISTER_MLIR_UNARY_OP("chlo.acos", acos, acos);
 
 // Complex part extraction (methods use OfTensor, not WithTensor, so can't use the macro)
 static MPSGraphTensor* Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
