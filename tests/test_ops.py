@@ -142,6 +142,7 @@ def assert_all_ops_tested():
         re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),
         re.compile(r'OpRegistry::Register\("([^"]+)"'),
+        re.compile(r'REGISTER_NATIVE_MPS_OP\("([^"]+)"'),
     ]
 
     op_names = set()

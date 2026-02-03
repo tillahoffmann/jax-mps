@@ -1,6 +1,6 @@
 // Linear algebra operations: cholesky, triangular_solve
 // Uses native MPS kernels (MPSMatrixDecompositionCholesky, MPSMatrixSolveTriangular)
-// via the NativeOpRegistry, with compatibility entries in OpRegistry for the test scanner.
+// via the NativeOpRegistry.
 
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
@@ -67,9 +67,6 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     return outputBuffer;
 }
 
-// Register in both registries: OpRegistry (nil handler) for the test scanner,
-// NativeOpRegistry for actual execution.
-static bool _compat_cholesky = OpRegistry::Register("stablehlo.cholesky", nullptr);
 REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
 
 // ---------------------------------------------------------------------------
@@ -146,7 +143,6 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     return outputBuffer;
 }
 
-static bool _compat_tri_solve = OpRegistry::Register("stablehlo.triangular_solve", nullptr);
 REGISTER_NATIVE_MPS_OP("stablehlo.triangular_solve", NativeHandle_triangular_solve);
 
 }  // namespace jax_mps

@@ -30,8 +30,7 @@ namespace {
 const std::unordered_set<std::string>& getSupportedOps() {
     static std::unordered_set<std::string> supported = []() {
         auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Also include native ops (defensive – they are already registered in
-        // OpRegistry with a nil handler, but this ensures completeness).
+        // Also include native ops (registered in NativeOpRegistry, not OpRegistry).
         auto native_ops = jax_mps::NativeOpRegistry::GetRegisteredOps();
         ops.insert(native_ops.begin(), native_ops.end());
         // Add control flow ops that don't need handlers
