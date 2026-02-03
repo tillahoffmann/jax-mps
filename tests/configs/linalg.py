@@ -66,6 +66,13 @@ def make_linalg_op_configs():
                 numpy.random.standard_normal((n, 3)).astype(numpy.float32),
                 name=f"triangular_solve_lower_{n}x{n}_multi_rhs",
             )
+            # Upper triangular, multiple RHS columns.
+            yield OperationTestConfig(
+                _solve_triangular_upper,
+                _random_triangular(n, lower=False),
+                numpy.random.standard_normal((n, 3)).astype(numpy.float32),
+                name=f"triangular_solve_upper_{n}x{n}_multi_rhs",
+            )
 
         # Batched inputs: not yet supported by native MPS kernels.
         yield pytest.param(
