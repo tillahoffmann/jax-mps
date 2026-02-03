@@ -460,10 +460,9 @@ bool MpsExecutable::BuildExecutionPlan() {
                 ns.handler = handler;
                 ns.op = op;
                 for (mlir::Value operand : op->getOperands()) {
-                    ns.input_slots.push_back(value_to_slot[operand.getAsOpaquePointer()]);
+                    ns.input_slots.push_back(value_to_slot.at(operand.getAsOpaquePointer()));
                 }
-                // single-result assumption (checked earlier)
-                ns.output_slot = value_to_slot[op->getResult(0).getAsOpaquePointer()];
+                ns.output_slot = value_to_slot.at(op->getResult(0).getAsOpaquePointer());
 
                 plan->native_steps.push_back(ns);
                 plan->steps.push_back({Step::NATIVE, plan->native_steps.size() - 1});
@@ -556,7 +555,7 @@ bool MpsExecutable::BuildExecutionPlan() {
                     for (mlir::Value result : op->getResults()) {
                         void* key = result.getAsOpaquePointer();
                         if (value_to_slot.count(key)) {
-                            SlotId slot = value_to_slot[key];
+                            SlotId slot = value_to_slot.at(key);
                             MPSGraphTensor* tensor = values[key];
                             if (tensor) {
                                 gs.targets.push_back({slot, tensor});
