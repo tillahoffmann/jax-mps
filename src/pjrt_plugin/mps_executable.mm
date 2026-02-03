@@ -680,6 +680,27 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             slot_bufs[slot] = mtl_buf;
         }
 
+        // Pre-allocate intermediate MTLBuffers for graph-step target slots.
+        for (const auto& gs : plan_->graph_steps) {
+            for (const auto& [slot, tensor] : gs.targets) {
+                if (slot_bufs[slot])
+                    continue;  // Already assigned (input slot).
+                size_t byte_size = plan_->slots[slot].byte_size;
+                id<MTLBuffer> buf = [mtl_device newBufferWithLength:byte_size
+                                                            options:MTLResourceStorageModeShared];
+                if (!buf) {
+                    return ExecutionResult::Error("Failed to pre-allocate slot buffer of " +
+                                                  std::to_string(byte_size) + " bytes");
+                }
+                slot_bufs[slot] = buf;
+            }
+        }
+
+        // Single command buffer for all steps. MPSCommandBuffer is required by
+        // MPSGraph's encodeToCommandBuffer: and is accepted by native MPS kernels
+        // via id<MTLCommandBuffer> conformance.
+        MPSCommandBuffer* cmdBuf = [MPSCommandBuffer commandBufferFromCommandQueue:commandQueue];
+
         // Execute steps
         for (const auto& step : plan_->steps) {
             if (step.kind == Step::GRAPH) {
@@ -706,10 +727,6 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     [targets addObject:tensor];
                 }
 
-                // Encode graph to command buffer
-                MPSCommandBuffer* cmdBuf =
-                    [MPSCommandBuffer commandBufferFromCommandQueue:commandQueue];
-
                 NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
                 @try {
                     result_dict = [gs.graph encodeToCommandBuffer:cmdBuf
@@ -722,10 +739,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                                   std::string([[exception reason] UTF8String]));
                 }
 
-                [cmdBuf commit];
-                [cmdBuf waitUntilCompleted];
-
-                // Extract results into slot buffers
+                // Export results GPU-side into pre-allocated slot buffers.
                 for (size_t i = 0; i < gs.targets.size(); i++) {
                     SlotId slot = gs.targets[i].first;
                     MPSGraphTensor* target_tensor = gs.targets[i].second;
@@ -736,27 +750,19 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                             std::to_string(i));
                     }
 
-                    size_t byte_size = plan_->slots[slot].byte_size;
-                    id<MTLBuffer> buf =
-                        [mtl_device newBufferWithLength:byte_size
-                                                options:MTLResourceStorageModeShared];
-                    if (!buf) {
-                        return ExecutionResult::Error("Failed to allocate intermediate buffer of " +
-                                                      std::to_string(byte_size) + " bytes");
-                    }
-
                     MPSNDArray* ndarray = [result_data mpsndarray];
                     if (!ndarray) {
                         return ExecutionResult::Error("Failed to get MPSNDArray from result data");
                     }
-                    [ndarray readBytes:buf.contents strideBytes:nil];
-                    slot_bufs[slot] = buf;
+                    [ndarray exportDataWithCommandBuffer:cmdBuf
+                                                toBuffer:slot_bufs[slot]
+                                     destinationDataType:plan_->slots[slot].dtype
+                                                  offset:0
+                                              rowStrides:nil];
                 }
             } else {
                 // ----- Native step -----
                 auto& ns = plan_->native_steps[step.index];
-
-                id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
 
                 std::vector<id<MTLBuffer>> input_bufs;
                 for (auto slot : ns.input_slots) {
@@ -764,12 +770,21 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 }
 
                 id<MTLBuffer> output = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
-
-                [cmdBuf commit];
-                [cmdBuf waitUntilCompleted];
+                if (!output) {
+                    return ExecutionResult::Error("Native op handler returned nil");
+                }
 
                 slot_bufs[ns.output_slot] = output;
             }
+        }
+
+        // Commit and wait for all GPU work to complete.
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            NSString* desc = cmdBuf.error ? cmdBuf.error.localizedDescription : @"unknown error";
+            return ExecutionResult::Error("Metal command buffer error: " +
+                                          std::string([desc UTF8String]));
         }
 
         // Build output MpsBuffers
