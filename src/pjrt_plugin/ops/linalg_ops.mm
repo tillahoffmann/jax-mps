@@ -29,6 +29,10 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
 
     auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     auto shape = resultType.getShape();
+    if (shape.size() != 2) {
+        MPS_LOG_ERROR("cholesky: batched inputs not yet supported (got rank %zu)\n", shape.size());
+        return nil;
+    }
     int64_t n = shape[shape.size() - 1];
 
     MPSDataType mps_dtype = MlirTypeToMps(resultType.getElementType());
@@ -91,6 +95,11 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
 
     auto aType = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType());
     auto bType = mlir::cast<mlir::RankedTensorType>(op->getOperand(1).getType());
+    if (aType.getShape().size() != 2 || bType.getShape().size() != 2) {
+        MPS_LOG_ERROR("triangular_solve: batched inputs not yet supported (got ranks %zu, %zu)\n",
+                      aType.getShape().size(), bType.getShape().size());
+        return nil;
+    }
     auto bShape = bType.getShape();
 
     int64_t n = aType.getShape().back();
