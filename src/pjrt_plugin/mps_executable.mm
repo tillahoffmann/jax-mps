@@ -456,6 +456,12 @@ bool MpsExecutable::BuildExecutionPlan() {
                 std::string op_name = op->getName().getStringRef().str();
                 NativeOpHandler handler = NativeOpRegistry::Find(op_name);
 
+                if (op->getNumResults() != 1) {
+                    error_ = "Native op '" + op_name + "' must have exactly one result, got " +
+                             std::to_string(op->getNumResults());
+                    return false;
+                }
+
                 NativeStep ns;
                 ns.handler = handler;
                 ns.op = op;
