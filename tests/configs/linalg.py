@@ -12,9 +12,20 @@ def _random_posdef(n):
     return A @ A.T + n * numpy.eye(n, dtype=numpy.float32)
 
 
-def _solve_triangular(L, B):
-    """Wrapper exercising stablehlo.triangular_solve via jax.scipy."""
+def _solve_triangular_lower(L, B):
     return solve_triangular(L, B, lower=True)
+
+
+def _solve_triangular_upper(U, B):
+    return solve_triangular(U, B, lower=False)
+
+
+def _random_triangular(n, lower=True):
+    """Generate a random well-conditioned triangular matrix."""
+    M = numpy.random.standard_normal((n, n)).astype(numpy.float32)
+    L = numpy.tril(M) if lower else numpy.triu(M)
+    numpy.fill_diagonal(L, numpy.abs(numpy.diag(L)) + 1)
+    return L
 
 
 def make_linalg_op_configs():
@@ -26,15 +37,34 @@ def make_linalg_op_configs():
                 name=f"cholesky_{n}x{n}",
             )
 
+        # Cholesky on a non-positive-definite matrix (should match CPU NaN behavior).
+        yield OperationTestConfig(
+            jnp.linalg.cholesky,
+            numpy.array([[-1, 0], [0, 1]], dtype=numpy.float32),
+            name="cholesky_non_posdef",
+        )
+
         for n in [2, 3, 4]:
-            L = numpy.tril(numpy.random.standard_normal((n, n)).astype(numpy.float32))
-            numpy.fill_diagonal(L, numpy.abs(numpy.diag(L)) + 1)
-            B = numpy.random.standard_normal((n, 1)).astype(numpy.float32)
+            # Lower triangular, single RHS column.
             yield OperationTestConfig(
-                _solve_triangular,
-                L,
-                B,
-                name=f"triangular_solve_{n}x{n}",
+                _solve_triangular_lower,
+                _random_triangular(n, lower=True),
+                numpy.random.standard_normal((n, 1)).astype(numpy.float32),
+                name=f"triangular_solve_lower_{n}x{n}",
+            )
+            # Upper triangular, single RHS column.
+            yield OperationTestConfig(
+                _solve_triangular_upper,
+                _random_triangular(n, lower=False),
+                numpy.random.standard_normal((n, 1)).astype(numpy.float32),
+                name=f"triangular_solve_upper_{n}x{n}",
+            )
+            # Lower triangular, multiple RHS columns.
+            yield OperationTestConfig(
+                _solve_triangular_lower,
+                _random_triangular(n, lower=True),
+                numpy.random.standard_normal((n, 3)).astype(numpy.float32),
+                name=f"triangular_solve_lower_{n}x{n}_multi_rhs",
             )
 
         # Batched inputs: not yet supported by native MPS kernels.
