@@ -702,6 +702,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         MPSCommandBuffer* cmdBuf = [MPSCommandBuffer commandBufferFromCommandQueue:commandQueue];
 
         // Execute steps
+        std::string step_error;
         for (const auto& step : plan_->steps) {
             if (step.kind == Step::GRAPH) {
                 auto& gs = plan_->graph_steps[step.index];
@@ -711,8 +712,9 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     [NSMutableDictionary dictionary];
                 for (auto& [slot, tensor] : gs.feeds) {
                     if (!slot_bufs[slot]) {
-                        return ExecutionResult::Error("Slot buffer " + std::to_string(slot) +
-                                                      " is nil during feed construction");
+                        step_error = "Slot buffer " + std::to_string(slot) +
+                                     " is nil during feed construction";
+                        break;
                     }
                     MPSGraphTensorData* data =
                         [[MPSGraphTensorData alloc] initWithMTLBuffer:slot_bufs[slot]
@@ -720,6 +722,8 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                                              dataType:tensor.dataType];
                     feeds[tensor] = data;
                 }
+                if (!step_error.empty())
+                    break;
 
                 // Build target tensors array
                 NSMutableArray<MPSGraphTensor*>* targets = [NSMutableArray array];
@@ -735,8 +739,9 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                                  targetOperations:nil
                                               executionDescriptor:nil];
                 } @catch (NSException* exception) {
-                    return ExecutionResult::Error("MPS graph execution failed: " +
-                                                  std::string([[exception reason] UTF8String]));
+                    step_error = "MPS graph execution failed: " +
+                                 std::string([[exception reason] UTF8String]);
+                    break;
                 }
 
                 // Export results GPU-side into pre-allocated slot buffers.
@@ -745,14 +750,15 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     MPSGraphTensor* target_tensor = gs.targets[i].second;
                     MPSGraphTensorData* result_data = result_dict[target_tensor];
                     if (!result_data) {
-                        return ExecutionResult::Error(
-                            "MPS graph execution produced no result for output " +
-                            std::to_string(i));
+                        step_error = "MPS graph execution produced no result for output " +
+                                     std::to_string(i);
+                        break;
                     }
 
                     MPSNDArray* ndarray = [result_data mpsndarray];
                     if (!ndarray) {
-                        return ExecutionResult::Error("Failed to get MPSNDArray from result data");
+                        step_error = "Failed to get MPSNDArray from result data";
+                        break;
                     }
                     [ndarray exportDataWithCommandBuffer:cmdBuf
                                                 toBuffer:slot_bufs[slot]
@@ -760,6 +766,8 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                                   offset:0
                                               rowStrides:nil];
                 }
+                if (!step_error.empty())
+                    break;
             } else {
                 // ----- Native step -----
                 auto& ns = plan_->native_steps[step.index];
@@ -771,16 +779,21 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
 
                 id<MTLBuffer> output = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
                 if (!output) {
-                    return ExecutionResult::Error("Native op handler returned nil");
+                    step_error = "Native op handler returned nil";
+                    break;
                 }
 
                 slot_bufs[ns.output_slot] = output;
             }
         }
 
-        // Commit and wait for all GPU work to complete.
+        // Always commit — releasing an uncommitted MPSCommandBuffer may abort.
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
+
+        if (!step_error.empty()) {
+            return ExecutionResult::Error(step_error);
+        }
         if (cmdBuf.status == MTLCommandBufferStatusError) {
             NSString* desc = cmdBuf.error ? cmdBuf.error.localizedDescription : @"unknown error";
             return ExecutionResult::Error("Metal command buffer error: " +
