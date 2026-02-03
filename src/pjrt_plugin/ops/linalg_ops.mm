@@ -84,6 +84,11 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     }
     int64_t n = shape[shape.size() - 1];
 
+    if (!resultType.getElementType().isF32()) {
+        MPS_LOG_ERROR("cholesky: only float32 is supported (got unsupported dtype)\n");
+        return nil;
+    }
+
     MPSDataType mps_dtype = MlirTypeToMps(resultType.getElementType());
     int pjrt_dtype = MlirTypeToPjrtDtype(resultType.getElementType());
     size_t elem_size = DtypeByteSize(pjrt_dtype);
@@ -208,6 +213,11 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     int64_t n = aType.getShape().back();
     int64_t bRows = bShape[bShape.size() - 2];
     int64_t bCols = bShape[bShape.size() - 1];
+
+    if (!bType.getElementType().isF32()) {
+        MPS_LOG_ERROR("triangular_solve: only float32 is supported (got unsupported dtype)\n");
+        return nil;
+    }
 
     MPSDataType mps_dtype = MlirTypeToMps(bType.getElementType());
     int pjrt_dtype = MlirTypeToPjrtDtype(bType.getElementType());
