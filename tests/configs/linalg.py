@@ -23,7 +23,6 @@ def make_linalg_op_configs():
             yield OperationTestConfig(
                 jnp.linalg.cholesky,
                 _random_posdef(n),
-                differentiable_argnums=(),
                 name=f"cholesky_{n}x{n}",
             )
 
@@ -34,6 +33,5 @@ def make_linalg_op_configs():
                 _solve_triangular,
                 A,
                 B,
-                differentiable_argnums=(),
                 name=f"triangular_solve_{n}x{n}",
             )

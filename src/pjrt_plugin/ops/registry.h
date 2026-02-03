@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <string>
@@ -85,6 +86,42 @@ public:
 private:
     static std::unordered_map<std::string, OpHandler>& GetMutableHandlers() {
         static std::unordered_map<std::string, OpHandler> handlers;
+        return handlers;
+    }
+};
+
+// Native op handler: encodes work to a command buffer, returns output MTLBuffer.
+// Inputs are MTLBuffers corresponding to op->getOperands().
+using NativeOpHandler = id<MTLBuffer> (*)(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
+                                          mlir::Operation* op,
+                                          const std::vector<id<MTLBuffer>>& inputs);
+
+// Global native op registry - native ops register themselves at static init time
+class NativeOpRegistry {
+public:
+    static bool Register(const char* name, NativeOpHandler handler) {
+        GetMutableHandlers()[name] = handler;
+        return true;
+    }
+
+    static NativeOpHandler Find(const std::string& name) {
+        auto& handlers = GetMutableHandlers();
+        auto it = handlers.find(name);
+        return it != handlers.end() ? it->second : nullptr;
+    }
+
+    // Returns set of all registered native operation names
+    static std::unordered_set<std::string> GetRegisteredOps() {
+        std::unordered_set<std::string> ops;
+        for (const auto& pair : GetMutableHandlers()) {
+            ops.insert(pair.first);
+        }
+        return ops;
+    }
+
+private:
+    static std::unordered_map<std::string, NativeOpHandler>& GetMutableHandlers() {
+        static std::unordered_map<std::string, NativeOpHandler> handlers;
         return handlers;
     }
 };
@@ -201,5 +238,10 @@ inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
     }                                                                               \
     static bool _cc_reg_##reg_suffix =                                              \
         ::jax_mps::CustomCallRegistry::Register(target_name, Handle_cc_##reg_suffix)
+
+// Macro for registering native ops
+#define REGISTER_NATIVE_MPS_OP(mlir_op_name, handler_fn) \
+    static bool _native_reg_##handler_fn =               \
+        ::jax_mps::NativeOpRegistry::Register(mlir_op_name, handler_fn)
 
 }  // namespace jax_mps

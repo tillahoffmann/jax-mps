@@ -2,10 +2,14 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <unordered_map>
+#include <unordered_set>
 
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
 #import "pjrt_plugin/issue_url.h"
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/mps_client.h"
@@ -14,6 +18,50 @@
 #import "pjrt_plugin/stablehlo_parser.h"
 
 namespace jax_mps {
+
+// ---------------------------------------------------------------------------
+// ExecutionPlan types (full definition, opaque in header)
+// ---------------------------------------------------------------------------
+
+using SlotId = int;
+
+struct SlotInfo {
+    NSArray<NSNumber*>* shape;
+    MPSDataType dtype;
+    size_t byte_size;
+};
+
+struct GraphStep {
+    MPSGraph* graph;
+    std::vector<std::pair<SlotId, MPSGraphTensor*>> feeds;    // slot -> placeholder
+    std::vector<std::pair<SlotId, MPSGraphTensor*>> targets;  // slot -> target tensor
+};
+
+struct NativeStep {
+    NativeOpHandler handler;
+    mlir::Operation* op;
+    std::vector<SlotId> input_slots;
+    SlotId output_slot;
+};
+
+struct Step {
+    enum Kind { GRAPH, NATIVE } kind;
+    size_t index;  // Index into graph_steps or native_steps
+};
+
+struct ExecutionPlan {
+    std::vector<Step> steps;
+    std::vector<GraphStep> graph_steps;
+    std::vector<NativeStep> native_steps;
+    std::vector<SlotId> input_slots;   // function arg slots
+    std::vector<SlotId> output_slots;  // return value slots
+    std::vector<mlir::Type> return_types;
+    std::vector<SlotInfo> slots;
+};
+
+// ---------------------------------------------------------------------------
+// Constructor / Destructor
+// ---------------------------------------------------------------------------
 
 MpsExecutable::MpsExecutable(MpsClient* client, mps::ParsedModule module)
     : client_(client), name_("main") {
@@ -38,16 +86,12 @@ MpsExecutable::MpsExecutable(MpsClient* client, mps::ParsedModule module)
 }
 
 MpsExecutable::~MpsExecutable() {
-    // MLIR context and module are automatically cleaned up via unique_ptr/OwningOpRef
-    // Release the cached graph (graph owns all its tensors)
-    if (cached_graph_) {
-        MPSGraph* graph = (__bridge_transfer MPSGraph*)cached_graph_;
-        (void)graph;  // ARC will release
-        cached_graph_ = nullptr;
-    }
-    // Note: cached_placeholders_ and cached_targets_ point to tensors owned by the graph,
-    // so we don't release them separately - they'll be freed when the graph is freed.
+    // plan_ is destroyed by unique_ptr; ARC releases the ObjC objects inside.
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 // Helper to get output shape from MLIR type
 static NSArray<NSNumber*>* GetShapeFromType(mlir::Type type) {
@@ -62,6 +106,24 @@ static NSArray<NSNumber*>* GetShapeFromType(mlir::Type type) {
     }
     return shape;
 }
+
+// Compute byte size from a ranked tensor type.
+static size_t ByteSizeFromType(mlir::Type type) {
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+    if (!tensorType)
+        return 0;
+    int pjrt_dtype = MlirTypeToPjrtDtype(tensorType.getElementType());
+    size_t elem_size = DtypeByteSize(pjrt_dtype);
+    size_t total = elem_size;
+    for (int64_t dim : tensorType.getShape()) {
+        total *= dim;
+    }
+    return total;
+}
+
+// ---------------------------------------------------------------------------
+// Graph-segment helpers (unchanged from original processCallOp / processOperations)
+// ---------------------------------------------------------------------------
 
 // Result type for processOperations - can be an error or return values
 struct ProcessResult {
@@ -192,8 +254,12 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
     return result;
 }
 
-bool MpsExecutable::BuildGraph() {
-    if (graph_built_)
+// ---------------------------------------------------------------------------
+// BuildExecutionPlan
+// ---------------------------------------------------------------------------
+
+bool MpsExecutable::BuildExecutionPlan() {
+    if (plan_built_)
         return true;
 
     @autoreleasepool {
@@ -202,89 +268,327 @@ bool MpsExecutable::BuildGraph() {
             return false;
         }
 
-        // Create and cache MPSGraph
-        MPSGraph* graph = [[MPSGraph alloc] init];
-        if (!graph) {
-            error_ = "Failed to create MPSGraph";
-            return false;
+        // Manually inline func.call ops whose callees contain native ops.
+        // JAX wraps ops like cholesky in private helper functions called via
+        // func.call – the segmentation below only walks the entry block, so
+        // native ops inside callees would be missed.  We splice the callee's
+        // operations directly into the entry block, avoiding the MLIR inliner
+        // pass (which requires DialectInlinerInterface on every dialect).
+        {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                mlir::Block& block = entry_func_.front();
+                for (auto it = block.begin(), end = block.end(); it != end; ++it) {
+                    auto callOp = mlir::dyn_cast<mlir::func::CallOp>(&*it);
+                    if (!callOp)
+                        continue;
+
+                    auto callee = module_->lookupSymbol<mlir::func::FuncOp>(callOp.getCallee());
+                    if (!callee || callee.empty())
+                        continue;
+
+                    // Only inline callees that contain native ops.
+                    bool has_native = false;
+                    callee.walk([&](mlir::Operation* inner) {
+                        if (NativeOpRegistry::Find(inner->getName().getStringRef().str()))
+                            has_native = true;
+                    });
+                    if (!has_native)
+                        continue;
+
+                    // Clone the callee's body into the caller.
+                    mlir::Block& calleeBlock = callee.front();
+                    mlir::IRMapping mapping;
+                    for (unsigned i = 0; i < calleeBlock.getNumArguments(); i++) {
+                        mapping.map(calleeBlock.getArgument(i), callOp.getOperand(i));
+                    }
+
+                    mlir::OpBuilder builder(callOp);
+                    for (auto& op : calleeBlock) {
+                        if (auto retOp = mlir::dyn_cast<mlir::func::ReturnOp>(&op)) {
+                            // Wire callee return values to call results.
+                            for (unsigned i = 0; i < callOp.getNumResults(); i++) {
+                                callOp.getResult(i).replaceAllUsesWith(
+                                    mapping.lookup(retOp.getOperand(i)));
+                            }
+                            continue;
+                        }
+                        builder.clone(op, mapping);
+                    }
+                    callOp.erase();
+                    changed = true;
+                    break;  // Restart – block iterators invalidated.
+                }
+            }
         }
 
-        // Value map for building the graph
-        ValueMap values;
+        auto plan = std::make_unique<ExecutionPlan>();
 
-        // Create placeholders for each function argument
-        size_t num_args = entry_func_.getNumArguments();
-        cached_placeholders_.resize(num_args);
+        mlir::Block& block = entry_func_.front();
 
-        for (size_t i = 0; i < num_args; i++) {
-            mlir::BlockArgument arg = entry_func_.getArgument(i);
-            NSArray<NSNumber*>* shape = GetShapeFromType(arg.getType());
-            if (!shape) {
-                error_ = "Invalid argument type at index " + std::to_string(i);
-                return false;
+        // ------------------------------------------------------------------
+        // Pass 1 – segment the ops
+        // ------------------------------------------------------------------
+        struct SegmentInfo {
+            bool is_native;
+            std::vector<mlir::Operation*> ops;
+        };
+
+        std::vector<SegmentInfo> segments;
+        SegmentInfo current_segment{false, {}};
+        mlir::func::ReturnOp returnOp = nullptr;
+
+        for (mlir::Operation& operation : block) {
+            mlir::Operation* op = &operation;
+
+            if (auto ret = mlir::dyn_cast<mlir::func::ReturnOp>(op)) {
+                returnOp = ret;
+                continue;
             }
 
-            // Get dtype from MLIR type
-            auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(arg.getType());
-            MPSDataType mps_dtype =
-                MlirTypeToPjrtDtype(tensorType.getElementType()) >= 0
-                    ? PjrtDtypeToMps(MlirTypeToPjrtDtype(tensorType.getElementType()))
-                    : MPSDataTypeFloat32;
+            std::string op_name = op->getName().getStringRef().str();
+            NativeOpHandler native_handler = NativeOpRegistry::Find(op_name);
 
-            NSString* argName = [NSString stringWithFormat:@"arg%zu", i];
-            MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
-                                                             dataType:mps_dtype
-                                                                 name:argName];
-
-            values[arg.getAsOpaquePointer()] = placeholder;
-            cached_placeholders_[i] = (__bridge void*)placeholder;  // Graph owns the tensor
-        }
-
-        // Process operations to build the graph
-        ProcessResult processResult;
-        @try {
-            mlir::Block& entryBlock = entry_func_.front();
-            processResult = processOperations(graph, entryBlock, values, *module_, 0);
-        } @catch (NSException* exception) {
-            error_ = "MPS graph build failed: " + std::string([[exception reason] UTF8String]);
-            return false;
-        }
-
-        if (!processResult.ok()) {
-            error_ = processResult.error;
-            return false;
-        }
-
-        // Cache target tensors and return types
-        for (const auto& ret_value : processResult.return_values) {
-            MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
-            if (!ret_tensor) {
-                error_ = "Return value not found in tensors";
-                return false;
+            if (native_handler) {
+                // Close current graph segment
+                if (!current_segment.ops.empty()) {
+                    segments.push_back(std::move(current_segment));
+                    current_segment = {false, {}};
+                }
+                // Native op gets its own segment
+                segments.push_back({true, {op}});
+            } else {
+                current_segment.ops.push_back(op);
             }
-
-            cached_targets_.push_back((__bridge void*)ret_tensor);  // Graph owns the tensor
-            cached_return_types_.push_back(ret_value.getType());
+        }
+        if (!current_segment.ops.empty()) {
+            segments.push_back(std::move(current_segment));
         }
 
-        // Cache the graph
-        cached_graph_ = (__bridge_retained void*)graph;
-        graph_built_ = true;
+        // ------------------------------------------------------------------
+        // Pass 1b – determine which values need materialised slots
+        // ------------------------------------------------------------------
+        // Build op → segment map
+        std::unordered_map<mlir::Operation*, int> op_to_seg;
+        for (int i = 0; i < (int)segments.size(); i++) {
+            for (auto* op : segments[i].ops) {
+                op_to_seg[op] = i;
+            }
+        }
+
+        // Slot allocation helper
+        std::unordered_map<void*, SlotId> value_to_slot;
+        auto getOrCreateSlot = [&](mlir::Value value) -> SlotId {
+            void* key = value.getAsOpaquePointer();
+            auto it = value_to_slot.find(key);
+            if (it != value_to_slot.end())
+                return it->second;
+
+            SlotId slot = (SlotId)plan->slots.size();
+            value_to_slot[key] = slot;
+
+            SlotInfo info;
+            info.shape = GetShapeFromType(value.getType());
+            auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
+            info.dtype =
+                tensorType ? MlirTypeToMps(tensorType.getElementType()) : MPSDataTypeFloat32;
+            info.byte_size = ByteSizeFromType(value.getType());
+            plan->slots.push_back(info);
+            return slot;
+        };
+
+        // Function arguments always get slots
+        for (unsigned i = 0; i < entry_func_.getNumArguments(); i++) {
+            auto arg = entry_func_.getArgument(i);
+            SlotId slot = getOrCreateSlot(arg);
+            plan->input_slots.push_back(slot);
+        }
+
+        // Return values always get slots
+        if (returnOp) {
+            for (mlir::Value operand : returnOp->getOperands()) {
+                SlotId slot = getOrCreateSlot(operand);
+                plan->output_slots.push_back(slot);
+                plan->return_types.push_back(operand.getType());
+            }
+        }
+
+        // Values that cross segment boundaries need slots
+        for (int seg_idx = 0; seg_idx < (int)segments.size(); seg_idx++) {
+            for (auto* op : segments[seg_idx].ops) {
+                // Check operands – if defined in a different segment, need a slot
+                for (mlir::Value operand : op->getOperands()) {
+                    auto* defOp = operand.getDefiningOp();
+                    if (!defOp)
+                        continue;  // block argument – already has a slot
+                    auto it = op_to_seg.find(defOp);
+                    if (it == op_to_seg.end() || it->second != seg_idx) {
+                        getOrCreateSlot(operand);
+                    }
+                }
+                // Check results – if used in a different segment (or by return)
+                for (mlir::Value result : op->getResults()) {
+                    for (auto* user : result.getUsers()) {
+                        if (mlir::isa<mlir::func::ReturnOp>(user)) {
+                            getOrCreateSlot(result);
+                            break;
+                        }
+                        auto it = op_to_seg.find(user);
+                        if (it == op_to_seg.end() || it->second != seg_idx) {
+                            getOrCreateSlot(result);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Pass 2 – build graph / native steps
+        // ------------------------------------------------------------------
+        for (int seg_idx = 0; seg_idx < (int)segments.size(); seg_idx++) {
+            auto& seg = segments[seg_idx];
+
+            if (seg.is_native) {
+                // ----- Native step -----
+                mlir::Operation* op = seg.ops[0];
+                std::string op_name = op->getName().getStringRef().str();
+                NativeOpHandler handler = NativeOpRegistry::Find(op_name);
+
+                NativeStep ns;
+                ns.handler = handler;
+                ns.op = op;
+                for (mlir::Value operand : op->getOperands()) {
+                    ns.input_slots.push_back(value_to_slot[operand.getAsOpaquePointer()]);
+                }
+                // single-result assumption (checked earlier)
+                ns.output_slot = value_to_slot[op->getResult(0).getAsOpaquePointer()];
+
+                plan->native_steps.push_back(ns);
+                plan->steps.push_back({Step::NATIVE, plan->native_steps.size() - 1});
+            } else {
+                // ----- Graph step -----
+                MPSGraph* graph = [[MPSGraph alloc] init];
+                if (!graph) {
+                    error_ = "Failed to create MPSGraph";
+                    return false;
+                }
+                ValueMap values;
+                GraphStep gs;
+                gs.graph = graph;
+
+                // Create placeholders for values entering this segment from outside.
+                // Values defined within this segment should NOT get placeholders.
+                std::unordered_set<mlir::Operation*> seg_ops_set(seg.ops.begin(), seg.ops.end());
+                std::unordered_set<void*> created_ph;
+                for (auto* op : seg.ops) {
+                    for (mlir::Value operand : op->getOperands()) {
+                        // Skip values produced within this segment.
+                        mlir::Operation* defOp = operand.getDefiningOp();
+                        if (defOp && seg_ops_set.count(defOp)) {
+                            continue;
+                        }
+
+                        void* key = operand.getAsOpaquePointer();
+                        auto slot_it = value_to_slot.find(key);
+                        if (slot_it != value_to_slot.end() && !created_ph.count(key)) {
+                            SlotId slot = slot_it->second;
+                            NSArray<NSNumber*>* shape = plan->slots[slot].shape;
+                            MPSDataType mps_dtype = plan->slots[slot].dtype;
+
+                            MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
+                                                                             dataType:mps_dtype
+                                                                                 name:nil];
+                            values[key] = placeholder;
+                            gs.feeds.push_back({slot, placeholder});
+                            created_ph.insert(key);
+                        }
+                    }
+                }
+
+                // Process ops within this segment
+                @try {
+                    for (auto* op : seg.ops) {
+                        std::string op_name = op->getName().getStringRef().str();
+
+                        if (auto callOp = mlir::dyn_cast<mlir::func::CallOp>(op)) {
+                            ProcessResult callResult =
+                                processCallOp(graph, callOp, values, *module_, 0);
+                            if (!callResult.ok()) {
+                                error_ = callResult.error;
+                                return false;
+                            }
+                            continue;
+                        }
+
+                        OpHandler handler = OpRegistry::Find(op_name);
+                        if (!handler) {
+                            error_ = UnsupportedOpsMessage({op_name}) +
+                                     "\n\nSupported operations: " + OpRegistry::ListRegistered();
+                            return false;
+                        }
+
+                        if (op->getNumResults() > 1) {
+                            error_ = "Operation '" + op_name +
+                                     "' has multiple results which is not yet supported";
+                            return false;
+                        }
+
+                        MPSGraphTensor* out = handler(graph, op, values);
+                        if (!out) {
+                            error_ = "Operation '" + op_name + "' handler returned null";
+                            return false;
+                        }
+
+                        if (op->getNumResults() > 0) {
+                            values[op->getResult(0).getAsOpaquePointer()] = out;
+                        }
+                    }
+                } @catch (NSException* exception) {
+                    error_ =
+                        "MPS graph build failed: " + std::string([[exception reason] UTF8String]);
+                    return false;
+                }
+
+                // Identify target values (values leaving this segment)
+                for (auto* op : seg.ops) {
+                    for (mlir::Value result : op->getResults()) {
+                        void* key = result.getAsOpaquePointer();
+                        if (value_to_slot.count(key)) {
+                            SlotId slot = value_to_slot[key];
+                            MPSGraphTensor* tensor = values[key];
+                            if (tensor) {
+                                gs.targets.push_back({slot, tensor});
+                            }
+                        }
+                    }
+                }
+
+                plan->graph_steps.push_back(gs);
+                plan->steps.push_back({Step::GRAPH, plan->graph_steps.size() - 1});
+            }
+        }
+
+        plan_ = std::move(plan);
+        plan_built_ = true;
     }
     return true;
 }
 
-ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, MpsDevice* device) {
-    ExecutionResult result;
+// ---------------------------------------------------------------------------
+// Execute
+// ---------------------------------------------------------------------------
 
+ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, MpsDevice* device) {
     // Check for compilation errors
     if (!valid_) {
         return ExecutionResult::Error("Cannot execute: compilation failed - " + error_);
     }
 
-    // Build graph on first execution (lazy initialization)
-    if (!graph_built_) {
-        if (!BuildGraph()) {
+    // Build plan on first execution (lazy initialization)
+    if (!plan_built_) {
+        if (!BuildExecutionPlan()) {
             return ExecutionResult::Error("Graph build failed: " + error_);
         }
     }
@@ -300,145 +604,215 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
         }
 
-        // Use cached graph
-        MPSGraph* graph = (__bridge MPSGraph*)cached_graph_;
-
-        // Create feeds dictionary from input buffers
-        NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds =
-            [NSMutableDictionary dictionary];
-
-        size_t num_args = cached_placeholders_.size();
+        // Input count check
+        size_t num_args = plan_->input_slots.size();
         if (inputs.size() < num_args) {
             return ExecutionResult::Error("Input count mismatch: expected " +
                                           std::to_string(num_args) + " inputs, got " +
                                           std::to_string(inputs.size()));
         }
 
-        for (size_t i = 0; i < num_args; i++) {
-            MpsBuffer* input = inputs[i];
-            if (!input) {
-                return ExecutionResult::Error("Null input buffer at index " + std::to_string(i));
+        // Handle identity functions (no steps, but outputs reference inputs)
+        if (plan_->steps.empty() && !plan_->output_slots.empty() && !inputs.empty()) {
+            ExecutionResult result;
+            for (size_t i = 0; i < plan_->output_slots.size(); i++) {
+                SlotId slot = plan_->output_slots[i];
+                // Find the input index that maps to this slot
+                int input_idx = -1;
+                for (size_t j = 0; j < plan_->input_slots.size(); j++) {
+                    if (plan_->input_slots[j] == slot) {
+                        input_idx = (int)j;
+                        break;
+                    }
+                }
+                if (input_idx < 0 || !inputs[input_idx]) {
+                    return ExecutionResult::Error("Identity function with unmapped output slot");
+                }
+                MpsBuffer* input = inputs[input_idx];
+                size_t byte_size = input->byte_size();
+                id<MTLBuffer> src = (__bridge id<MTLBuffer>)input->metal_buffer();
+                if (!src) {
+                    return ExecutionResult::Error("Identity function input has no Metal buffer");
+                }
+                id<MTLBuffer> dst = [mtl_device newBufferWithBytes:src.contents
+                                                            length:byte_size
+                                                           options:MTLResourceStorageModeShared];
+                if (!dst) {
+                    return ExecutionResult::Error("Failed to allocate buffer for identity output");
+                }
+
+                auto tensorType = mlir::cast<mlir::RankedTensorType>(plan_->return_types[i]);
+                std::vector<int64_t> dims(tensorType.getShape().begin(),
+                                          tensorType.getShape().end());
+                int dtype = MlirTypeToPjrtDtype(tensorType.getElementType());
+                result.buffers.push_back(
+                    std::make_unique<MpsBuffer>(device, (__bridge void*)dst, dtype, dims));
             }
-
-            MPSGraphTensor* placeholder = (__bridge MPSGraphTensor*)cached_placeholders_[i];
-            id<MTLBuffer> mtl_buffer = (__bridge id<MTLBuffer>)input->metal_buffer();
-            if (!mtl_buffer) {
-                return ExecutionResult::Error("Input buffer at index " + std::to_string(i) +
-                                              " has no Metal buffer");
-            }
-
-            // Get shape and dtype from placeholder
-            MPSGraphTensorData* tensor_data =
-                [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buffer
-                                                        shape:placeholder.shape
-                                                     dataType:placeholder.dataType];
-            feeds[placeholder] = tensor_data;
-        }
-
-        // Build target tensors array from cache
-        NSMutableArray<MPSGraphTensor*>* target_tensors = [NSMutableArray array];
-        for (void* p : cached_targets_) {
-            [target_tensors addObject:(__bridge MPSGraphTensor*)p];
-        }
-
-        // Handle identity functions (no operations)
-        if (target_tensors.count == 0 && !inputs.empty()) {
-            MpsBuffer* input = inputs[0];
-            if (!input) {
-                return ExecutionResult::Error("Identity function with null input");
-            }
-            const auto& dims = input->dimensions();
-            size_t byte_size = input->byte_size();
-            id<MTLBuffer> input_buffer = (__bridge id<MTLBuffer>)input->metal_buffer();
-            if (!input_buffer) {
-                return ExecutionResult::Error("Identity function input has no Metal buffer");
-            }
-
-            id<MTLBuffer> output_buffer =
-                [mtl_device newBufferWithBytes:input_buffer.contents
-                                        length:byte_size
-                                       options:MTLResourceStorageModeShared];
-            if (!output_buffer) {
-                return ExecutionResult::Error("Failed to allocate buffer for identity function");
-            }
-
-            auto buffer = std::make_unique<MpsBuffer>(device, (__bridge void*)output_buffer,
-                                                      input->dtype(), dims);
-            result.buffers.push_back(std::move(buffer));
             return result;
         }
 
-        // Function with no outputs (e.g., side-effect-only or token functions)
-        if (target_tensors.count == 0) {
-            return result;
+        // Function with no outputs
+        if (plan_->output_slots.empty()) {
+            return ExecutionResult{};
         }
 
-        // Get cached command queue from client
+        // Get command queue
         id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>)client_->command_queue();
         if (!commandQueue) {
             return ExecutionResult::Error("No Metal command queue available");
         }
 
-        // Execute the cached graph
-        NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
-        @try {
-            result_dict = [graph runWithMTLCommandQueue:commandQueue
-                                                  feeds:feeds
-                                          targetTensors:target_tensors
-                                       targetOperations:nil];
-        } @catch (NSException* exception) {
-            return ExecutionResult::Error("MPS graph execution failed: " +
-                                          std::string([[exception reason] UTF8String]));
+        // Allocate slot buffer array
+        std::vector<id<MTLBuffer>> slot_bufs(plan_->slots.size(), nil);
+
+        // Assign input buffers to input slots
+        for (size_t i = 0; i < num_args; i++) {
+            MpsBuffer* input = inputs[i];
+            if (!input) {
+                return ExecutionResult::Error("Null input buffer at index " + std::to_string(i));
+            }
+            id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)input->metal_buffer();
+            if (!mtl_buf) {
+                return ExecutionResult::Error("Input buffer at index " + std::to_string(i) +
+                                              " has no Metal buffer");
+            }
+            SlotId slot = plan_->input_slots[i];
+            slot_bufs[slot] = mtl_buf;
         }
 
-        // Process outputs using cached return types
-        for (size_t i = 0; i < target_tensors.count; i++) {
-            MPSGraphTensor* target = target_tensors[i];
-            MPSGraphTensorData* result_data = result_dict[target];
-            if (!result_data) {
-                return ExecutionResult::Error("MPS graph execution produced no result for output " +
-                                              std::to_string(i));
-            }
+        // Execute steps
+        for (const auto& step : plan_->steps) {
+            if (step.kind == Step::GRAPH) {
+                auto& gs = plan_->graph_steps[step.index];
 
-            std::vector<int64_t> result_shape;
-            for (NSNumber* dim in result_data.shape) {
-                result_shape.push_back([dim longLongValue]);
-            }
+                // Build feeds dictionary
+                NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds =
+                    [NSMutableDictionary dictionary];
+                for (auto& [slot, tensor] : gs.feeds) {
+                    if (!slot_bufs[slot]) {
+                        return ExecutionResult::Error("Slot buffer " + std::to_string(slot) +
+                                                      " is nil during feed construction");
+                    }
+                    MPSGraphTensorData* data =
+                        [[MPSGraphTensorData alloc] initWithMTLBuffer:slot_bufs[slot]
+                                                                shape:tensor.shape
+                                                             dataType:tensor.dataType];
+                    feeds[tensor] = data;
+                }
 
-            mlir::Type elemType =
-                mlir::cast<mlir::RankedTensorType>(cached_return_types_[i]).getElementType();
-            int output_dtype = MlirTypeToPjrtDtype(elemType);
-            if (output_dtype < 0) {
+                // Build target tensors array
+                NSMutableArray<MPSGraphTensor*>* targets = [NSMutableArray array];
+                for (auto& [slot, tensor] : gs.targets) {
+                    [targets addObject:tensor];
+                }
+
+                // Encode graph to command buffer
+                MPSCommandBuffer* cmdBuf =
+                    [MPSCommandBuffer commandBufferFromCommandQueue:commandQueue];
+
+                NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
+                @try {
+                    result_dict = [gs.graph encodeToCommandBuffer:cmdBuf
+                                                            feeds:feeds
+                                                    targetTensors:targets
+                                                 targetOperations:nil
+                                              executionDescriptor:nil];
+                } @catch (NSException* exception) {
+                    return ExecutionResult::Error("MPS graph execution failed: " +
+                                                  std::string([[exception reason] UTF8String]));
+                }
+
+                [cmdBuf commit];
+                [cmdBuf waitUntilCompleted];
+
+                // Extract results into slot buffers
+                for (size_t i = 0; i < gs.targets.size(); i++) {
+                    SlotId slot = gs.targets[i].first;
+                    MPSGraphTensor* target_tensor = gs.targets[i].second;
+                    MPSGraphTensorData* result_data = result_dict[target_tensor];
+                    if (!result_data) {
+                        return ExecutionResult::Error(
+                            "MPS graph execution produced no result for output " +
+                            std::to_string(i));
+                    }
+
+                    size_t byte_size = plan_->slots[slot].byte_size;
+                    id<MTLBuffer> buf =
+                        [mtl_device newBufferWithLength:byte_size
+                                                options:MTLResourceStorageModeShared];
+                    if (!buf) {
+                        return ExecutionResult::Error("Failed to allocate intermediate buffer of " +
+                                                      std::to_string(byte_size) + " bytes");
+                    }
+
+                    MPSNDArray* ndarray = [result_data mpsndarray];
+                    if (!ndarray) {
+                        return ExecutionResult::Error("Failed to get MPSNDArray from result data");
+                    }
+                    [ndarray readBytes:buf.contents strideBytes:nil];
+                    slot_bufs[slot] = buf;
+                }
+            } else {
+                // ----- Native step -----
+                auto& ns = plan_->native_steps[step.index];
+
+                id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
+
+                std::vector<id<MTLBuffer>> input_bufs;
+                for (auto slot : ns.input_slots) {
+                    input_bufs.push_back(slot_bufs[slot]);
+                }
+
+                id<MTLBuffer> output = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
+
+                [cmdBuf commit];
+                [cmdBuf waitUntilCompleted];
+
+                slot_bufs[ns.output_slot] = output;
+            }
+        }
+
+        // Build output MpsBuffers
+        ExecutionResult result;
+        for (size_t i = 0; i < plan_->output_slots.size(); i++) {
+            SlotId slot = plan_->output_slots[i];
+            id<MTLBuffer> buf = slot_bufs[slot];
+
+            auto tensorType = mlir::cast<mlir::RankedTensorType>(plan_->return_types[i]);
+            mlir::Type elemType = tensorType.getElementType();
+            int dtype = MlirTypeToPjrtDtype(elemType);
+            if (dtype < 0) {
                 return ExecutionResult::Error("Unsupported output type for result " +
                                               std::to_string(i));
             }
 
-            size_t byte_size = 1;
-            for (int64_t dim : result_shape) {
-                byte_size *= dim;
-            }
-            byte_size *= DtypeByteSize(output_dtype);
+            std::vector<int64_t> dims(tensorType.getShape().begin(), tensorType.getShape().end());
 
-            id<MTLBuffer> output_buffer =
-                [mtl_device newBufferWithLength:byte_size options:MTLResourceStorageModeShared];
-            if (!output_buffer) {
-                return ExecutionResult::Error("Failed to allocate output buffer of size " +
-                                              std::to_string(byte_size) + " bytes");
+            // If this slot came directly from an input (identity / pass-through), copy it.
+            bool is_input_slot = false;
+            for (auto in_slot : plan_->input_slots) {
+                if (in_slot == slot) {
+                    is_input_slot = true;
+                    break;
+                }
+            }
+            if (is_input_slot) {
+                size_t byte_size = plan_->slots[slot].byte_size;
+                id<MTLBuffer> copy = [mtl_device newBufferWithBytes:buf.contents
+                                                             length:byte_size
+                                                            options:MTLResourceStorageModeShared];
+                if (!copy) {
+                    return ExecutionResult::Error("Failed to allocate output buffer copy");
+                }
+                buf = copy;
             }
 
-            MPSNDArray* ndarray = [result_data mpsndarray];
-            if (!ndarray) {
-                return ExecutionResult::Error("Failed to get MPSNDArray from result data");
-            }
-            [ndarray readBytes:output_buffer.contents strideBytes:nil];
-
-            auto buffer = std::make_unique<MpsBuffer>(device, (__bridge void*)output_buffer,
-                                                      output_dtype, result_shape);
-            result.buffers.push_back(std::move(buffer));
+            result.buffers.push_back(
+                std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
         }
-    }
 
-    return result;
+        return result;
+    }
 }
 
 }  // namespace jax_mps

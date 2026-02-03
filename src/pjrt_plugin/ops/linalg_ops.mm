@@ -1,259 +1,152 @@
 // Linear algebra operations: cholesky, triangular_solve
+// Uses native MPS kernels (MPSMatrixDecompositionCholesky, MPSMatrixSolveTriangular)
+// via the NativeOpRegistry, with compatibility entries in OpRegistry for the test scanner.
 
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+
+#import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 
-// stablehlo.cholesky - Cholesky decomposition
-// Computes the lower (or upper) triangular Cholesky factor of a positive definite matrix.
-// Uses a column-by-column algorithm implemented with MPS Graph operations.
-// For an NxN matrix A, computes L such that A = L * L^T (lower=true) or A = U^T * U (lower=false).
-static MPSGraphTensor* Handle_cholesky(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+// ---------------------------------------------------------------------------
+// stablehlo.cholesky – native MPSMatrixDecompositionCholesky
+// ---------------------------------------------------------------------------
+
+static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
+                                           mlir::Operation* op,
+                                           const std::vector<id<MTLBuffer>>& inputs) {
     auto choleskyOp = mlir::dyn_cast<mlir::stablehlo::CholeskyOp>(op);
     if (!choleskyOp) {
-        MPS_LOG_ERROR("Expected CholeskyOp\n");
-        return nullptr;
+        MPS_LOG_ERROR("cholesky: expected CholeskyOp\n");
+        return nil;
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    if (!input) {
-        MPS_LOG_ERROR("cholesky: input tensor not found\n");
-        return nullptr;
-    }
-
-    // Get the 'lower' attribute (default true)
     bool lower = true;
     if (choleskyOp.getLowerAttr()) {
         lower = choleskyOp.getLower();
     }
 
-    // Get matrix dimensions
-    NSArray<NSNumber*>* shape = input.shape;
-    NSUInteger rank = shape.count;
-    if (rank < 2) {
-        MPS_LOG_ERROR("cholesky: input must be at least 2D\n");
-        return nullptr;
-    }
+    auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto shape = resultType.getShape();
+    int64_t n = shape[shape.size() - 1];
 
-    NSInteger n = [shape[rank - 1] integerValue];
-    NSInteger m = [shape[rank - 2] integerValue];
-    if (n != m) {
-        MPS_LOG_ERROR("cholesky: input must be square, got %ld x %ld\n", (long)m, (long)n);
-        return nullptr;
-    }
+    MPSDataType mps_dtype = MlirTypeToMps(resultType.getElementType());
+    int pjrt_dtype = MlirTypeToPjrtDtype(resultType.getElementType());
+    size_t elem_size = DtypeByteSize(pjrt_dtype);
+    NSUInteger rowBytes = (NSUInteger)(n * (int64_t)elem_size);
+    size_t byte_size = (size_t)(n * n) * elem_size;
 
-    if (n > 64) {
-        MPS_LOG_WARN("cholesky: large matrix (%ld x %ld) may be slow with column-by-column "
-                     "decomposition\n",
-                     (long)n, (long)n);
-    }
+    // Source matrix
+    MPSMatrixDescriptor* desc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)n
+                                                                      columns:(NSUInteger)n
+                                                                     rowBytes:rowBytes
+                                                                     dataType:mps_dtype];
+    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:inputs[0] descriptor:desc];
 
-    // Column-by-column Cholesky decomposition built as explicit graph operations.
-    // Algorithm (lower triangular):
-    // L[j,j] = sqrt(A[j,j] - sum(L[j,k]^2 for k=0..j-1))
-    // L[i,j] = (A[i,j] - sum(L[i,k]*L[j,k] for k=0..j-1)) / L[j,j]  for i > j
+    // Output buffer – zero-initialised so the unused triangle is clean.
+    id<MTLBuffer> outputBuffer = [device newBufferWithLength:byte_size
+                                                     options:MTLResourceStorageModeShared];
+    memset(outputBuffer.contents, 0, byte_size);
+    MPSMatrix* resultMatrix = [[MPSMatrix alloc] initWithBuffer:outputBuffer descriptor:desc];
 
-    MPSDataType dtype = input.dataType;
-    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:dtype];
+    // Status buffer
+    id<MTLBuffer> statusBuffer = [device newBufferWithLength:sizeof(int32_t)
+                                                     options:MTLResourceStorageModeShared];
 
-    // Initialize L as zeros with same shape as input
-    MPSGraphTensor* L = [g constantWithScalar:0.0 shape:shape dataType:dtype];
+    MPSMatrixDecompositionCholesky* cholesky =
+        [[MPSMatrixDecompositionCholesky alloc] initWithDevice:device
+                                                         lower:lower
+                                                         order:(NSUInteger)n];
 
-    // Coordinate tensors for element-wise masking
-    MPSGraphTensor* iota_row = [g coordinateAlongAxis:0 withShape:shape name:nil];
-    MPSGraphTensor* iota_col = [g coordinateAlongAxis:1 withShape:shape name:nil];
+    [cholesky encodeToCommandBuffer:cmdBuf
+                       sourceMatrix:sourceMatrix
+                       resultMatrix:resultMatrix
+                             status:statusBuffer];
 
-    for (NSInteger j = 0; j < n; j++) {
-        // Compute diagonal element L[j,j] = sqrt(A[j,j] - sum(L[j,k]^2 for k<j))
-        MPSGraphTensor* ajj = [g sliceTensor:input
-                                      starts:@[@(j), @(j)]
-                                        ends:@[@(j + 1), @(j + 1)]
-                                     strides:@[@1, @1]
-                                        name:nil];
-
-        MPSGraphTensor* sumSq = zero;
-        for (NSInteger k = 0; k < j; k++) {
-            MPSGraphTensor* ljk = [g sliceTensor:L
-                                          starts:@[@(j), @(k)]
-                                            ends:@[@(j + 1), @(k + 1)]
-                                         strides:@[@1, @1]
-                                            name:nil];
-            MPSGraphTensor* ljk_sq = [g multiplicationWithPrimaryTensor:ljk
-                                                        secondaryTensor:ljk
-                                                                   name:nil];
-            sumSq = [g additionWithPrimaryTensor:sumSq secondaryTensor:ljk_sq name:nil];
-        }
-
-        MPSGraphTensor* diagVal = [g subtractionWithPrimaryTensor:ajj
-                                                  secondaryTensor:sumSq
-                                                             name:nil];
-        diagVal = [g squareRootWithTensor:diagVal name:nil];
-
-        // Compute off-diagonal elements L[i,j] for i > j
-        for (NSInteger i = j + 1; i < n; i++) {
-            MPSGraphTensor* aij = [g sliceTensor:input
-                                          starts:@[@(i), @(j)]
-                                            ends:@[@(i + 1), @(j + 1)]
-                                         strides:@[@1, @1]
-                                            name:nil];
-
-            MPSGraphTensor* sumProd = zero;
-            for (NSInteger k = 0; k < j; k++) {
-                MPSGraphTensor* lik = [g sliceTensor:L
-                                              starts:@[@(i), @(k)]
-                                                ends:@[@(i + 1), @(k + 1)]
-                                             strides:@[@1, @1]
-                                                name:nil];
-                MPSGraphTensor* ljk = [g sliceTensor:L
-                                              starts:@[@(j), @(k)]
-                                                ends:@[@(j + 1), @(k + 1)]
-                                             strides:@[@1, @1]
-                                                name:nil];
-                MPSGraphTensor* prod = [g multiplicationWithPrimaryTensor:lik
-                                                          secondaryTensor:ljk
-                                                                     name:nil];
-                sumProd = [g additionWithPrimaryTensor:sumProd secondaryTensor:prod name:nil];
-            }
-
-            MPSGraphTensor* offDiagVal = [g subtractionWithPrimaryTensor:aij
-                                                         secondaryTensor:sumProd
-                                                                    name:nil];
-            offDiagVal = [g divisionWithPrimaryTensor:offDiagVal secondaryTensor:diagVal name:nil];
-
-            // Create mask for position (i, j) and update L
-            MPSGraphTensor* iConst = [g constantWithScalar:(double)i dataType:MPSDataTypeInt32];
-            MPSGraphTensor* jConst = [g constantWithScalar:(double)j dataType:MPSDataTypeInt32];
-            MPSGraphTensor* maskRow = [g equalWithPrimaryTensor:iota_row
-                                                secondaryTensor:iConst
-                                                           name:nil];
-            MPSGraphTensor* maskCol = [g equalWithPrimaryTensor:iota_col
-                                                secondaryTensor:jConst
-                                                           name:nil];
-            MPSGraphTensor* mask = [g logicalANDWithPrimaryTensor:maskRow
-                                                  secondaryTensor:maskCol
-                                                             name:nil];
-
-            MPSGraphTensor* valBroadcast = [g broadcastTensor:offDiagVal toShape:shape name:nil];
-            L = [g selectWithPredicateTensor:mask
-                         truePredicateTensor:valBroadcast
-                        falsePredicateTensor:L
-                                        name:nil];
-        }
-
-        // Set diagonal element L[j,j]
-        MPSGraphTensor* rowIdx = [g constantWithScalar:(double)j dataType:MPSDataTypeInt32];
-        MPSGraphTensor* colIdx = [g constantWithScalar:(double)j dataType:MPSDataTypeInt32];
-        MPSGraphTensor* maskDiagRow = [g equalWithPrimaryTensor:iota_row
-                                                secondaryTensor:rowIdx
-                                                           name:nil];
-        MPSGraphTensor* maskDiagCol = [g equalWithPrimaryTensor:iota_col
-                                                secondaryTensor:colIdx
-                                                           name:nil];
-        MPSGraphTensor* maskDiag = [g logicalANDWithPrimaryTensor:maskDiagRow
-                                                  secondaryTensor:maskDiagCol
-                                                             name:nil];
-        MPSGraphTensor* diagBroadcast = [g broadcastTensor:diagVal toShape:shape name:nil];
-        L = [g selectWithPredicateTensor:maskDiag
-                     truePredicateTensor:diagBroadcast
-                    falsePredicateTensor:L
-                                    name:nil];
-    }
-
-    if (!lower) {
-        // Transpose to get upper triangular
-        L = [g transposeTensor:L dimension:rank - 2 withDimension:rank - 1 name:nil];
-    }
-
-    return L;
+    return outputBuffer;
 }
-REGISTER_MPS_OP("stablehlo.cholesky", Handle_cholesky);
 
-// stablehlo.triangular_solve - Solve triangular linear systems
-// Solves op(A) * X = B or X * op(A) = B where A is triangular.
-// We implement this using A_inv = inverse(A), then X = A_inv * B (or B * A_inv).
-static MPSGraphTensor* Handle_triangular_solve(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+// Register in both registries: OpRegistry (nil handler) for the test scanner,
+// NativeOpRegistry for actual execution.
+static bool _compat_cholesky = OpRegistry::Register("stablehlo.cholesky", nullptr);
+REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
+
+// ---------------------------------------------------------------------------
+// stablehlo.triangular_solve – native MPSMatrixSolveTriangular
+// ---------------------------------------------------------------------------
+
+static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
+                                                   id<MTLCommandBuffer> cmdBuf, mlir::Operation* op,
+                                                   const std::vector<id<MTLBuffer>>& inputs) {
     auto triSolveOp = mlir::dyn_cast<mlir::stablehlo::TriangularSolveOp>(op);
     if (!triSolveOp) {
-        MPS_LOG_ERROR("Expected TriangularSolveOp\n");
-        return nullptr;
-    }
-
-    MPSGraphTensor* A = GetInputTensor(values, op, 0);
-    MPSGraphTensor* B = GetInputTensor(values, op, 1);
-    if (!A || !B) {
-        MPS_LOG_ERROR("triangular_solve: input tensors not found\n");
-        return nullptr;
+        MPS_LOG_ERROR("triangular_solve: expected TriangularSolveOp\n");
+        return nil;
     }
 
     bool leftSide = triSolveOp.getLeftSide();
     bool lower = triSolveOp.getLower();
     bool unitDiagonal = triSolveOp.getUnitDiagonal();
     auto transposeA = triSolveOp.getTransposeA();
+    bool transpose = (transposeA == mlir::stablehlo::Transpose::TRANSPOSE ||
+                      transposeA == mlir::stablehlo::Transpose::ADJOINT);
 
-    // Ensure A is properly triangular by zeroing out the other triangle
-    NSArray<NSNumber*>* aShape = A.shape;
-    NSUInteger rank = aShape.count;
+    auto aType = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+    auto bType = mlir::cast<mlir::RankedTensorType>(op->getOperand(1).getType());
+    auto bShape = bType.getShape();
 
-    // Create triangular mask using coordinate tensors
-    MPSGraphTensor* rowCoords = [g coordinateAlongAxis:(NSInteger)(rank - 2)
-                                             withShape:aShape
-                                                  name:nil];
-    MPSGraphTensor* colCoords = [g coordinateAlongAxis:(NSInteger)(rank - 1)
-                                             withShape:aShape
-                                                  name:nil];
+    int64_t n = aType.getShape().back();
+    int64_t bRows = bShape[bShape.size() - 2];
+    int64_t bCols = bShape[bShape.size() - 1];
 
-    MPSGraphTensor* triMask;
-    if (lower) {
-        // Lower triangular: row >= col
-        triMask = [g greaterThanOrEqualToWithPrimaryTensor:rowCoords
-                                           secondaryTensor:colCoords
-                                                      name:nil];
-    } else {
-        // Upper triangular: row <= col
-        triMask = [g lessThanOrEqualToWithPrimaryTensor:rowCoords
-                                        secondaryTensor:colCoords
-                                                   name:nil];
-    }
+    MPSDataType mps_dtype = MlirTypeToMps(bType.getElementType());
+    int pjrt_dtype = MlirTypeToPjrtDtype(bType.getElementType());
+    size_t elem_size = DtypeByteSize(pjrt_dtype);
 
-    MPSGraphTensor* zeroTensor = [g constantWithScalar:0.0 dataType:A.dataType];
-    MPSGraphTensor* zeroFull = [g broadcastTensor:zeroTensor toShape:aShape name:nil];
-    A = [g selectWithPredicateTensor:triMask
-                 truePredicateTensor:A
-                falsePredicateTensor:zeroFull
-                                name:nil];
+    // Number of right-hand sides depends on whether A is on the left or right.
+    NSUInteger nrhs = leftSide ? (NSUInteger)bCols : (NSUInteger)bRows;
 
-    // Handle unit diagonal: set diagonal to 1
-    if (unitDiagonal) {
-        MPSGraphTensor* diagMask = [g equalWithPrimaryTensor:rowCoords
-                                             secondaryTensor:colCoords
-                                                        name:nil];
-        MPSGraphTensor* oneTensor = [g constantWithScalar:1.0 dataType:A.dataType];
-        MPSGraphTensor* oneFull = [g broadcastTensor:oneTensor toShape:aShape name:nil];
-        A = [g selectWithPredicateTensor:diagMask
-                     truePredicateTensor:oneFull
-                    falsePredicateTensor:A
-                                    name:nil];
-    }
+    // Source matrix A (NxN)
+    NSUInteger aRowBytes = (NSUInteger)(n * (int64_t)elem_size);
+    MPSMatrixDescriptor* aDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)n
+                                                                       columns:(NSUInteger)n
+                                                                      rowBytes:aRowBytes
+                                                                      dataType:mps_dtype];
+    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:inputs[0] descriptor:aDesc];
 
-    // Apply transpose if needed
-    if (transposeA == mlir::stablehlo::Transpose::TRANSPOSE ||
-        transposeA == mlir::stablehlo::Transpose::ADJOINT) {
-        A = [g transposeTensor:A dimension:rank - 2 withDimension:rank - 1 name:nil];
-    }
+    // RHS matrix B and solution X (same shape)
+    NSUInteger bRowBytes = (NSUInteger)(bCols * (int64_t)elem_size);
+    MPSMatrixDescriptor* bDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)bRows
+                                                                       columns:(NSUInteger)bCols
+                                                                      rowBytes:bRowBytes
+                                                                      dataType:mps_dtype];
+    MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:inputs[1] descriptor:bDesc];
 
-    // Compute A_inv using MPS inverseOfTensor
-    MPSGraphTensor* A_inv = [g inverseOfTensor:A name:nil];
+    size_t byte_size = (size_t)(bRows * bCols) * elem_size;
+    id<MTLBuffer> outputBuffer = [device newBufferWithLength:byte_size
+                                                     options:MTLResourceStorageModeShared];
+    MPSMatrix* solutionMatrix = [[MPSMatrix alloc] initWithBuffer:outputBuffer descriptor:bDesc];
 
-    // Solve: if left_side, X = A_inv * B; if right_side, X = B * A_inv
-    MPSGraphTensor* result;
-    if (leftSide) {
-        result = [g matrixMultiplicationWithPrimaryTensor:A_inv secondaryTensor:B name:nil];
-    } else {
-        result = [g matrixMultiplicationWithPrimaryTensor:B secondaryTensor:A_inv name:nil];
-    }
+    MPSMatrixSolveTriangular* solver =
+        [[MPSMatrixSolveTriangular alloc] initWithDevice:device
+                                                   right:!leftSide
+                                                   upper:!lower
+                                               transpose:transpose
+                                                    unit:unitDiagonal
+                                                   order:(NSUInteger)n
+                                  numberOfRightHandSides:nrhs
+                                                   alpha:1.0];
 
-    return result;
+    [solver encodeToCommandBuffer:cmdBuf
+                     sourceMatrix:sourceMatrix
+              rightHandSideMatrix:rhsMatrix
+                   solutionMatrix:solutionMatrix];
+
+    return outputBuffer;
 }
-REGISTER_MPS_OP("stablehlo.triangular_solve", Handle_triangular_solve);
+
+static bool _compat_tri_solve = OpRegistry::Register("stablehlo.triangular_solve", nullptr);
+REGISTER_NATIVE_MPS_OP("stablehlo.triangular_solve", NativeHandle_triangular_solve);
 
 }  // namespace jax_mps
