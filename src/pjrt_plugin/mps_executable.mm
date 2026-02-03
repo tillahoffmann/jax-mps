@@ -122,7 +122,7 @@ static size_t ByteSizeFromType(mlir::Type type) {
 }
 
 // ---------------------------------------------------------------------------
-// Graph-segment helpers (unchanged from original processCallOp / processOperations)
+// Graph-segment helpers for processing ops within a single MPSGraph.
 // ---------------------------------------------------------------------------
 
 // Result type for processOperations - can be an error or return values
@@ -290,9 +290,12 @@ bool MpsExecutable::BuildExecutionPlan() {
 
                     // Only inline callees that contain native ops.
                     bool has_native = false;
-                    callee.walk([&](mlir::Operation* inner) {
-                        if (NativeOpRegistry::Find(inner->getName().getStringRef().str()))
+                    callee.walk([&](mlir::Operation* inner) -> mlir::WalkResult {
+                        if (NativeOpRegistry::Find(inner->getName().getStringRef().str())) {
                             has_native = true;
+                            return mlir::WalkResult::interrupt();
+                        }
+                        return mlir::WalkResult::advance();
                     });
                     if (!has_native)
                         continue;
