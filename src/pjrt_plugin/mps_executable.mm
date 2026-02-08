@@ -72,22 +72,51 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
 
 enum class ArgReduceKind { kUnknown, kMax, kMin };
 
+static bool IsBlockArg(mlir::Value value, mlir::Block& block, unsigned index) {
+    auto arg = mlir::dyn_cast<mlir::BlockArgument>(value);
+    return arg && arg.getOwner() == &block && arg.getArgNumber() == index;
+}
+
 static ArgReduceKind detectArgReduceKind(mlir::stablehlo::ReduceOp reduceOp) {
     if (reduceOp.getBody().empty()) {
         return ArgReduceKind::kUnknown;
     }
-    for (mlir::Operation& nestedOp : reduceOp.getBody().front()) {
+    mlir::Block& body = reduceOp.getBody().front();
+    if (body.getNumArguments() < 4) {
+        return ArgReduceKind::kUnknown;
+    }
+
+    for (mlir::Operation& nestedOp : body) {
         auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(&nestedOp);
         if (!compareOp) {
             continue;
         }
+
+        bool forwardValueCompare =
+            IsBlockArg(compareOp.getLhs(), body, 0) && IsBlockArg(compareOp.getRhs(), body, 2);
+        bool reversedValueCompare =
+            IsBlockArg(compareOp.getLhs(), body, 2) && IsBlockArg(compareOp.getRhs(), body, 0);
+        if (!forwardValueCompare && !reversedValueCompare) {
+            continue;
+        }
+
         auto dir = compareOp.getComparisonDirection();
-        if (dir == mlir::stablehlo::ComparisonDirection::GT) {
-            return ArgReduceKind::kMax;
+        bool lhsWins = false;
+        if (dir == mlir::stablehlo::ComparisonDirection::GT ||
+            dir == mlir::stablehlo::ComparisonDirection::GE) {
+            lhsWins = true;
+        } else if (dir == mlir::stablehlo::ComparisonDirection::LT ||
+                   dir == mlir::stablehlo::ComparisonDirection::LE) {
+            lhsWins = false;
+        } else {
+            continue;
         }
-        if (dir == mlir::stablehlo::ComparisonDirection::LT) {
-            return ArgReduceKind::kMin;
+
+        // If the compare operands are swapped, the max/min interpretation flips.
+        if (reversedValueCompare) {
+            lhsWins = !lhsWins;
         }
+        return lhsWins ? ArgReduceKind::kMax : ArgReduceKind::kMin;
     }
     return ArgReduceKind::kUnknown;
 }
