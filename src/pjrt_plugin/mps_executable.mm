@@ -4,8 +4,6 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
-#include <algorithm>
-#include <cctype>
 #include <unordered_map>
 
 #import "pjrt_plugin/issue_url.h"
@@ -307,10 +305,7 @@ static NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape, NSArray
 }
 
 static bool isTopKCustomCallTarget(const std::string& target) {
-    std::string lower = target;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return lower == "topk" || lower == "top_k";
+    return target == "stablehlo.dynamic_top_k";
 }
 
 static ProcessResult processTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
