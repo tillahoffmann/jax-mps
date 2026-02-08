@@ -44,9 +44,133 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     // Determine spatial rank
     size_t spatialRank = inputSpatialDims.size();
 
-    // Currently only support 2D convolutions
+    // 1D convolution support: lift to 2D with a singleton height dimension.
+    if (spatialRank == 1) {
+        if (batchGroupCount != 1) {
+            MPS_LOG_ERROR("1D convolution: batch_group_count != 1 not yet supported\n");
+            return nullptr;
+        }
+
+        int64_t strideW = 1;
+        if (windowStrides && windowStrides->size() >= 1) {
+            strideW = (*windowStrides)[0];
+        }
+
+        int64_t padLeft = 0, padRight = 0;
+        if (padding) {
+            auto paddingAttr = *padding;
+            if (paddingAttr.getNumElements() >= 2) {
+                auto paddingValues = paddingAttr.getValues<int64_t>();
+                padLeft = paddingValues[{0, 0}];
+                padRight = paddingValues[{0, 1}];
+            }
+        }
+
+        int64_t dilationW = 1;
+        if (rhsDilation && rhsDilation->size() >= 1) {
+            dilationW = (*rhsDilation)[0];
+        }
+
+        int64_t inputDilationW = 1;
+        if (lhsDilation && lhsDilation->size() >= 1) {
+            inputDilationW = (*lhsDilation)[0];
+        }
+        if (inputDilationW != 1) {
+            MPS_LOG_ERROR("1D transposed convolution (lhs_dilation != 1) not yet supported\n");
+            return nullptr;
+        }
+
+        // Reorder input to [B, F, S], then reshape to NCHW [B, F, 1, S].
+        NSMutableArray<NSNumber*>* inputPerm = [NSMutableArray arrayWithCapacity:3];
+        [inputPerm addObject:@(inputBatchDim)];
+        [inputPerm addObject:@(inputFeatureDim)];
+        [inputPerm addObject:@(inputSpatialDims[0])];
+        MPSGraphTensor* bfsInput = input;
+        if (!(inputBatchDim == 0 && inputFeatureDim == 1 && inputSpatialDims[0] == 2)) {
+            bfsInput = [g transposeTensor:input permutation:inputPerm name:nil];
+        }
+        NSArray<NSNumber*>* bfsShape = bfsInput.shape;
+        if (!bfsShape || bfsShape.count != 3) {
+            MPS_LOG_ERROR("1D convolution expects rank-3 input\n");
+            return nullptr;
+        }
+        MPSGraphTensor* convInput = [g reshapeTensor:bfsInput
+                                           withShape:@[
+                                               bfsShape[0], bfsShape[1], @1, bfsShape[2]
+                                           ]
+                                                name:nil];
+
+        // Reorder kernel to [O, I, K], then reshape to OIHW [O, I, 1, K].
+        NSMutableArray<NSNumber*>* kernelPerm = [NSMutableArray arrayWithCapacity:3];
+        [kernelPerm addObject:@(kernelOutputFeatureDim)];
+        [kernelPerm addObject:@(kernelInputFeatureDim)];
+        [kernelPerm addObject:@(kernelSpatialDims[0])];
+        MPSGraphTensor* oikKernel = kernel;
+        if (!(kernelOutputFeatureDim == 0 && kernelInputFeatureDim == 1 &&
+              kernelSpatialDims[0] == 2)) {
+            oikKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
+        }
+        NSArray<NSNumber*>* oikShape = oikKernel.shape;
+        if (!oikShape || oikShape.count != 3) {
+            MPS_LOG_ERROR("1D convolution expects rank-3 kernel\n");
+            return nullptr;
+        }
+        MPSGraphTensor* mpsKernel = [g reshapeTensor:oikKernel
+                                           withShape:@[
+                                               oikShape[0], oikShape[1], @1, oikShape[2]
+                                           ]
+                                                name:nil];
+
+        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
+            descriptorWithStrideInX:(NSUInteger)strideW
+                          strideInY:1
+                    dilationRateInX:(NSUInteger)dilationW
+                    dilationRateInY:1
+                             groups:(NSUInteger)featureGroupCount
+                       paddingStyle:MPSGraphPaddingStyleExplicit
+                         dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+        desc.paddingTop = 0;
+        desc.paddingBottom = 0;
+        desc.paddingLeft = (NSUInteger)padLeft;
+        desc.paddingRight = (NSUInteger)padRight;
+
+        MPSGraphTensor* convOut = [g convolution2DWithSourceTensor:convInput
+                                                      weightsTensor:mpsKernel
+                                                         descriptor:desc
+                                                               name:nil];
+        if (!convOut) {
+            MPS_LOG_ERROR("1D convolution lowering failed\n");
+            return nullptr;
+        }
+
+        // Back to [B, F, S].
+        NSArray<NSNumber*>* out4Shape = convOut.shape;
+        if (!out4Shape || out4Shape.count != 4) {
+            MPS_LOG_ERROR("1D convolution output rank mismatch\n");
+            return nullptr;
+        }
+        MPSGraphTensor* bfsOut =
+            [g reshapeTensor:convOut withShape:@[ out4Shape[0], out4Shape[1], out4Shape[3] ] name:nil];
+
+        // Reorder [B, F, S] into the StableHLO output layout.
+        NSMutableArray<NSNumber*>* outPerm = [NSMutableArray arrayWithCapacity:3];
+        for (int i = 0; i < 3; ++i)
+            [outPerm addObject:@0];
+        outPerm[(NSUInteger)outputBatchDim] = @0;
+        outPerm[(NSUInteger)outputFeatureDim] = @1;
+        outPerm[(NSUInteger)outputSpatialDims[0]] = @2;
+
+        MPSGraphTensor* out = bfsOut;
+        if (!(outputBatchDim == 0 && outputFeatureDim == 1 && outputSpatialDims[0] == 2)) {
+            out = [g transposeTensor:bfsOut permutation:outPerm name:nil];
+        }
+        return out;
+    }
+
+    // Currently only support 1D and 2D convolutions.
     if (spatialRank != 2) {
-        MPS_LOG_ERROR("Only 2D convolution is currently supported, got %zu spatial dims\n",
+        MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
                       spatialRank);
         return nullptr;
     }
