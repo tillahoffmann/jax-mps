@@ -103,4 +103,14 @@ def make_unary_op_configs():
             special.erfinv,
             numpy.random.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
         ),
+        OperationTestConfig(
+            jnp.logical_not,
+            numpy.asarray([True, False, True, False]),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.population_count,
+            numpy.asarray([0, 1, 3, 7, 255, 256], dtype=numpy.uint32),
+            differentiable_argnums=(),
+        ),
     ]

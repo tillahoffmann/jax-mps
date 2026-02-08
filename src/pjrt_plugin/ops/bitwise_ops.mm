@@ -38,10 +38,37 @@ REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, and);
 REGISTER_LOGICAL_BITWISE_OP("stablehlo.or", logicalOR, bitwiseOR, or);
 REGISTER_LOGICAL_BITWISE_OP("stablehlo.xor", logicalXOR, bitwiseXOR, xor);
 
+static MPSGraphTensor* Handle_not(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+
+    if (isBooleanResult(op)) {
+        MPSGraphTensor* falseTensor = [g constantWithScalar:0 dataType:input.dataType];
+        return [g equalWithPrimaryTensor:input secondaryTensor:falseTensor name:nil];
+    }
+    return [g bitwiseNOTWithTensor:input name:nil];
+}
+REGISTER_MPS_OP("stablehlo.not", Handle_not);
+
 // Helper to get bit width from tensor's element type
 static int getBitWidth(mlir::Operation* op) {
     auto resultType = op->getResult(0).getType();
     auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
+    if (!tensorType)
+        return 0;
+    auto elemType = tensorType.getElementType();
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+        return intType.getWidth();
+    }
+    return 0;
+}
+
+static int getOperandBitWidth(mlir::Operation* op, unsigned operandIdx) {
+    if (op->getNumOperands() <= operandIdx)
+        return 0;
+    auto operandType = op->getOperand(operandIdx).getType();
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(operandType);
     if (!tensorType)
         return 0;
     auto elemType = tensorType.getElementType();
@@ -96,5 +123,74 @@ static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* 
     return HandleShiftOp(g, op, values, /*isLeftShift=*/false);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
+
+static MPSGraphTensor* Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operation* op,
+                                                     ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* shiftAmount = GetInputTensor(values, op, 1);
+    if (!input || !shiftAmount)
+        return nullptr;
+
+    int bitWidth = getBitWidth(op);
+    if (bitWidth == 0)
+        return nullptr;
+
+    MPSGraphTensor* shifted = [g bitwiseRightShiftWithPrimaryTensor:input
+                                                    secondaryTensor:shiftAmount
+                                                               name:nil];
+
+    MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
+                                                     shape:@[@1]
+                                                  dataType:shiftAmount.dataType];
+    MPSGraphTensor* overflowMask = [g greaterThanOrEqualToWithPrimaryTensor:shiftAmount
+                                                            secondaryTensor:bitWidthTensor
+                                                                       name:nil];
+
+    MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* minusOneTensor =
+        [g constantWithScalar:-1 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* isNegative =
+        [g lessThanWithPrimaryTensor:input secondaryTensor:zeroTensor name:nil];
+    MPSGraphTensor* overflowValue = [g selectWithPredicateTensor:isNegative
+                                              truePredicateTensor:minusOneTensor
+                                             falsePredicateTensor:zeroTensor
+                                                             name:nil];
+
+    return [g selectWithPredicateTensor:overflowMask
+                    truePredicateTensor:overflowValue
+                   falsePredicateTensor:shifted
+                                   name:nil];
+}
+REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", Handle_shift_right_arithmetic);
+
+static MPSGraphTensor* Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (!input)
+        return nullptr;
+
+    int bitWidth = getOperandBitWidth(op, 0);
+    if (bitWidth <= 0) {
+        MPS_LOG_ERROR("popcnt requires an integer operand\n");
+        return nullptr;
+    }
+
+    MPSGraphTensor* one = [g constantWithScalar:1 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* count = [g constantWithScalar:0 shape:@[@1] dataType:MPSDataTypeInt32];
+
+    for (int i = 0; i < bitWidth; ++i) {
+        MPSGraphTensor* shift = [g constantWithScalar:i shape:@[@1] dataType:input.dataType];
+        MPSGraphTensor* shifted =
+            [g bitwiseRightShiftWithPrimaryTensor:input secondaryTensor:shift name:nil];
+        MPSGraphTensor* bit = [g bitwiseANDWithPrimaryTensor:shifted secondaryTensor:one name:nil];
+        MPSGraphTensor* bit32 = [g castTensor:bit toType:MPSDataTypeInt32 name:nil];
+        count = [g additionWithPrimaryTensor:count secondaryTensor:bit32 name:nil];
+    }
+
+    MPSDataType outType = GetResultMpsType(op);
+    if (outType == MPSDataTypeInvalid)
+        return count;
+    return [g castTensor:count toType:outType name:nil];
+}
+REGISTER_MPS_OP("stablehlo.popcnt", Handle_popcnt);
 
 }  // namespace jax_mps
