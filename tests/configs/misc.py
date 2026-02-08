@@ -1,4 +1,5 @@
 import numpy
+from jax import lax
 from jax import numpy as jnp
 
 from .util import OperationTestConfig
@@ -19,5 +20,73 @@ def make_misc_op_configs():
                     + 1j * numpy.random.standard_normal((16,))
                 ).astype(numpy.complex64),
                 differentiable_argnums=(),
+                name="fft-jnp-1d",
+            ),
+            # FFT variants. Use lax.fft to target stablehlo.fft directly.
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.FFT, (16,)),
+                (
+                    numpy.random.standard_normal((3, 16))
+                    + 1j * numpy.random.standard_normal((3, 16))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="fft-c2c-1d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.FFT, (4, 8)),
+                (
+                    numpy.random.standard_normal((2, 4, 8))
+                    + 1j * numpy.random.standard_normal((2, 4, 8))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="fft-c2c-2d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IFFT, (16,)),
+                (
+                    numpy.random.standard_normal((3, 16))
+                    + 1j * numpy.random.standard_normal((3, 16))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="ifft-c2c-1d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IFFT, (4, 8)),
+                (
+                    numpy.random.standard_normal((2, 4, 8))
+                    + 1j * numpy.random.standard_normal((2, 4, 8))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="ifft-c2c-2d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.RFFT, (16,)),
+                numpy.random.standard_normal((3, 16)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="rfft-r2c-1d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.RFFT, (4, 8)),
+                numpy.random.standard_normal((2, 4, 8)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="rfft-r2c-2d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IRFFT, (16,)),
+                (
+                    numpy.random.standard_normal((3, 9))
+                    + 1j * numpy.random.standard_normal((3, 9))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="irfft-c2r-1d",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IRFFT, (4, 8)),
+                (
+                    numpy.random.standard_normal((2, 4, 5))
+                    + 1j * numpy.random.standard_normal((2, 4, 5))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="irfft-c2r-2d",
             ),
         ]

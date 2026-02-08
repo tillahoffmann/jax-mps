@@ -32,22 +32,25 @@ static MPSGraphTensor* Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& va
     }
 
     MPSGraphFFTDescriptor* desc = [MPSGraphFFTDescriptor descriptor];
-    desc.scalingMode = MPSGraphFFTScalingModeNone;
     desc.roundToOddHermitean = NO;
 
     auto fftType = fftOp.getFftType();
     switch (fftType) {
         case mlir::stablehlo::FftType::FFT:
             desc.inverse = NO;
+            desc.scalingMode = MPSGraphFFTScalingModeNone;
             return [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
         case mlir::stablehlo::FftType::IFFT:
             desc.inverse = YES;
+            desc.scalingMode = MPSGraphFFTScalingModeSize;
             return [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
         case mlir::stablehlo::FftType::RFFT:
             desc.inverse = NO;
+            desc.scalingMode = MPSGraphFFTScalingModeNone;
             return [g realToHermiteanFFTWithTensor:input axes:axes descriptor:desc name:nil];
         case mlir::stablehlo::FftType::IRFFT:
             desc.inverse = YES;
+            desc.scalingMode = MPSGraphFFTScalingModeSize;
             return [g HermiteanToRealFFTWithTensor:input axes:axes descriptor:desc name:nil];
         default:
             MPS_LOG_ERROR("Unsupported fft type\n");
