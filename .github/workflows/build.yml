@@ -86,10 +86,10 @@ jobs:
           find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
 
       - name: ruff format
-        run: uv run ruff format --check
+        run: uv run ruff format --check src tests
 
       - name: ruff check
-        run: uv run ruff check
+        run: uv run ruff check src tests
 
       - name: pyright
         run: uv run pyright
