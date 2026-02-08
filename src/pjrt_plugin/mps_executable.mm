@@ -310,7 +310,7 @@ static bool isTopKCustomCallTarget(const std::string& target) {
     std::string lower = target;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return std::tolower(c); });
-    return lower.find("topk") != std::string::npos || lower.find("top_k") != std::string::npos;
+    return lower == "topk" || lower == "top_k";
 }
 
 static ProcessResult processTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
