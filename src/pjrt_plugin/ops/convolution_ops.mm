@@ -95,9 +95,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             return nullptr;
         }
         MPSGraphTensor* convInput = [g reshapeTensor:bfsInput
-                                           withShape:@[
-                                               bfsShape[0], bfsShape[1], @1, bfsShape[2]
-                                           ]
+                                           withShape:@[bfsShape[0], bfsShape[1], @1, bfsShape[2]]
                                                 name:nil];
 
         // Reorder kernel to [O, I, K], then reshape to OIHW [O, I, 1, K].
@@ -116,9 +114,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             return nullptr;
         }
         MPSGraphTensor* mpsKernel = [g reshapeTensor:oikKernel
-                                           withShape:@[
-                                               oikShape[0], oikShape[1], @1, oikShape[2]
-                                           ]
+                                           withShape:@[oikShape[0], oikShape[1], @1, oikShape[2]]
                                                 name:nil];
 
         MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
@@ -136,9 +132,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         desc.paddingRight = (NSUInteger)padRight;
 
         MPSGraphTensor* convOut = [g convolution2DWithSourceTensor:convInput
-                                                      weightsTensor:mpsKernel
-                                                         descriptor:desc
-                                                               name:nil];
+                                                     weightsTensor:mpsKernel
+                                                        descriptor:desc
+                                                              name:nil];
         if (!convOut) {
             MPS_LOG_ERROR("1D convolution lowering failed\n");
             return nullptr;
@@ -150,8 +146,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             MPS_LOG_ERROR("1D convolution output rank mismatch\n");
             return nullptr;
         }
-        MPSGraphTensor* bfsOut =
-            [g reshapeTensor:convOut withShape:@[ out4Shape[0], out4Shape[1], out4Shape[3] ] name:nil];
+        MPSGraphTensor* bfsOut = [g reshapeTensor:convOut
+                                        withShape:@[out4Shape[0], out4Shape[1], out4Shape[3]]
+                                             name:nil];
 
         // Reorder [B, F, S] into the StableHLO output layout.
         NSMutableArray<NSNumber*>* outPerm = [NSMutableArray arrayWithCapacity:3];
