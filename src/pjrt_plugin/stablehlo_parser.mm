@@ -26,14 +26,16 @@ namespace mps {
 
 namespace {
 
-// Set of supported operation names - derived from OpRegistry plus control flow ops
+// Set of supported operation names - derived from OpRegistry plus runtime-lowered ops
 const std::unordered_set<std::string>& getSupportedOps() {
     static std::unordered_set<std::string> supported = []() {
         auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Add control flow ops - func.return/func.call are handled directly,
-        // stablehlo.while/case are registered in OpRegistry by control_flow_ops.mm
+        // Add ops handled directly in mps_executable.mm.
+        // Control flow ops: stablehlo.while/case are registered in OpRegistry by control_flow_ops.mm
         ops.insert("func.return");
         ops.insert("func.call");
+        ops.insert("stablehlo.sort");
+        ops.insert("chlo.top_k");
         return ops;
     }();
     return supported;
