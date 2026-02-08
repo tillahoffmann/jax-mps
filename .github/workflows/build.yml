@@ -80,6 +80,20 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
+      - name: clang-format
+        run: |
+          brew install clang-format
+          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+
+      - name: ruff format
+        run: uv run ruff format --check
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: pyright
+        run: uv run pyright
+
       # We skip the tests because MPS is not availabe on the runner yet.
       # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
       # - name: Run pytest
