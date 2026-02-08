@@ -82,6 +82,65 @@ struct ProcessResult {
 static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
                                        mlir::ModuleOp module, int depth);
 
+static void BindBlockArguments(mlir::Block& block, NSArray<MPSGraphTensor*>* tensors,
+                               ValueMap& values) {
+    for (NSUInteger i = 0; i < tensors.count && i < block.getNumArguments(); ++i) {
+        values[block.getArgument(i).getAsOpaquePointer()] = tensors[i];
+    }
+}
+
+static MPSGraphTensor* EvaluateWhileCond(MPSGraph* graph, mlir::Block& condBlock,
+                                         const ValueMap& values,
+                                         NSArray<MPSGraphTensor*>* inputTensors,
+                                         NSMutableArray<MPSGraphTensor*>* resultTensors,
+                                         mlir::ModuleOp module, int depth,
+                                         std::string* blockError) {
+    ValueMap condValues = values;
+    BindBlockArguments(condBlock, inputTensors, condValues);
+
+    ProcessResult condResult = processOperations(graph, condBlock, condValues, module, depth + 1);
+    if (!condResult.ok() || condResult.return_values.empty()) {
+        *blockError =
+            condResult.ok() ? "while cond returned no predicate" : condResult.error;
+        [resultTensors addObjectsFromArray:inputTensors];
+        return [graph constantWithScalar:0 dataType:MPSDataTypeBool];
+    }
+
+    [resultTensors addObjectsFromArray:inputTensors];
+    MPSGraphTensor* pred = GetTensor(condValues, condResult.return_values[0]);
+    if (!pred) {
+        *blockError = "while cond predicate tensor not found";
+        return [graph constantWithScalar:0 dataType:MPSDataTypeBool];
+    }
+    return pred;
+}
+
+static NSArray<MPSGraphTensor*>* EvaluateWhileBody(MPSGraph* graph, mlir::Block& bodyBlock,
+                                                   const ValueMap& values,
+                                                   NSArray<MPSGraphTensor*>* bodyArgs,
+                                                   mlir::ModuleOp module, int depth,
+                                                   std::string* blockError) {
+    ValueMap bodyValues = values;
+    BindBlockArguments(bodyBlock, bodyArgs, bodyValues);
+
+    ProcessResult bodyResult = processOperations(graph, bodyBlock, bodyValues, module, depth + 1);
+    if (!bodyResult.ok()) {
+        *blockError = bodyResult.error;
+        return bodyArgs;
+    }
+
+    NSMutableArray<MPSGraphTensor*>* out = [NSMutableArray array];
+    for (mlir::Value value : bodyResult.return_values) {
+        MPSGraphTensor* tensor = GetTensor(bodyValues, value);
+        if (!tensor) {
+            *blockError = "while body return tensor not found";
+            return bodyArgs;
+        }
+        [out addObject:tensor];
+    }
+    return out;
+}
+
 static ProcessResult processWhileOp(MPSGraph* graph, mlir::stablehlo::WhileOp whileOp,
                                     ValueMap& values, mlir::ModuleOp module, int depth) {
     if (depth > 100) {
@@ -108,67 +167,16 @@ static ProcessResult processWhileOp(MPSGraph* graph, mlir::stablehlo::WhileOp wh
                                                                 before:^MPSGraphTensor*(
                                                                            NSArray<MPSGraphTensor*>* inputTensors,
                                                                            NSMutableArray<MPSGraphTensor*>* resultTensors) {
-                                                                  ValueMap condValues = values;
-                                                                  for (NSUInteger i = 0;
-                                                                       i < inputTensors.count &&
-                                                                       i < condBlock.getNumArguments();
-                                                                       ++i) {
-                                                                      condValues[condBlock.getArgument(i).getAsOpaquePointer()] =
-                                                                          inputTensors[i];
-                                                                  }
-
-                                                                  ProcessResult condResult = processOperations(
-                                                                      graph, condBlock, condValues, module, depth + 1);
-                                                                  if (!condResult.ok() ||
-                                                                      condResult.return_values.empty()) {
-                                                                      blockError = condResult.ok()
-                                                                                       ? "while cond returned no predicate"
-                                                                                       : condResult.error;
-                                                                      [resultTensors addObjectsFromArray:inputTensors];
-                                                                      return [graph constantWithScalar:0
-                                                                                              dataType:MPSDataTypeBool];
-                                                                  }
-
-                                                                  [resultTensors addObjectsFromArray:inputTensors];
-                                                                  MPSGraphTensor* pred =
-                                                                      GetTensor(condValues, condResult.return_values[0]);
-                                                                  if (!pred) {
-                                                                      blockError = "while cond predicate tensor not found";
-                                                                      return [graph constantWithScalar:0
-                                                                                              dataType:MPSDataTypeBool];
-                                                                  }
-                                                                  return pred;
+                                                                  return EvaluateWhileCond(
+                                                                      graph, condBlock, values,
+                                                                      inputTensors, resultTensors, module,
+                                                                      depth, &blockError);
                                                                 }
                                                                  after:^NSArray<MPSGraphTensor*>*(
                                                                            NSArray<MPSGraphTensor*>* bodyArgs) {
-                                                                   ValueMap bodyValues = values;
-                                                                   for (NSUInteger i = 0;
-                                                                        i < bodyArgs.count &&
-                                                                        i < bodyBlock.getNumArguments();
-                                                                        ++i) {
-                                                                       bodyValues[bodyBlock.getArgument(i).getAsOpaquePointer()] =
-                                                                           bodyArgs[i];
-                                                                   }
-
-                                                                   ProcessResult bodyResult = processOperations(
-                                                                       graph, bodyBlock, bodyValues, module, depth + 1);
-                                                                   if (!bodyResult.ok()) {
-                                                                       blockError = bodyResult.error;
-                                                                       return bodyArgs;
-                                                                   }
-
-                                                                   NSMutableArray<MPSGraphTensor*>* out =
-                                                                       [NSMutableArray array];
-                                                                   for (mlir::Value v : bodyResult.return_values) {
-                                                                       MPSGraphTensor* t = GetTensor(bodyValues, v);
-                                                                       if (!t) {
-                                                                           blockError =
-                                                                               "while body return tensor not found";
-                                                                           return bodyArgs;
-                                                                       }
-                                                                       [out addObject:t];
-                                                                   }
-                                                                   return out;
+                                                                   return EvaluateWhileBody(
+                                                                       graph, bodyBlock, values, bodyArgs,
+                                                                       module, depth, &blockError);
                                                                  }
                                                                   name:nil];
 
