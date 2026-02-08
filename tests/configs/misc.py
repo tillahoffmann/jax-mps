@@ -163,4 +163,65 @@ def make_misc_op_configs():
                 ).astype(numpy.complex64),
                 name="irfft-c2r-2d-odd",
             ),
+            # Runtime control flow tests
+            OperationTestConfig(
+                lambda selector, x: lax.switch(
+                    selector,
+                    [lambda y: y + 1, lambda y: y * 2, lambda y: y - 3],
+                    x,
+                ),
+                numpy.int32(1),
+                numpy.random.standard_normal((4,)).astype(numpy.float32),
+                differentiable_argnums=(),
+            ),
+            OperationTestConfig(
+                lambda selector, x: lax.switch(
+                    selector,
+                    [
+                        lambda y: y + jnp.flip(y, axis=0),
+                        lambda y: y + jnp.flip(y, axis=1),
+                        lambda y: y + jnp.swapaxes(y, 0, 1),
+                    ],
+                    x,
+                ),
+                numpy.int32(2),
+                numpy.random.standard_normal((4, 4)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="lax.switch.multiaxis",
+            ),
+            OperationTestConfig(
+                lambda init: lax.while_loop(
+                    lambda state: state[0] < 5,
+                    lambda state: (state[0] + 1, state[1] + state[0]),
+                    (init, init),
+                )[1],
+                numpy.int32(0),
+                differentiable_argnums=(),
+            ),
+            OperationTestConfig(
+                lambda init: lax.while_loop(
+                    lambda state: state[0] < 3,
+                    lambda state: (
+                        state[0] + 1,
+                        state[1] + jnp.sum(state[1], axis=1, keepdims=True),
+                    ),
+                    (numpy.int32(0), init),
+                )[1],
+                numpy.random.standard_normal((3, 5)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="lax.while_loop.axis1",
+            ),
+            OperationTestConfig(
+                lambda init: lax.while_loop(
+                    lambda state: state[0] < 3,
+                    lambda state: (
+                        state[0] + 1,
+                        state[1] + jnp.sum(state[1], axis=0, keepdims=True),
+                    ),
+                    (numpy.int32(0), init),
+                )[1],
+                numpy.random.standard_normal((3, 5)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="lax.while_loop.axis0",
+            ),
         ]

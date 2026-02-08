@@ -82,6 +82,189 @@ struct ProcessResult {
 static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
                                        mlir::ModuleOp module, int depth);
 
+static ProcessResult processWhileOp(MPSGraph* graph, mlir::stablehlo::WhileOp whileOp,
+                                    ValueMap& values, mlir::ModuleOp module, int depth) {
+    if (depth > 100) {
+        return ProcessResult::Error("Maximum call depth exceeded - possible recursive while");
+    }
+
+    NSMutableArray<MPSGraphTensor*>* initialInputs = [NSMutableArray array];
+    for (mlir::Value operand : whileOp->getOperands()) {
+        MPSGraphTensor* t = GetTensor(values, operand);
+        if (!t)
+            return ProcessResult::Error("While operand tensor not found");
+        [initialInputs addObject:t];
+    }
+
+    if (whileOp.getCond().empty() || whileOp.getBody().empty()) {
+        return ProcessResult::Error("stablehlo.while requires non-empty cond/body regions");
+    }
+    mlir::Block& condBlock = whileOp.getCond().front();
+    mlir::Block& bodyBlock = whileOp.getBody().front();
+
+    __block std::string blockError;
+
+    NSArray<MPSGraphTensor*>* outputs = [graph whileWithInitialInputs:initialInputs
+                                                                before:^MPSGraphTensor*(
+                                                                           NSArray<MPSGraphTensor*>* inputTensors,
+                                                                           NSMutableArray<MPSGraphTensor*>* resultTensors) {
+                                                                  ValueMap condValues = values;
+                                                                  for (NSUInteger i = 0;
+                                                                       i < inputTensors.count &&
+                                                                       i < condBlock.getNumArguments();
+                                                                       ++i) {
+                                                                      condValues[condBlock.getArgument(i).getAsOpaquePointer()] =
+                                                                          inputTensors[i];
+                                                                  }
+
+                                                                  ProcessResult condResult = processOperations(
+                                                                      graph, condBlock, condValues, module, depth + 1);
+                                                                  if (!condResult.ok() ||
+                                                                      condResult.return_values.empty()) {
+                                                                      blockError = condResult.ok()
+                                                                                       ? "while cond returned no predicate"
+                                                                                       : condResult.error;
+                                                                      [resultTensors addObjectsFromArray:inputTensors];
+                                                                      return [graph constantWithScalar:0
+                                                                                              dataType:MPSDataTypeBool];
+                                                                  }
+
+                                                                  [resultTensors addObjectsFromArray:inputTensors];
+                                                                  MPSGraphTensor* pred =
+                                                                      GetTensor(condValues, condResult.return_values[0]);
+                                                                  if (!pred) {
+                                                                      blockError = "while cond predicate tensor not found";
+                                                                      return [graph constantWithScalar:0
+                                                                                              dataType:MPSDataTypeBool];
+                                                                  }
+                                                                  return pred;
+                                                                }
+                                                                 after:^NSArray<MPSGraphTensor*>*(
+                                                                           NSArray<MPSGraphTensor*>* bodyArgs) {
+                                                                   ValueMap bodyValues = values;
+                                                                   for (NSUInteger i = 0;
+                                                                        i < bodyArgs.count &&
+                                                                        i < bodyBlock.getNumArguments();
+                                                                        ++i) {
+                                                                       bodyValues[bodyBlock.getArgument(i).getAsOpaquePointer()] =
+                                                                           bodyArgs[i];
+                                                                   }
+
+                                                                   ProcessResult bodyResult = processOperations(
+                                                                       graph, bodyBlock, bodyValues, module, depth + 1);
+                                                                   if (!bodyResult.ok()) {
+                                                                       blockError = bodyResult.error;
+                                                                       return bodyArgs;
+                                                                   }
+
+                                                                   NSMutableArray<MPSGraphTensor*>* out =
+                                                                       [NSMutableArray array];
+                                                                   for (mlir::Value v : bodyResult.return_values) {
+                                                                       MPSGraphTensor* t = GetTensor(bodyValues, v);
+                                                                       if (!t) {
+                                                                           blockError =
+                                                                               "while body return tensor not found";
+                                                                           return bodyArgs;
+                                                                       }
+                                                                       [out addObject:t];
+                                                                   }
+                                                                   return out;
+                                                                 }
+                                                                  name:nil];
+
+    if (!blockError.empty())
+        return ProcessResult::Error(blockError);
+    if (!outputs)
+        return ProcessResult::Error("whileWithInitialInputs returned null");
+    if ((NSUInteger)whileOp->getNumResults() != outputs.count) {
+        return ProcessResult::Error("while output arity mismatch");
+    }
+
+    for (NSUInteger i = 0; i < outputs.count; ++i) {
+        values[whileOp->getResult(i).getAsOpaquePointer()] = outputs[i];
+    }
+    return ProcessResult{};
+}
+
+static ProcessResult processCaseOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values,
+                                   mlir::ModuleOp module, int depth) {
+    if (depth > 100) {
+        return ProcessResult::Error("Maximum call depth exceeded - possible recursive case");
+    }
+    if (op->getNumOperands() < 1) {
+        return ProcessResult::Error("stablehlo.case requires selector operand");
+    }
+    if (op->getNumRegions() < 1) {
+        return ProcessResult::Error("stablehlo.case requires at least one branch region");
+    }
+
+    MPSGraphTensor* selector = GetTensor(values, op->getOperand(0));
+    if (!selector) {
+        return ProcessResult::Error("stablehlo.case selector tensor not found");
+    }
+
+    const size_t numResults = op->getNumResults();
+    const size_t numBranches = op->getNumRegions();
+    const size_t numBranchOperands = op->getNumOperands() - 1;
+
+    std::vector<std::vector<MPSGraphTensor*>> branchOutputs(numBranches);
+    for (size_t b = 0; b < numBranches; ++b) {
+        mlir::Region& region = op->getRegion((unsigned)b);
+        if (region.empty()) {
+            return ProcessResult::Error("stablehlo.case branch region is empty");
+        }
+
+        mlir::Block& block = region.front();
+        if (block.getNumArguments() > numBranchOperands) {
+            return ProcessResult::Error("stablehlo.case branch expects more operands than provided");
+        }
+
+        ValueMap branchValues = values;
+        for (size_t i = 0; i < block.getNumArguments(); ++i) {
+            mlir::Value branchOperand = op->getOperand(1 + i);
+            MPSGraphTensor* argTensor = GetTensor(values, branchOperand);
+            if (!argTensor) {
+                return ProcessResult::Error("stablehlo.case branch operand tensor not found");
+            }
+            branchValues[block.getArgument((unsigned)i).getAsOpaquePointer()] = argTensor;
+        }
+
+        ProcessResult branchResult = processOperations(graph, block, branchValues, module, depth + 1);
+        if (!branchResult.ok()) {
+            return branchResult;
+        }
+        if (branchResult.return_values.size() != numResults) {
+            return ProcessResult::Error("stablehlo.case branch result arity mismatch");
+        }
+
+        branchOutputs[b].reserve(numResults);
+        for (size_t r = 0; r < numResults; ++r) {
+            MPSGraphTensor* t = GetTensor(branchValues, branchResult.return_values[r]);
+            if (!t) {
+                return ProcessResult::Error("stablehlo.case branch return tensor not found");
+            }
+            branchOutputs[b].push_back(t);
+        }
+    }
+
+    for (size_t r = 0; r < numResults; ++r) {
+        MPSGraphTensor* selected = branchOutputs[numBranches - 1][r];
+        for (size_t i = numBranches - 1; i > 0; --i) {
+            MPSGraphTensor* branchIndex =
+                [graph constantWithScalar:(NSInteger)(i - 1) dataType:selector.dataType];
+            MPSGraphTensor* pred =
+                [graph equalWithPrimaryTensor:selector secondaryTensor:branchIndex name:nil];
+            selected = [graph selectWithPredicateTensor:pred
+                                          truePredicateTensor:branchOutputs[i - 1][r]
+                                         falsePredicateTensor:selected
+                                                         name:nil];
+        }
+        values[op->getResult((unsigned)r).getAsOpaquePointer()] = selected;
+    }
+
+    return ProcessResult{};
+}
+
 // Process a func.call operation by looking up the callee and processing its body
 static ProcessResult processCallOp(MPSGraph* graph, mlir::func::CallOp callOp, ValueMap& values,
                                    mlir::ModuleOp module, int depth) {
@@ -145,8 +328,8 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         mlir::Operation* op = &operation;
         std::string op_name = op->getName().getStringRef().str();
 
-        // Handle func.return - collect return values
-        if (mlir::isa<mlir::func::ReturnOp>(op)) {
+        // Handle function and StableHLO region returns.
+        if (mlir::isa<mlir::func::ReturnOp>(op) || mlir::isa<mlir::stablehlo::ReturnOp>(op)) {
             for (mlir::Value operand : op->getOperands()) {
                 result.return_values.push_back(operand);
             }
@@ -162,6 +345,18 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
             continue;
         }
 
+        if (auto whileOp = mlir::dyn_cast<mlir::stablehlo::WhileOp>(op)) {
+            ProcessResult whileResult = processWhileOp(graph, whileOp, values, module, depth);
+            if (!whileResult.ok())
+                return whileResult;
+            continue;
+        }
+        if (op_name == "stablehlo.case") {
+            ProcessResult caseResult = processCaseOp(graph, op, values, module, depth);
+            if (!caseResult.ok())
+                return caseResult;
+            continue;
+        }
         // Look up handler in registry
         OpHandler handler = OpRegistry::Find(op_name);
         if (!handler) {
