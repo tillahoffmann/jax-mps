@@ -24,4 +24,17 @@ def make_conv_op_configs():
                 numpy.random.normal(size=(16, 3, 3, 3)),
                 name="lax.conv-SAME",
             ),
+            OperationTestConfig(
+                lambda x, kernel: lax.conv_general_dilated(
+                    x,
+                    kernel,
+                    window_strides=(2,),
+                    padding="SAME",
+                    dimension_numbers=("NWC", "WIO", "NWC"),
+                ),
+                numpy.random.normal(size=(2, 16, 3)).astype(numpy.float32),
+                numpy.random.normal(size=(3, 3, 4)).astype(numpy.float32),
+                name="lax.conv_general_dilated-1d-NWC",
+                differentiable_argnums=(),
+            ),
         ]
