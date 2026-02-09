@@ -133,14 +133,14 @@ static MPSGraphTensor* Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operatio
                                                                        name:nil];
 
     MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
-    MPSGraphTensor* minusOneTensor =
-        [g constantWithScalar:-1 shape:@[@1] dataType:input.dataType];
-    MPSGraphTensor* isNegative =
-        [g lessThanWithPrimaryTensor:input secondaryTensor:zeroTensor name:nil];
+    MPSGraphTensor* minusOneTensor = [g constantWithScalar:-1 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* isNegative = [g lessThanWithPrimaryTensor:input
+                                              secondaryTensor:zeroTensor
+                                                         name:nil];
     MPSGraphTensor* overflowValue = [g selectWithPredicateTensor:isNegative
-                                              truePredicateTensor:minusOneTensor
-                                             falsePredicateTensor:zeroTensor
-                                                             name:nil];
+                                             truePredicateTensor:minusOneTensor
+                                            falsePredicateTensor:zeroTensor
+                                                            name:nil];
 
     return [g selectWithPredicateTensor:overflowMask
                     truePredicateTensor:overflowValue
