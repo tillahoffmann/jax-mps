@@ -214,30 +214,33 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         }
     }
 
-    // === From here on, we have 2D tensors (or 1D lifted to 2D) ===
+    // === Normalize to 4D dimension numbers ===
+    // After 1D lifting: input is NCHW (0,1,2,3), kernel is OIHW (0,1,2,3)
+    // For 2D: use original dimension numbers
+    int64_t inBatch = is1D ? 0 : inputBatchDim;
+    int64_t inFeature = is1D ? 1 : inputFeatureDim;
+    int64_t inSpatial0 = is1D ? 2 : inputSpatialDims[0];
+    int64_t inSpatial1 = is1D ? 3 : inputSpatialDims[1];
+
+    int64_t kOutput = is1D ? 0 : kernelOutputFeatureDim;
+    int64_t kInput = is1D ? 1 : kernelInputFeatureDim;
+    int64_t kSpatial0 = is1D ? 2 : kernelSpatialDims[0];
+    int64_t kSpatial1 = is1D ? 3 : kernelSpatialDims[1];
+
+    int64_t outSpatial0 = is1D ? 2 : outputSpatialDims[0];
+    int64_t outSpatial1 = is1D ? 3 : outputSpatialDims[1];
 
     // Extract convolution parameters
     ConvParams p = extractConvParams(convOp, is1D);
 
-    // Build input layout for permutation computation
-    // For 1D lifted to 2D, we already have NCHW (batch=0, feature=1, H=2, W=3)
-    std::vector<int64_t> inputLayout;
-    if (is1D) {
-        inputLayout = {0, 1, 2, 3};  // NCHW
-    } else {
-        inputLayout = {inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]};
-    }
+    // Transpose input to NHWC and kernel to OIHW using normalized dims
+    std::vector<int64_t> inputLayout = {inBatch, inFeature, inSpatial0, inSpatial1};
+    std::vector<int64_t> kernelLayout = {kOutput, kInput, kSpatial0, kSpatial1};
 
-    // Transpose kernel to OIHW format (identity layout {0,1,2,3}) for MPS
     MPSGraphTensor* mpsKernel = kernel;
-    if (!is1D) {
-        std::vector<int64_t> kernelLayout = {kernelOutputFeatureDim, kernelInputFeatureDim,
-                                             kernelSpatialDims[0], kernelSpatialDims[1]};
-        // OIHW is identity layout {0,1,2,3}, so permutation brings kernel to canonical order
-        NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, {0, 1, 2, 3});
-        if (kernelPerm) {
-            mpsKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
-        }
+    NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, {0, 1, 2, 3});
+    if (kernelPerm) {
+        mpsKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
     }
 
     // Transpose input to NHWC (MPS is more reliable with NHWC)
@@ -258,6 +261,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         }
 
         // Get output shape in NHWC format
+        // Note: resultShape uses original MLIR dims (3D for 1D conv, 4D for 2D)
         auto resultShape = resultType.getShape();
         int64_t outN = resultShape[outputBatchDim];
         int64_t outH = is1D ? 1 : resultShape[outputSpatialDims[0]];
@@ -319,9 +323,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         result =
             convert2DOutputTo1D(g, result, outputBatchDim, outputFeatureDim, output1DSpatialDim);
     } else {
-        // Transpose 2D output from NHWC to expected layout
-        std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outputSpatialDims[0],
-                                             outputSpatialDims[1]};
+        // Transpose 2D output from NHWC to expected layout using normalized dims
+        std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outSpatial0,
+                                             outSpatial1};
         NSArray<NSNumber*>* outputPerm = computePermutation(LAYOUT_NHWC, outputLayout);
         if (outputPerm) {
             result = [g transposeTensor:result permutation:outputPerm name:nil];
