@@ -167,4 +167,25 @@ def make_binary_op_configs():
                 numpy.array([0, 1, 2, 3, 31], dtype=numpy.uint32),
                 differentiable_argnums=(),
             ),
+            OperationTestConfig(
+                lax.shift_left,
+                numpy.array([0x40000000, -0x40000000, 5], dtype=numpy.int32),
+                numpy.array([-2, -1, -31], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_left-negative-shift-count",
+            ),
+            OperationTestConfig(
+                lax.shift_right_logical,
+                numpy.array([0x40000000, -0x40000000, 5], dtype=numpy.int32),
+                numpy.array([-2, -1, -31], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_right_logical-negative-shift-count",
+            ),
+            OperationTestConfig(
+                lax.shift_right_arithmetic,
+                numpy.array([0x40000000, -0x40000000, 5], dtype=numpy.int32),
+                numpy.array([-2, -1, -31], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_right_arithmetic-negative-shift-count",
+            ),
         ]

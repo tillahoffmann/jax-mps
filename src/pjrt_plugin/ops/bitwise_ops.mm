@@ -64,9 +64,70 @@ static int getBitWidth(mlir::Operation* op) {
     return 0;
 }
 
-// Shared helper for shift operations with overflow handling
+static MPSDataType toUnsignedIntegerDataType(MPSDataType dataType) {
+    switch (dataType) {
+        case MPSDataTypeInt8:
+            return MPSDataTypeUInt8;
+        case MPSDataTypeInt16:
+            return MPSDataTypeUInt16;
+        case MPSDataTypeInt32:
+            return MPSDataTypeUInt32;
+        case MPSDataTypeInt64:
+            return MPSDataTypeUInt64;
+        case MPSDataTypeUInt8:
+        case MPSDataTypeUInt16:
+        case MPSDataTypeUInt32:
+        case MPSDataTypeUInt64:
+            return dataType;
+        default:
+            return MPSDataTypeInvalid;
+    }
+}
+
+// StableHLO defines shift overflow in terms of bit-pattern shift counts.
+// MPSGraph masks shift counts modulo bit-width, so we materialize overflow masks
+// explicitly and use unsigned comparisons for shift amounts.
+static MPSGraphTensor* BuildShiftOverflowMask(MPSGraph* g, MPSGraphTensor* shiftAmount,
+                                              int bitWidth) {
+    MPSDataType unsignedShiftType = toUnsignedIntegerDataType(shiftAmount.dataType);
+    MPSGraphTensor* shiftForCompare = shiftAmount;
+    if (unsignedShiftType != MPSDataTypeInvalid && unsignedShiftType != shiftAmount.dataType) {
+        shiftForCompare = [g castTensor:shiftAmount toType:unsignedShiftType name:nil];
+    }
+
+    MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
+                                                     shape:@[@1]
+                                                  dataType:shiftForCompare.dataType];
+    return [g greaterThanOrEqualToWithPrimaryTensor:shiftForCompare
+                                    secondaryTensor:bitWidthTensor
+                                               name:nil];
+}
+
+enum class ShiftMode {
+    kLeft,
+    kRightLogical,
+    kRightArithmetic,
+};
+
+static MPSGraphTensor* BuildShiftOverflowValue(MPSGraph* g, MPSGraphTensor* input, ShiftMode mode) {
+    MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
+    if (mode != ShiftMode::kRightArithmetic) {
+        return zeroTensor;
+    }
+
+    MPSGraphTensor* minusOneTensor = [g constantWithScalar:-1 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* isNegative = [g lessThanWithPrimaryTensor:input
+                                              secondaryTensor:zeroTensor
+                                                         name:nil];
+    return [g selectWithPredicateTensor:isNegative
+                    truePredicateTensor:minusOneTensor
+                   falsePredicateTensor:zeroTensor
+                                   name:nil];
+}
+
+// Shared helper for shift operations with StableHLO overflow handling.
 static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
-                                     bool isLeftShift) {
+                                     ShiftMode mode) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     MPSGraphTensor* shiftAmount = GetInputTensor(values, op, 1);
     if (!input || !shiftAmount)
@@ -76,76 +137,34 @@ static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap&
     if (bitWidth == 0)
         return nullptr;
 
-    // Perform the shift
-    MPSGraphTensor* shiftedResult = isLeftShift ? [g bitwiseLeftShiftWithPrimaryTensor:input
-                                                                       secondaryTensor:shiftAmount
-                                                                                  name:nil]
-                                                : [g bitwiseRightShiftWithPrimaryTensor:input
-                                                                        secondaryTensor:shiftAmount
-                                                                                   name:nil];
+    MPSGraphTensor* shiftedResult =
+        mode == ShiftMode::kLeft
+            ? [g bitwiseLeftShiftWithPrimaryTensor:input secondaryTensor:shiftAmount name:nil]
+            : [g bitwiseRightShiftWithPrimaryTensor:input secondaryTensor:shiftAmount name:nil];
 
-    // Handle overflow: when shift >= bit_width, result should be 0
-    MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
-                                                     shape:@[@1]
-                                                  dataType:shiftAmount.dataType];
-    MPSGraphTensor* overflowMask = [g greaterThanOrEqualToWithPrimaryTensor:shiftAmount
-                                                            secondaryTensor:bitWidthTensor
-                                                                       name:nil];
-    MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
+    MPSGraphTensor* overflowMask = BuildShiftOverflowMask(g, shiftAmount, bitWidth);
+    MPSGraphTensor* overflowValue = BuildShiftOverflowValue(g, input, mode);
 
     return [g selectWithPredicateTensor:overflowMask
-                    truePredicateTensor:zeroTensor
+                    truePredicateTensor:overflowValue
                    falsePredicateTensor:shiftedResult
                                    name:nil];
 }
 
 static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    return HandleShiftOp(g, op, values, /*isLeftShift=*/true);
+    return HandleShiftOp(g, op, values, ShiftMode::kLeft);
 }
 REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
 
 static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
                                                   ValueMap& values) {
-    return HandleShiftOp(g, op, values, /*isLeftShift=*/false);
+    return HandleShiftOp(g, op, values, ShiftMode::kRightLogical);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
 
 static MPSGraphTensor* Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operation* op,
                                                      ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPSGraphTensor* shiftAmount = GetInputTensor(values, op, 1);
-    if (!input || !shiftAmount)
-        return nullptr;
-
-    int bitWidth = getBitWidth(op);
-    if (bitWidth == 0)
-        return nullptr;
-
-    MPSGraphTensor* shifted = [g bitwiseRightShiftWithPrimaryTensor:input
-                                                    secondaryTensor:shiftAmount
-                                                               name:nil];
-
-    MPSGraphTensor* bitWidthTensor = [g constantWithScalar:bitWidth
-                                                     shape:@[@1]
-                                                  dataType:shiftAmount.dataType];
-    MPSGraphTensor* overflowMask = [g greaterThanOrEqualToWithPrimaryTensor:shiftAmount
-                                                            secondaryTensor:bitWidthTensor
-                                                                       name:nil];
-
-    MPSGraphTensor* zeroTensor = [g constantWithScalar:0 shape:@[@1] dataType:input.dataType];
-    MPSGraphTensor* minusOneTensor = [g constantWithScalar:-1 shape:@[@1] dataType:input.dataType];
-    MPSGraphTensor* isNegative = [g lessThanWithPrimaryTensor:input
-                                              secondaryTensor:zeroTensor
-                                                         name:nil];
-    MPSGraphTensor* overflowValue = [g selectWithPredicateTensor:isNegative
-                                             truePredicateTensor:minusOneTensor
-                                            falsePredicateTensor:zeroTensor
-                                                            name:nil];
-
-    return [g selectWithPredicateTensor:overflowMask
-                    truePredicateTensor:overflowValue
-                   falsePredicateTensor:shifted
-                                   name:nil];
+    return HandleShiftOp(g, op, values, ShiftMode::kRightArithmetic);
 }
 REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", Handle_shift_right_arithmetic);
 
