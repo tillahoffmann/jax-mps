@@ -212,10 +212,6 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             MPS_LOG_ERROR("1D convolution expects rank-3 input and kernel\n");
             return nullptr;
         }
-        inputBatchDim = 0;
-        inputFeatureDim = 1;
-        kernelOutputFeatureDim = 0;
-        kernelInputFeatureDim = 1;
     }
 
     // === From here on, we have 2D tensors (or 1D lifted to 2D) ===
