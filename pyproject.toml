@@ -51,6 +51,7 @@ before-all = "./scripts/setup_deps.sh"
 [dependency-groups]
 dev = [
     "flax>=0.10.7",
+    "numpyro>=0.20.0",
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",
     "pytest",

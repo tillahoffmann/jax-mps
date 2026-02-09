@@ -3,6 +3,7 @@ from .conv import make_conv_op_configs
 from .conversion import make_conversion_op_configs
 from .flax import make_flax_op_configs
 from .misc import make_misc_op_configs
+from .numpyro import make_numpyro_op_configs
 from .random import make_random_op_configs
 from .reduction import make_reduction_op_configs
 from .shape import make_shape_op_configs
@@ -17,6 +18,7 @@ __all__ = [
     "make_conversion_op_configs",
     "make_flax_op_configs",
     "make_misc_op_configs",
+    "make_numpyro_op_configs",
     "make_random_op_configs",
     "make_reduction_op_configs",
     "make_shape_op_configs",
