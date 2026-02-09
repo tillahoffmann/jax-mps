@@ -4,6 +4,54 @@
 
 namespace jax_mps {
 
+// Compute permutation to transpose from source layout to target layout.
+// Both layouts are specified as arrays where layout[i] = position of dimension i in the tensor.
+// For example, NHWC input layout: {batch=0, feature=3, spatial=[1,2]} means N at 0, H at 1, W at 2,
+// C at 3. Returns nil if no transpose is needed (identity permutation).
+static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLayout,
+                                              const std::vector<int64_t>& dstLayout) {
+    size_t rank = srcLayout.size();
+    if (rank != dstLayout.size())
+        return nil;
+
+    // Build inverse of srcLayout: invSrc[pos] = which dimension is at position pos
+    std::vector<int64_t> invSrc(rank);
+    for (size_t dim = 0; dim < rank; ++dim) {
+        invSrc[srcLayout[dim]] = dim;
+    }
+
+    // perm[dstPos] = srcPos where the dimension at dstPos in dst was at srcPos in src
+    NSMutableArray<NSNumber*>* perm = [NSMutableArray arrayWithCapacity:rank];
+    bool isIdentity = true;
+    for (size_t dstPos = 0; dstPos < rank; ++dstPos) {
+        // Find which dimension should be at dstPos in the destination
+        int64_t dim = -1;
+        for (size_t d = 0; d < rank; ++d) {
+            if (dstLayout[d] == (int64_t)dstPos) {
+                dim = d;
+                break;
+            }
+        }
+        // Find where that dimension was in the source
+        int64_t srcPos = srcLayout[dim];
+        [perm addObject:@(srcPos)];
+        if (srcPos != (int64_t)dstPos)
+            isIdentity = false;
+    }
+    return isIdentity ? nil : perm;
+}
+
+// Build layout vector for 4D tensor from dimension positions.
+// Returns {batch, feature, spatial0, spatial1} positions.
+static std::vector<int64_t> makeLayout4D(int64_t batchDim, int64_t featureDim, int64_t spatial0,
+                                         int64_t spatial1) {
+    return {batchDim, featureDim, spatial0, spatial1};
+}
+
+// Standard layouts for reference
+static const std::vector<int64_t> LAYOUT_NHWC = {0, 3, 1, 2};  // batch=0, feature=3, H=1, W=2
+static const std::vector<int64_t> LAYOUT_OIHW = {0, 1, 2, 3};  // O=0, I=1, H=2, W=3
+
 // Compute forward convolution padding from transposed convolution parameters.
 // Forward padding = effective_kernel_size - 1 - transposed_padding, clamped to >= 0.
 static int64_t forwardPadding(int64_t kernelSize, int64_t dilation, int64_t transposedPad) {
@@ -190,71 +238,36 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         }
     }
 
-    // For 1D lifted to 2D, we already have NCHW input and OIHW kernel
-    // For native 2D, detect layouts
-    bool inputIsNHWC = false;
-    bool inputIsNCHW = false;
-    bool inputIsCHWN = false;
-    bool inputIsCNHW = false;
-
+    // Build input layout for permutation computation
+    // For 1D lifted to 2D, we already have NCHW (batch=0, feature=1, H=2, W=3)
+    std::vector<int64_t> inputLayout;
     if (is1D) {
-        // Already converted to NCHW
-        inputIsNCHW = true;
+        inputLayout = {0, 1, 2, 3};  // NCHW
     } else {
-        auto isd = inputSpatialDims;
-        inputIsNHWC = (inputBatchDim == 0 && inputFeatureDim == 3 && isd[0] == 1 && isd[1] == 2);
-        inputIsNCHW = (inputBatchDim == 0 && inputFeatureDim == 1 && isd[0] == 2 && isd[1] == 3);
-        inputIsCHWN = (inputBatchDim == 3 && inputFeatureDim == 0 && isd[0] == 1 && isd[1] == 2);
-        inputIsCNHW = (inputBatchDim == 1 && inputFeatureDim == 0 && isd[0] == 2 && isd[1] == 3);
-    }
-
-    if (!inputIsNHWC && !inputIsNCHW && !inputIsCHWN && !inputIsCNHW) {
-        MPS_LOG_ERROR(
-            "Unsupported input layout. Expected NHWC, NCHW, CHWN, or CNHW. Got batch=%lld, "
-            "feature=%lld, spatial=[%lld,%lld]\n",
-            inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
-        return nullptr;
+        inputLayout = {inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]};
     }
 
     // Transpose kernel to OIHW format for MPS
+    // Kernel layout: {O, I, H, W} positions
     MPSGraphTensor* mpsKernel = kernel;
     if (!is1D) {
-        auto ksd = kernelSpatialDims;
-        bool kernelIsHWIO = (ksd[0] == 0 && ksd[1] == 1 && kernelInputFeatureDim == 2 &&
-                             kernelOutputFeatureDim == 3);
-        bool kernelIsOIHW = (kernelOutputFeatureDim == 0 && kernelInputFeatureDim == 1 &&
-                             ksd[0] == 2 && ksd[1] == 3);
-        bool kernelIsIHWO = (kernelInputFeatureDim == 0 && ksd[0] == 1 && ksd[1] == 2 &&
-                             kernelOutputFeatureDim == 3);
-        bool kernelIsHWOI = (ksd[0] == 0 && ksd[1] == 1 && kernelOutputFeatureDim == 2 &&
-                             kernelInputFeatureDim == 3);
-        bool kernelIsOHWI = (kernelOutputFeatureDim == 0 && ksd[0] == 1 && ksd[1] == 2 &&
-                             kernelInputFeatureDim == 3);
-        bool kernelIsIOHW = (kernelInputFeatureDim == 0 && kernelOutputFeatureDim == 1 &&
-                             ksd[0] == 2 && ksd[1] == 3);
-
-        if (kernelIsHWIO) {
-            mpsKernel = [g transposeTensor:kernel permutation:@[@3, @2, @0, @1] name:nil];
-        } else if (kernelIsOIHW) {
-            mpsKernel = kernel;
-        } else if (kernelIsIHWO) {
-            mpsKernel = [g transposeTensor:kernel permutation:@[@3, @0, @1, @2] name:nil];
-        } else if (kernelIsHWOI) {
-            mpsKernel = [g transposeTensor:kernel permutation:@[@2, @3, @0, @1] name:nil];
-        } else if (kernelIsOHWI) {
-            mpsKernel = [g transposeTensor:kernel permutation:@[@0, @3, @1, @2] name:nil];
-        } else if (kernelIsIOHW) {
-            mpsKernel = [g transposeTensor:kernel permutation:@[@1, @0, @2, @3] name:nil];
-        } else {
-            MPS_LOG_ERROR("Unsupported kernel layout. Got output=%lld, input=%lld, "
-                          "spatial=[%lld,%lld]\n",
-                          kernelOutputFeatureDim, kernelInputFeatureDim, ksd[0], ksd[1]);
-            return nullptr;
+        std::vector<int64_t> kernelLayout = {kernelOutputFeatureDim, kernelInputFeatureDim,
+                                             kernelSpatialDims[0], kernelSpatialDims[1]};
+        NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, LAYOUT_OIHW);
+        if (kernelPerm) {
+            mpsKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
         }
     }
     // For 1D, kernel is already OIHW from the lifting step
 
-    // Create convolution descriptor
+    // Transpose input to NHWC (MPS is more reliable with NHWC)
+    NSArray<NSNumber*>* inputPerm = computePermutation(inputLayout, LAYOUT_NHWC);
+    MPSGraphTensor* convInput = input;
+    if (inputPerm) {
+        convInput = [g transposeTensor:input permutation:inputPerm name:nil];
+    }
+
+    // Create convolution descriptor (always use NHWC since we transpose above)
     MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
         descriptorWithStrideInX:(NSUInteger)strideW
                       strideInY:(NSUInteger)strideH
@@ -262,27 +275,13 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                 dilationRateInY:(NSUInteger)dilationH
                          groups:(NSUInteger)featureGroupCount
                    paddingStyle:MPSGraphPaddingStyleExplicit
-                     dataLayout:inputIsNHWC ? MPSGraphTensorNamedDataLayoutNHWC
-                                            : MPSGraphTensorNamedDataLayoutNCHW
+                     dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                   weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
     desc.paddingLeft = (NSUInteger)padLeft;
     desc.paddingRight = (NSUInteger)padRight;
     desc.paddingTop = (NSUInteger)padTop;
     desc.paddingBottom = (NSUInteger)padBottom;
-
-    // Transpose input to NHWC (MPS is more reliable with NHWC)
-    MPSGraphTensor* convInput = input;
-    if (inputIsNCHW) {
-        convInput = [g transposeTensor:input permutation:@[@0, @2, @3, @1] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
-    } else if (inputIsCHWN) {
-        convInput = [g transposeTensor:input permutation:@[@3, @1, @2, @0] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
-    } else if (inputIsCNHW) {
-        convInput = [g transposeTensor:input permutation:@[@1, @2, @3, @0] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
-    }
 
     // Perform convolution (or transposed convolution)
     MPSGraphTensor* result;
@@ -371,30 +370,12 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             result = [g transposeTensor:result permutation:outPerm name:nil];
         }
     } else {
-        // Transpose 2D output to expected layout
-        auto osd = outputSpatialDims;
-        bool outputIsNHWC =
-            (outputBatchDim == 0 && outputFeatureDim == 3 && osd[0] == 1 && osd[1] == 2);
-        bool outputIsNCHW =
-            (outputBatchDim == 0 && outputFeatureDim == 1 && osd[0] == 2 && osd[1] == 3);
-        bool outputIsCHWN =
-            (outputBatchDim == 3 && outputFeatureDim == 0 && osd[0] == 1 && osd[1] == 2);
-        bool outputIsHWIO =
-            (osd[0] == 0 && osd[1] == 1 && outputBatchDim == 2 && outputFeatureDim == 3);
-        bool outputIsCNHW =
-            (outputFeatureDim == 0 && outputBatchDim == 1 && osd[0] == 2 && osd[1] == 3);
-
-        if (outputIsNCHW) {
-            result = [g transposeTensor:result permutation:@[@0, @3, @1, @2] name:nil];
-        } else if (outputIsCHWN) {
-            result = [g transposeTensor:result permutation:@[@3, @1, @2, @0] name:nil];
-        } else if (outputIsHWIO) {
-            result = [g transposeTensor:result permutation:@[@1, @2, @0, @3] name:nil];
-        } else if (outputIsCNHW) {
-            result = [g transposeTensor:result permutation:@[@3, @0, @1, @2] name:nil];
-        } else if (!outputIsNHWC) {
-            MPS_LOG_WARN("Unexpected output layout batch=%lld, feature=%lld, spatial=[%lld,%lld]\n",
-                         outputBatchDim, outputFeatureDim, osd[0], osd[1]);
+        // Transpose 2D output from NHWC to expected layout
+        std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outputSpatialDims[0],
+                                             outputSpatialDims[1]};
+        NSArray<NSNumber*>* outputPerm = computePermutation(LAYOUT_NHWC, outputLayout);
+        if (outputPerm) {
+            result = [g transposeTensor:result permutation:outputPerm name:nil];
         }
     }
 
