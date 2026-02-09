@@ -174,17 +174,7 @@ static MPSGraphTensor* Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap&
         return nullptr;
     }
 
-    MPSGraphTensor* one = [g constantWithScalar:1 shape:@[@1] dataType:input.dataType];
-    MPSGraphTensor* count = [g constantWithScalar:0 shape:@[@1] dataType:MPSDataTypeInt32];
-
-    for (int i = 0; i < bitWidth; ++i) {
-        MPSGraphTensor* shift = [g constantWithScalar:i shape:@[@1] dataType:input.dataType];
-        MPSGraphTensor* shifted =
-            [g bitwiseRightShiftWithPrimaryTensor:input secondaryTensor:shift name:nil];
-        MPSGraphTensor* bit = [g bitwiseANDWithPrimaryTensor:shifted secondaryTensor:one name:nil];
-        MPSGraphTensor* bit32 = [g castTensor:bit toType:MPSDataTypeInt32 name:nil];
-        count = [g additionWithPrimaryTensor:count secondaryTensor:bit32 name:nil];
-    }
+    MPSGraphTensor* count = [g bitwisePopulationCountWithTensor:input name:nil];
 
     MPSDataType outType = GetResultMpsType(op);
     if (outType == MPSDataTypeInvalid)
