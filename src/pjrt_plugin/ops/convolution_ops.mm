@@ -4,6 +4,24 @@
 
 namespace jax_mps {
 
+// Compute forward convolution padding from transposed convolution parameters.
+// Forward padding = effective_kernel_size - 1 - transposed_padding, clamped to >= 0.
+static int64_t forwardPadding(int64_t kernelSize, int64_t dilation, int64_t transposedPad) {
+    int64_t effectiveK = 1 + (kernelSize - 1) * dilation;
+    return std::max(0LL, effectiveK - 1 - transposedPad);
+}
+
+// Prepare kernel for DataGradient API: un-reverse spatial dimensions and swap I/O channels.
+// Input kernel is in OIHW format (from StableHLO transposed conv, which pre-reverses the kernel).
+// Returns kernel ready for convolution2DDataGradient.
+static MPSGraphTensor* prepareKernelForDataGradient(MPSGraph* g, MPSGraphTensor* kernel,
+                                                    NSArray<NSNumber*>* spatialAxes) {
+    // Un-reverse kernel: StableHLO pre-reverses spatial dims for transposed conv
+    MPSGraphTensor* unreversed = [g reverseTensor:kernel axes:spatialAxes name:nil];
+    // DataGradient API has I/O semantically swapped; swap dims 0 and 1 (O <-> I in OIHW)
+    return [g transposeTensor:unreversed permutation:@[@1, @0, @2, @3] name:nil];
+}
+
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
@@ -136,31 +154,13 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             int64_t outC = resultShape[outputFeatureDim];
             NSArray<NSNumber*>* outputShape = @[@(outN), @1, @(outW), @(outC)];
 
-            // Get kernel width from mpsKernel (OIHW format with H=1)
-            NSArray<NSNumber*>* kernelShape = mpsKernel.shape;
-            int64_t kW = [kernelShape[3] longLongValue];
+            // Compute forward padding from transposed conv parameters
+            int64_t kW = [mpsKernel.shape[3] longLongValue];
+            int64_t fwdPadLeft = forwardPadding(kW, dilationW, padLeft);
+            int64_t fwdPadRight = forwardPadding(kW, dilationW, padRight);
 
-            // Compute effective kernel size accounting for dilation
-            int64_t effectiveKW = 1 + (kW - 1) * dilationW;
-
-            // Compute forward padding: forward_pad = effective_kernel - 1 - transposed_pad
-            int64_t fwdPadLeft = effectiveKW - 1 - padLeft;
-            int64_t fwdPadRight = effectiveKW - 1 - padRight;
-
-            // Clamp forward padding to non-negative values
-            if (fwdPadLeft < 0)
-                fwdPadLeft = 0;
-            if (fwdPadRight < 0)
-                fwdPadRight = 0;
-
-            // Un-reverse kernel: flip W dimension (dim 3)
-            MPSGraphTensor* unreversedKernel = [g reverseTensor:mpsKernel axes:@[@3] name:nil];
-
-            // For gradient computation, the kernel has I/O dimensions semantically swapped.
-            // DataGradient API needs weights in [C_out, C_in, H, W] format, so swap dims 0 and 1.
-            unreversedKernel = [g transposeTensor:unreversedKernel
-                                      permutation:@[@1, @0, @2, @3]
-                                             name:nil];
+            // Prepare kernel: un-reverse W (dim 3) and swap I/O for DataGradient API
+            MPSGraphTensor* preparedKernel = prepareKernelForDataGradient(g, mpsKernel, @[@3]);
 
             // Create forward conv descriptor with strideInX = inputDilationW
             MPSGraphConvolution2DOpDescriptor* fwdDesc = [MPSGraphConvolution2DOpDescriptor
@@ -181,7 +181,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
             // Call DataGradient API (result is in NHWC [B, 1, W, C])
             MPSGraphTensor* nhwcOut =
                 [g convolution2DDataGradientWithIncomingGradientTensor:nhwcInput
-                                                         weightsTensor:unreversedKernel
+                                                         weightsTensor:preparedKernel
                                                            outputShape:outputShape
                                           forwardConvolutionDescriptor:fwdDesc
                                                                   name:nil];
@@ -463,44 +463,16 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         [outputShape addObject:@(outW)];
         [outputShape addObject:@(outC)];
 
-        // Get kernel spatial dimensions from mpsKernel (OIHW format)
-        NSArray<NSNumber*>* kernelShape = mpsKernel.shape;
-        int64_t kH = [kernelShape[2] longLongValue];
-        int64_t kW = [kernelShape[3] longLongValue];
+        // Compute forward padding from transposed conv parameters
+        int64_t kH = [mpsKernel.shape[2] longLongValue];
+        int64_t kW = [mpsKernel.shape[3] longLongValue];
+        int64_t fwdPadTop = forwardPadding(kH, dilationH, padTop);
+        int64_t fwdPadBottom = forwardPadding(kH, dilationH, padBottom);
+        int64_t fwdPadLeft = forwardPadding(kW, dilationW, padLeft);
+        int64_t fwdPadRight = forwardPadding(kW, dilationW, padRight);
 
-        // Compute effective kernel size accounting for dilation
-        int64_t effectiveKH = 1 + (kH - 1) * dilationH;
-        int64_t effectiveKW = 1 + (kW - 1) * dilationW;
-
-        // Compute forward padding: forward_pad = effective_kernel - 1 - transposed_pad
-        // This translates the transposed conv padding to the equivalent forward conv padding
-        int64_t fwdPadTop = effectiveKH - 1 - padTop;
-        int64_t fwdPadBottom = effectiveKH - 1 - padBottom;
-        int64_t fwdPadLeft = effectiveKW - 1 - padLeft;
-        int64_t fwdPadRight = effectiveKW - 1 - padRight;
-
-        // Clamp forward padding to non-negative values.
-        // The DataGradient API uses the outputShape parameter to determine the actual
-        // output size, so we just need valid (non-negative) padding values.
-        if (fwdPadTop < 0)
-            fwdPadTop = 0;
-        if (fwdPadBottom < 0)
-            fwdPadBottom = 0;
-        if (fwdPadLeft < 0)
-            fwdPadLeft = 0;
-        if (fwdPadRight < 0)
-            fwdPadRight = 0;
-
-        // Un-reverse kernel: StableHLO pre-reverses for transposed conv
-        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3)
-        MPSGraphTensor* unreversedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
-
-        // For gradient computation, the kernel has I/O dimensions semantically swapped.
-        // The StableHLO uses layout like HWOI where O=C_in and I=C_out (opposite of forward).
-        // DataGradient API needs weights in [C_out, C_in, H, W] format, so swap dims 0 and 1.
-        unreversedKernel = [g transposeTensor:unreversedKernel
-                                  permutation:@[@1, @0, @2, @3]
-                                         name:nil];
+        // Prepare kernel: un-reverse H,W (dims 2,3) and swap I/O for DataGradient API
+        MPSGraphTensor* preparedKernel = prepareKernelForDataGradient(g, mpsKernel, @[@2, @3]);
 
         // Create FORWARD conv descriptor
         // For DataGradient, stride = inputDilation (upsampling factor)
@@ -519,9 +491,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         fwdDesc.paddingLeft = (NSUInteger)fwdPadLeft;
         fwdDesc.paddingRight = (NSUInteger)fwdPadRight;
 
-        // Call DataGradient API - computes gradient of data with respect to loss
+        // Call DataGradient API
         result = [g convolution2DDataGradientWithIncomingGradientTensor:convInput
-                                                          weightsTensor:unreversedKernel
+                                                          weightsTensor:preparedKernel
                                                             outputShape:outputShape
                                            forwardConvolutionDescriptor:fwdDesc
                                                                    name:nil];
