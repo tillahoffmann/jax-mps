@@ -51,6 +51,9 @@ static MPSGraphTensor* Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& va
         case mlir::stablehlo::FftType::IRFFT:
             desc.inverse = YES;
             desc.scalingMode = MPSGraphFFTScalingModeSize;
+            // For IRFFT, fft_length specifies the output size. When it's odd, we must
+            // set roundToOddHermitean so MPS produces the correct output length.
+            desc.roundToOddHermitean = (fftLength.back() % 2 == 1) ? YES : NO;
             return [g HermiteanToRealFFTWithTensor:input axes:axes descriptor:desc name:nil];
         default:
             MPS_LOG_ERROR("Unsupported fft type\n");

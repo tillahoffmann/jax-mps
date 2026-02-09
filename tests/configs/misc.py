@@ -140,4 +140,29 @@ def make_misc_op_configs():
                 differentiable_argnums=(),
                 name="irfft-c2r-2d",
             ),
+            # Odd-sized FFT tests (for roundToOddHermitean handling)
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.RFFT, (15,)),
+                numpy.random.standard_normal((3, 15)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="rfft-r2c-1d-odd",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IRFFT, (15,)),
+                (
+                    numpy.random.standard_normal((3, 8))
+                    + 1j * numpy.random.standard_normal((3, 8))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="irfft-c2r-1d-odd",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IRFFT, (4, 7)),
+                (
+                    numpy.random.standard_normal((2, 4, 4))
+                    + 1j * numpy.random.standard_normal((2, 4, 4))
+                ).astype(numpy.complex64),
+                differentiable_argnums=(),
+                name="irfft-c2r-2d-odd",
+            ),
         ]
