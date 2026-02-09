@@ -130,7 +130,9 @@ def make_unary_op_configs():
         ),
         OperationTestConfig(
             lax.population_count,
-            numpy.asarray([0, 1, 3, 7, 255, 256, 0x80000000, 0xFFFFFFFF], dtype=numpy.uint32),
+            numpy.asarray(
+                [0, 1, 3, 7, 255, 256, 0x80000000, 0xFFFFFFFF], dtype=numpy.uint32
+            ),
             differentiable_argnums=(),
         ),
         OperationTestConfig(
