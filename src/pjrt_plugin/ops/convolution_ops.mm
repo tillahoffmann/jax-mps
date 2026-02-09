@@ -35,9 +35,8 @@ static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLay
     return isIdentity ? nil : perm;
 }
 
-// Standard layouts for reference
-static const std::vector<int64_t> LAYOUT_NHWC = {0, 3, 1, 2};  // batch=0, feature=3, H=1, W=2
-static const std::vector<int64_t> LAYOUT_OIHW = {0, 1, 2, 3};  // O=0, I=1, H=2, W=3
+// Standard NHWC layout: batch=0, feature=3, H=1, W=2
+static const std::vector<int64_t> LAYOUT_NHWC = {0, 3, 1, 2};
 
 // Convolution parameters bundled together for clarity
 struct ConvParams {
@@ -126,38 +125,18 @@ static MPSGraphTensor* prepareKernelForDataGradient(MPSGraph* g, MPSGraphTensor*
     return [g transposeTensor:unreversed permutation:@[@1, @0, @2, @3] name:nil];
 }
 
-// Lift 1D input tensor to 2D by reordering to [B, C, W] then reshaping to [B, C, 1, W].
-// Returns nullptr on error.
-static MPSGraphTensor* lift1DInputTo2D(MPSGraph* g, MPSGraphTensor* input, int64_t batchDim,
-                                       int64_t featureDim, int64_t spatialDim) {
-    MPSGraphTensor* bcwInput = input;
-    if (!(batchDim == 0 && featureDim == 1 && spatialDim == 2)) {
-        NSArray<NSNumber*>* perm = @[@(batchDim), @(featureDim), @(spatialDim)];
-        bcwInput = [g transposeTensor:input permutation:perm name:nil];
+// Lift a 1D (rank-3) tensor to 2D (rank-4) by reordering to canonical order [dim0, dim1, dim2]
+// then reshaping to [dim0, dim1, 1, dim2] (inserting singleton at position 2).
+static MPSGraphTensor* lift1DTo2D(MPSGraph* g, MPSGraphTensor* tensor, int64_t dim0, int64_t dim1,
+                                  int64_t dim2) {
+    MPSGraphTensor* reordered = tensor;
+    if (!(dim0 == 0 && dim1 == 1 && dim2 == 2)) {
+        reordered = [g transposeTensor:tensor permutation:@[@(dim0), @(dim1), @(dim2)] name:nil];
     }
-    NSArray<NSNumber*>* shape = bcwInput.shape;
-    if (!shape || shape.count != 3) {
-        MPS_LOG_ERROR("1D convolution expects rank-3 input\n");
+    NSArray<NSNumber*>* shape = reordered.shape;
+    if (!shape || shape.count != 3)
         return nullptr;
-    }
-    return [g reshapeTensor:bcwInput withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
-}
-
-// Lift 1D kernel tensor to 2D by reordering to [O, I, K] then reshaping to [O, I, 1, K].
-// Returns nullptr on error.
-static MPSGraphTensor* lift1DKernelTo2D(MPSGraph* g, MPSGraphTensor* kernel, int64_t outputDim,
-                                        int64_t inputDim, int64_t spatialDim) {
-    MPSGraphTensor* oikKernel = kernel;
-    if (!(outputDim == 0 && inputDim == 1 && spatialDim == 2)) {
-        NSArray<NSNumber*>* perm = @[@(outputDim), @(inputDim), @(spatialDim)];
-        oikKernel = [g transposeTensor:kernel permutation:perm name:nil];
-    }
-    NSArray<NSNumber*>* shape = oikKernel.shape;
-    if (!shape || shape.count != 3) {
-        MPS_LOG_ERROR("1D convolution expects rank-3 kernel\n");
-        return nullptr;
-    }
-    return [g reshapeTensor:oikKernel withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
+    return [g reshapeTensor:reordered withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
 }
 
 // Convert 2D output back to 1D layout: squeeze the singleton H dimension and transpose to target.
@@ -214,36 +193,29 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         return nullptr;
     }
 
-    // === 1D convolution: lift to 2D ===
-    // Save original 1D output layout info for final conversion
     bool is1D = (spatialRank == 1);
-    int64_t output1DBatchDim = outputBatchDim;
-    int64_t output1DFeatureDim = outputFeatureDim;
-    int64_t output1DSpatialDim = is1D ? outputSpatialDims[0] : 0;
-
     if (spatialRank > 2) {
         MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
                       spatialRank);
         return nullptr;
     }
 
+    // For 1D: save spatial dim before lifting (batch/feature dims don't change)
+    int64_t output1DSpatialDim = is1D ? outputSpatialDims[0] : 0;
+
     if (is1D) {
         // Lift 1D tensors to 2D for unified processing
-        input = lift1DInputTo2D(g, input, inputBatchDim, inputFeatureDim, inputSpatialDims[0]);
-        if (!input)
+        input = lift1DTo2D(g, input, inputBatchDim, inputFeatureDim, inputSpatialDims[0]);
+        kernel = lift1DTo2D(g, kernel, kernelOutputFeatureDim, kernelInputFeatureDim,
+                            kernelSpatialDims[0]);
+        if (!input || !kernel) {
+            MPS_LOG_ERROR("1D convolution expects rank-3 input and kernel\n");
             return nullptr;
+        }
         inputBatchDim = 0;
         inputFeatureDim = 1;
-
-        kernel = lift1DKernelTo2D(g, kernel, kernelOutputFeatureDim, kernelInputFeatureDim,
-                                  kernelSpatialDims[0]);
-        if (!kernel)
-            return nullptr;
         kernelOutputFeatureDim = 0;
         kernelInputFeatureDim = 1;
-
-        outputBatchDim = 0;
-        outputFeatureDim = 1;
     }
 
     // === From here on, we have 2D tensors (or 1D lifted to 2D) ===
@@ -260,18 +232,17 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         inputLayout = {inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]};
     }
 
-    // Transpose kernel to OIHW format for MPS
-    // Kernel layout: {O, I, H, W} positions
+    // Transpose kernel to OIHW format (identity layout {0,1,2,3}) for MPS
     MPSGraphTensor* mpsKernel = kernel;
     if (!is1D) {
         std::vector<int64_t> kernelLayout = {kernelOutputFeatureDim, kernelInputFeatureDim,
                                              kernelSpatialDims[0], kernelSpatialDims[1]};
-        NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, LAYOUT_OIHW);
+        // OIHW is identity layout {0,1,2,3}, so permutation brings kernel to canonical order
+        NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, {0, 1, 2, 3});
         if (kernelPerm) {
             mpsKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
         }
     }
-    // For 1D, kernel is already OIHW from the lifting step
 
     // Transpose input to NHWC (MPS is more reliable with NHWC)
     NSArray<NSNumber*>* inputPerm = computePermutation(inputLayout, LAYOUT_NHWC);
@@ -279,22 +250,6 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     if (inputPerm) {
         convInput = [g transposeTensor:input permutation:inputPerm name:nil];
     }
-
-    // Create convolution descriptor (always use NHWC since we transpose above)
-    MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
-        descriptorWithStrideInX:(NSUInteger)p.strideW
-                      strideInY:(NSUInteger)p.strideH
-                dilationRateInX:(NSUInteger)p.dilationW
-                dilationRateInY:(NSUInteger)p.dilationH
-                         groups:(NSUInteger)p.featureGroupCount
-                   paddingStyle:MPSGraphPaddingStyleExplicit
-                     dataLayout:MPSGraphTensorNamedDataLayoutNHWC
-                  weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-
-    desc.paddingLeft = (NSUInteger)p.padLeft;
-    desc.paddingRight = (NSUInteger)p.padRight;
-    desc.paddingTop = (NSUInteger)p.padTop;
-    desc.paddingBottom = (NSUInteger)p.padBottom;
 
     // Perform convolution (or transposed convolution)
     MPSGraphTensor* result;
@@ -308,34 +263,20 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
 
         // Get output shape in NHWC format
         auto resultShape = resultType.getShape();
-        NSArray<NSNumber*>* outputShape;
-        if (is1D) {
-            // For 1D, output shape uses original 1D dimension numbers
-            int64_t outN = resultShape[output1DBatchDim];
-            int64_t outW = resultShape[output1DSpatialDim];
-            int64_t outC = resultShape[output1DFeatureDim];
-            outputShape = @[@(outN), @1, @(outW), @(outC)];
-        } else {
-            int64_t outN = resultShape[outputBatchDim];
-            int64_t outH = resultShape[outputSpatialDims[0]];
-            int64_t outW = resultShape[outputSpatialDims[1]];
-            int64_t outC = resultShape[outputFeatureDim];
-            outputShape = @[@(outN), @(outH), @(outW), @(outC)];
-        }
+        int64_t outN = resultShape[outputBatchDim];
+        int64_t outH = is1D ? 1 : resultShape[outputSpatialDims[0]];
+        int64_t outW = resultShape[is1D ? output1DSpatialDim : outputSpatialDims[1]];
+        int64_t outC = resultShape[outputFeatureDim];
+        NSArray<NSNumber*>* outputShape = @[@(outN), @(outH), @(outW), @(outC)];
 
         // Compute forward padding from transposed conv parameters
         int64_t kH = [mpsKernel.shape[2] longLongValue];
         int64_t kW = [mpsKernel.shape[3] longLongValue];
-        int64_t fwdPadTop = forwardPadding(kH, p.dilationH, p.padTop);
-        int64_t fwdPadBottom = forwardPadding(kH, p.dilationH, p.padBottom);
-        int64_t fwdPadLeft = forwardPadding(kW, p.dilationW, p.padLeft);
-        int64_t fwdPadRight = forwardPadding(kW, p.dilationW, p.padRight);
 
         // Prepare kernel for DataGradient API
         MPSGraphTensor* preparedKernel = prepareKernelForDataGradient(g, mpsKernel, @[@2, @3]);
 
-        // Create forward conv descriptor
-        MPSGraphConvolution2DOpDescriptor* fwdDesc = [MPSGraphConvolution2DOpDescriptor
+        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
             descriptorWithStrideInX:(NSUInteger)p.inputDilationW
                           strideInY:(NSUInteger)p.inputDilationH
                     dilationRateInX:(NSUInteger)p.dilationW
@@ -344,19 +285,32 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                        paddingStyle:MPSGraphPaddingStyleExplicit
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-
-        fwdDesc.paddingTop = (NSUInteger)fwdPadTop;
-        fwdDesc.paddingBottom = (NSUInteger)fwdPadBottom;
-        fwdDesc.paddingLeft = (NSUInteger)fwdPadLeft;
-        fwdDesc.paddingRight = (NSUInteger)fwdPadRight;
+        desc.paddingTop = (NSUInteger)forwardPadding(kH, p.dilationH, p.padTop);
+        desc.paddingBottom = (NSUInteger)forwardPadding(kH, p.dilationH, p.padBottom);
+        desc.paddingLeft = (NSUInteger)forwardPadding(kW, p.dilationW, p.padLeft);
+        desc.paddingRight = (NSUInteger)forwardPadding(kW, p.dilationW, p.padRight);
 
         result = [g convolution2DDataGradientWithIncomingGradientTensor:convInput
                                                           weightsTensor:preparedKernel
                                                             outputShape:outputShape
-                                           forwardConvolutionDescriptor:fwdDesc
+                                           forwardConvolutionDescriptor:desc
                                                                    name:nil];
     } else {
         // Normal convolution
+        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
+            descriptorWithStrideInX:(NSUInteger)p.strideW
+                          strideInY:(NSUInteger)p.strideH
+                    dilationRateInX:(NSUInteger)p.dilationW
+                    dilationRateInY:(NSUInteger)p.dilationH
+                             groups:(NSUInteger)p.featureGroupCount
+                       paddingStyle:MPSGraphPaddingStyleExplicit
+                         dataLayout:MPSGraphTensorNamedDataLayoutNHWC
+                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+        desc.paddingLeft = (NSUInteger)p.padLeft;
+        desc.paddingRight = (NSUInteger)p.padRight;
+        desc.paddingTop = (NSUInteger)p.padTop;
+        desc.paddingBottom = (NSUInteger)p.padBottom;
+
         result = [g convolution2DWithSourceTensor:convInput
                                     weightsTensor:mpsKernel
                                        descriptor:desc
@@ -366,8 +320,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     // Output is in NHWC format from MPS
 
     if (is1D) {
-        result = convert2DOutputTo1D(g, result, output1DBatchDim, output1DFeatureDim,
-                                     output1DSpatialDim);
+        result =
+            convert2DOutputTo1D(g, result, outputBatchDim, outputFeatureDim, output1DSpatialDim);
     } else {
         // Transpose 2D output from NHWC to expected layout
         std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outputSpatialDims[0],
