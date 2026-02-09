@@ -125,7 +125,23 @@ def make_misc_op_configs():
                 ).astype(numpy.complex64),
                 name="irfft-c2r-2d",
             ),
-            # Odd-sized FFT tests (for roundToOddHermitean handling)
+            # Odd-sized FFT tests
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.FFT, (15,)),
+                (
+                    numpy.random.standard_normal((3, 15))
+                    + 1j * numpy.random.standard_normal((3, 15))
+                ).astype(numpy.complex64),
+                name="fft-c2c-1d-odd",
+            ),
+            OperationTestConfig(
+                lambda x: lax.fft(x, lax.FftType.IFFT, (15,)),
+                (
+                    numpy.random.standard_normal((3, 15))
+                    + 1j * numpy.random.standard_normal((3, 15))
+                ).astype(numpy.complex64),
+                name="ifft-c2c-1d-odd",
+            ),
             OperationTestConfig(
                 lambda x: lax.fft(x, lax.FftType.RFFT, (15,)),
                 numpy.random.standard_normal((3, 15)).astype(numpy.float32),
