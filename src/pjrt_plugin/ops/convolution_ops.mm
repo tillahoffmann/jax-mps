@@ -75,10 +75,7 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         if (lhsDilation && lhsDilation->size() >= 1) {
             inputDilationW = (*lhsDilation)[0];
         }
-        if (inputDilationW != 1) {
-            MPS_LOG_ERROR("1D transposed convolution (lhs_dilation != 1) not yet supported\n");
-            return nullptr;
-        }
+        bool is1DTransposedConv = (inputDilationW != 1);
 
         // Reorder input to [B, F, S], then reshape to NCHW [B, F, 1, S].
         NSMutableArray<NSNumber*>* inputPerm = [NSMutableArray arrayWithCapacity:3];
@@ -117,24 +114,101 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                                            withShape:@[oikShape[0], oikShape[1], @1, oikShape[2]]
                                                 name:nil];
 
-        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:(NSUInteger)strideW
-                          strideInY:1
-                    dilationRateInX:(NSUInteger)dilationW
-                    dilationRateInY:1
-                             groups:(NSUInteger)featureGroupCount
-                       paddingStyle:MPSGraphPaddingStyleExplicit
-                         dataLayout:MPSGraphTensorNamedDataLayoutNCHW
-                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-        desc.paddingTop = 0;
-        desc.paddingBottom = 0;
-        desc.paddingLeft = (NSUInteger)padLeft;
-        desc.paddingRight = (NSUInteger)padRight;
+        MPSGraphTensor* convOut;
+        if (is1DTransposedConv) {
+            // 1D Transposed convolution using DataGradient API
+            // Use NHWC layout for reliability with DataGradient API
+            auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+            if (!resultType) {
+                MPS_LOG_ERROR("Could not get result type for 1D transposed convolution\n");
+                return nullptr;
+            }
 
-        MPSGraphTensor* convOut = [g convolution2DWithSourceTensor:convInput
-                                                     weightsTensor:mpsKernel
-                                                        descriptor:desc
-                                                              name:nil];
+            // Convert input from NCHW [B, C, 1, W] to NHWC [B, 1, W, C]
+            MPSGraphTensor* nhwcInput = [g transposeTensor:convInput
+                                               permutation:@[@0, @2, @3, @1]
+                                                      name:nil];
+
+            // Get output shape in NHWC format [N, 1, W, C]
+            auto resultShape = resultType.getShape();
+            int64_t outN = resultShape[outputBatchDim];
+            int64_t outW = resultShape[outputSpatialDims[0]];
+            int64_t outC = resultShape[outputFeatureDim];
+            NSArray<NSNumber*>* outputShape = @[@(outN), @1, @(outW), @(outC)];
+
+            // Get kernel width from mpsKernel (OIHW format with H=1)
+            NSArray<NSNumber*>* kernelShape = mpsKernel.shape;
+            int64_t kW = [kernelShape[3] longLongValue];
+
+            // Compute effective kernel size accounting for dilation
+            int64_t effectiveKW = 1 + (kW - 1) * dilationW;
+
+            // Compute forward padding: forward_pad = effective_kernel - 1 - transposed_pad
+            int64_t fwdPadLeft = effectiveKW - 1 - padLeft;
+            int64_t fwdPadRight = effectiveKW - 1 - padRight;
+
+            // Clamp forward padding to non-negative values
+            if (fwdPadLeft < 0)
+                fwdPadLeft = 0;
+            if (fwdPadRight < 0)
+                fwdPadRight = 0;
+
+            // Un-reverse kernel: flip W dimension (dim 3)
+            MPSGraphTensor* unreversedKernel = [g reverseTensor:mpsKernel axes:@[@3] name:nil];
+
+            // For gradient computation, the kernel has I/O dimensions semantically swapped.
+            // DataGradient API needs weights in [C_out, C_in, H, W] format, so swap dims 0 and 1.
+            unreversedKernel = [g transposeTensor:unreversedKernel
+                                      permutation:@[@1, @0, @2, @3]
+                                             name:nil];
+
+            // Create forward conv descriptor with strideInX = inputDilationW
+            MPSGraphConvolution2DOpDescriptor* fwdDesc = [MPSGraphConvolution2DOpDescriptor
+                descriptorWithStrideInX:(NSUInteger)inputDilationW
+                              strideInY:1
+                        dilationRateInX:(NSUInteger)dilationW
+                        dilationRateInY:1
+                                 groups:(NSUInteger)featureGroupCount
+                           paddingStyle:MPSGraphPaddingStyleExplicit
+                             dataLayout:MPSGraphTensorNamedDataLayoutNHWC
+                          weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+
+            fwdDesc.paddingTop = 0;
+            fwdDesc.paddingBottom = 0;
+            fwdDesc.paddingLeft = (NSUInteger)fwdPadLeft;
+            fwdDesc.paddingRight = (NSUInteger)fwdPadRight;
+
+            // Call DataGradient API (result is in NHWC [B, 1, W, C])
+            MPSGraphTensor* nhwcOut =
+                [g convolution2DDataGradientWithIncomingGradientTensor:nhwcInput
+                                                         weightsTensor:unreversedKernel
+                                                           outputShape:outputShape
+                                          forwardConvolutionDescriptor:fwdDesc
+                                                                  name:nil];
+
+            // Convert back to NCHW [B, C, 1, W] from NHWC [B, 1, W, C]
+            convOut = [g transposeTensor:nhwcOut permutation:@[@0, @3, @1, @2] name:nil];
+        } else {
+            // Normal 1D convolution
+            MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
+                descriptorWithStrideInX:(NSUInteger)strideW
+                              strideInY:1
+                        dilationRateInX:(NSUInteger)dilationW
+                        dilationRateInY:1
+                                 groups:(NSUInteger)featureGroupCount
+                           paddingStyle:MPSGraphPaddingStyleExplicit
+                             dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                          weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+            desc.paddingTop = 0;
+            desc.paddingBottom = 0;
+            desc.paddingLeft = (NSUInteger)padLeft;
+            desc.paddingRight = (NSUInteger)padRight;
+
+            convOut = [g convolution2DWithSourceTensor:convInput
+                                         weightsTensor:mpsKernel
+                                            descriptor:desc
+                                                  name:nil];
+        }
         if (!convOut) {
             MPS_LOG_ERROR("1D convolution lowering failed\n");
             return nullptr;
@@ -366,7 +440,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     MPSGraphTensor* result;
     if (isTransposedConv) {
         // Transposed convolution (used in backward pass of strided conv)
-        // For transposed conv, MPS needs the output shape
+        // Use convolution2DDataGradient API which correctly handles all padding configurations.
+        // MPS's convolutionTranspose2D has bugs when pad_start < lhs_dilation.
+
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
         if (!resultType) {
             MPS_LOG_ERROR("Could not get result type for transposed convolution\n");
@@ -377,7 +453,6 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         auto resultShape = resultType.getShape();
         NSMutableArray<NSNumber*>* outputShape = [NSMutableArray array];
 
-        // The result shape is in the output dimension layout, need to convert to NHWC
         int64_t outN = resultShape[outputBatchDim];
         int64_t outH = resultShape[outputSpatialDims[0]];
         int64_t outW = resultShape[outputSpatialDims[1]];
@@ -388,24 +463,48 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         [outputShape addObject:@(outW)];
         [outputShape addObject:@(outC)];
 
-        // For transposed convolution, the kernel's I and O have swapped semantics:
-        // - MPS transpose conv expects source_channels == kernel_O
-        // - But StableHLO kernel has source_channels == kernel_I
-        // So we need to swap I and O: OIHW [O, I, H, W] -> [I, O, H, W]
-        //
-        // Additionally, MPS transposed conv correlates (no kernel flip) while
-        // StableHLO expects convolution semantics (kernel flipped).
-        // We must flip the kernel in both spatial dimensions to match.
-        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3).
-        MPSGraphTensor* flippedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
-        MPSGraphTensor* transposeKernel = [g transposeTensor:flippedKernel
-                                                 permutation:@[@1, @0, @2, @3]
-                                                        name:nil];
+        // Get kernel spatial dimensions from mpsKernel (OIHW format)
+        NSArray<NSNumber*>* kernelShape = mpsKernel.shape;
+        int64_t kH = [kernelShape[2] longLongValue];
+        int64_t kW = [kernelShape[3] longLongValue];
 
-        // For transposed convolution, MPS stride controls upsampling factor.
-        // This corresponds to StableHLO's lhs_dilation (input dilation).
-        // For backward pass of stride=N forward conv, inputDilation=N.
-        MPSGraphConvolution2DOpDescriptor* transposeDesc = [MPSGraphConvolution2DOpDescriptor
+        // Compute effective kernel size accounting for dilation
+        int64_t effectiveKH = 1 + (kH - 1) * dilationH;
+        int64_t effectiveKW = 1 + (kW - 1) * dilationW;
+
+        // Compute forward padding: forward_pad = effective_kernel - 1 - transposed_pad
+        // This translates the transposed conv padding to the equivalent forward conv padding
+        int64_t fwdPadTop = effectiveKH - 1 - padTop;
+        int64_t fwdPadBottom = effectiveKH - 1 - padBottom;
+        int64_t fwdPadLeft = effectiveKW - 1 - padLeft;
+        int64_t fwdPadRight = effectiveKW - 1 - padRight;
+
+        // Clamp forward padding to non-negative values.
+        // The DataGradient API uses the outputShape parameter to determine the actual
+        // output size, so we just need valid (non-negative) padding values.
+        if (fwdPadTop < 0)
+            fwdPadTop = 0;
+        if (fwdPadBottom < 0)
+            fwdPadBottom = 0;
+        if (fwdPadLeft < 0)
+            fwdPadLeft = 0;
+        if (fwdPadRight < 0)
+            fwdPadRight = 0;
+
+        // Un-reverse kernel: StableHLO pre-reverses for transposed conv
+        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3)
+        MPSGraphTensor* unreversedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
+
+        // For gradient computation, the kernel has I/O dimensions semantically swapped.
+        // The StableHLO uses layout like HWOI where O=C_in and I=C_out (opposite of forward).
+        // DataGradient API needs weights in [C_out, C_in, H, W] format, so swap dims 0 and 1.
+        unreversedKernel = [g transposeTensor:unreversedKernel
+                                  permutation:@[@1, @0, @2, @3]
+                                         name:nil];
+
+        // Create FORWARD conv descriptor
+        // For DataGradient, stride = inputDilation (upsampling factor)
+        MPSGraphConvolution2DOpDescriptor* fwdDesc = [MPSGraphConvolution2DOpDescriptor
             descriptorWithStrideInX:(NSUInteger)inputDilationW
                           strideInY:(NSUInteger)inputDilationH
                     dilationRateInX:(NSUInteger)dilationW
@@ -415,41 +514,18 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
-        // For transposed convolution with explicit outputShape, MPS computes
-        // padding internally based on input/output shapes and stride. However,
-        // when strides are asymmetric (inputDilationH != inputDilationW), MPS's
-        // default alignment doesn't match StableHLO's expected output position.
-        //
-        // For symmetric strides (2,2), (3,3), etc., MPS's default alignment is
-        // correct and we don't need any padding adjustment.
-        //
-        // For asymmetric strides like (2,1) or (1,2), MPS produces spatially
-        // shifted output. The shift direction and amount are determined by the
-        // padding asymmetry in the StableHLO operation:
-        // - padTop - padBottom gives the H direction shift amount
-        // - padLeft - padRight gives the W direction shift amount
-        //
-        // Empirically, MPS transposed conv applies these shifts in swapped
-        // dimensions: H padding asymmetry affects W output position and vice versa.
-        // We only apply this correction when strides are actually asymmetric.
-        int64_t shiftH = 0;
-        int64_t shiftW = 0;
-        if (inputDilationH != inputDilationW) {
-            // Asymmetric strides - apply cross-dimensional shift correction
-            shiftH = padLeft - padRight;  // W padding asymmetry -> H shift
-            shiftW = padTop - padBottom;  // H padding asymmetry -> W shift
-        }
+        fwdDesc.paddingTop = (NSUInteger)fwdPadTop;
+        fwdDesc.paddingBottom = (NSUInteger)fwdPadBottom;
+        fwdDesc.paddingLeft = (NSUInteger)fwdPadLeft;
+        fwdDesc.paddingRight = (NSUInteger)fwdPadRight;
 
-        transposeDesc.paddingLeft = (NSUInteger)(shiftW > 0 ? shiftW : 0);
-        transposeDesc.paddingRight = 0;
-        transposeDesc.paddingTop = (NSUInteger)(shiftH > 0 ? shiftH : 0);
-        transposeDesc.paddingBottom = 0;
+        // Call DataGradient API - computes gradient of data with respect to loss
+        result = [g convolution2DDataGradientWithIncomingGradientTensor:convInput
+                                                          weightsTensor:unreversedKernel
+                                                            outputShape:outputShape
+                                           forwardConvolutionDescriptor:fwdDesc
+                                                                   name:nil];
 
-        result = [g convolutionTranspose2DWithSourceTensor:convInput
-                                             weightsTensor:transposeKernel
-                                               outputShape:outputShape
-                                                descriptor:transposeDesc
-                                                      name:nil];
     } else {
         // Normal convolution
         result = [g convolution2DWithSourceTensor:convInput
