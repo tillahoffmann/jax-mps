@@ -64,20 +64,6 @@ static int getBitWidth(mlir::Operation* op) {
     return 0;
 }
 
-static int getOperandBitWidth(mlir::Operation* op, unsigned operandIdx) {
-    if (op->getNumOperands() <= operandIdx)
-        return 0;
-    auto operandType = op->getOperand(operandIdx).getType();
-    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(operandType);
-    if (!tensorType)
-        return 0;
-    auto elemType = tensorType.getElementType();
-    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
-        return intType.getWidth();
-    }
-    return 0;
-}
-
 // Shared helper for shift operations with overflow handling
 static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap& values,
                                      bool isLeftShift) {
@@ -168,8 +154,13 @@ static MPSGraphTensor* Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap&
     if (!input)
         return nullptr;
 
-    int bitWidth = getOperandBitWidth(op, 0);
-    if (bitWidth <= 0) {
+    if (op->getNumOperands() == 0) {
+        MPS_LOG_ERROR("popcnt requires one integer operand\n");
+        return nullptr;
+    }
+    auto operandType = op->getOperand(0).getType();
+    auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(operandType);
+    if (!tensorType || !mlir::isa<mlir::IntegerType>(tensorType.getElementType())) {
         MPS_LOG_ERROR("popcnt requires an integer operand\n");
         return nullptr;
     }
