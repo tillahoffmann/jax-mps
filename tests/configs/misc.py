@@ -224,4 +224,43 @@ def make_misc_op_configs():
                 differentiable_argnums=(),
                 name="lax.while_loop.axis0",
             ),
+            OperationTestConfig(
+                lambda init: lax.while_loop(
+                    lambda state: state[0] < 4,
+                    lambda state: (
+                        state[0] + 1,
+                        state[1]
+                        + lax.while_loop(
+                            lambda inner: inner[0] < state[0] + 1,
+                            lambda inner: (inner[0] + 1, inner[1] + inner[0] + 1),
+                            (numpy.int32(0), numpy.int32(0)),
+                        )[1],
+                    ),
+                    (numpy.int32(0), init),
+                )[1],
+                numpy.int32(0),
+                differentiable_argnums=(),
+                name="lax.while_loop.nested_scalar",
+            ),
+            OperationTestConfig(
+                lambda init: lax.while_loop(
+                    lambda state: state[0] < 3,
+                    lambda state: (
+                        state[0] + 1,
+                        state[1]
+                        + lax.while_loop(
+                            lambda inner: inner[0] < 2,
+                            lambda inner: (
+                                inner[0] + 1,
+                                inner[1] + jnp.sum(inner[1], axis=1, keepdims=True),
+                            ),
+                            (numpy.int32(0), state[1]),
+                        )[1],
+                    ),
+                    (numpy.int32(0), init),
+                )[1],
+                numpy.random.standard_normal((3, 5)).astype(numpy.float32),
+                differentiable_argnums=(),
+                name="lax.while_loop.nested_axis1",
+            ),
         ]
