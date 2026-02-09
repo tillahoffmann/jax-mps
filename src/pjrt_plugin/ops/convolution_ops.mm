@@ -14,12 +14,6 @@ static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLay
     if (rank != dstLayout.size())
         return nil;
 
-    // Build inverse of srcLayout: invSrc[pos] = which dimension is at position pos
-    std::vector<int64_t> invSrc(rank);
-    for (size_t dim = 0; dim < rank; ++dim) {
-        invSrc[srcLayout[dim]] = dim;
-    }
-
     // perm[dstPos] = srcPos where the dimension at dstPos in dst was at srcPos in src
     NSMutableArray<NSNumber*>* perm = [NSMutableArray arrayWithCapacity:rank];
     bool isIdentity = true;
@@ -39,13 +33,6 @@ static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLay
             isIdentity = false;
     }
     return isIdentity ? nil : perm;
-}
-
-// Build layout vector for 4D tensor from dimension positions.
-// Returns {batch, feature, spatial0, spatial1} positions.
-static std::vector<int64_t> makeLayout4D(int64_t batchDim, int64_t featureDim, int64_t spatial0,
-                                         int64_t spatial1) {
-    return {batchDim, featureDim, spatial0, spatial1};
 }
 
 // Standard layouts for reference
@@ -139,6 +126,58 @@ static MPSGraphTensor* prepareKernelForDataGradient(MPSGraph* g, MPSGraphTensor*
     return [g transposeTensor:unreversed permutation:@[@1, @0, @2, @3] name:nil];
 }
 
+// Lift 1D input tensor to 2D by reordering to [B, C, W] then reshaping to [B, C, 1, W].
+// Returns nullptr on error.
+static MPSGraphTensor* lift1DInputTo2D(MPSGraph* g, MPSGraphTensor* input, int64_t batchDim,
+                                       int64_t featureDim, int64_t spatialDim) {
+    MPSGraphTensor* bcwInput = input;
+    if (!(batchDim == 0 && featureDim == 1 && spatialDim == 2)) {
+        NSArray<NSNumber*>* perm = @[@(batchDim), @(featureDim), @(spatialDim)];
+        bcwInput = [g transposeTensor:input permutation:perm name:nil];
+    }
+    NSArray<NSNumber*>* shape = bcwInput.shape;
+    if (!shape || shape.count != 3) {
+        MPS_LOG_ERROR("1D convolution expects rank-3 input\n");
+        return nullptr;
+    }
+    return [g reshapeTensor:bcwInput withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
+}
+
+// Lift 1D kernel tensor to 2D by reordering to [O, I, K] then reshaping to [O, I, 1, K].
+// Returns nullptr on error.
+static MPSGraphTensor* lift1DKernelTo2D(MPSGraph* g, MPSGraphTensor* kernel, int64_t outputDim,
+                                        int64_t inputDim, int64_t spatialDim) {
+    MPSGraphTensor* oikKernel = kernel;
+    if (!(outputDim == 0 && inputDim == 1 && spatialDim == 2)) {
+        NSArray<NSNumber*>* perm = @[@(outputDim), @(inputDim), @(spatialDim)];
+        oikKernel = [g transposeTensor:kernel permutation:perm name:nil];
+    }
+    NSArray<NSNumber*>* shape = oikKernel.shape;
+    if (!shape || shape.count != 3) {
+        MPS_LOG_ERROR("1D convolution expects rank-3 kernel\n");
+        return nullptr;
+    }
+    return [g reshapeTensor:oikKernel withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
+}
+
+// Convert 2D output back to 1D layout: squeeze the singleton H dimension and transpose to target.
+static MPSGraphTensor* convert2DOutputTo1D(MPSGraph* g, MPSGraphTensor* result, int64_t batchDim,
+                                           int64_t featureDim, int64_t spatialDim) {
+    // Input is NHWC [B, 1, W, C], transpose to NCHW [B, C, 1, W]
+    result = [g transposeTensor:result permutation:@[@0, @3, @1, @2] name:nil];
+    // Squeeze to [B, C, W]
+    NSArray<NSNumber*>* shape4D = result.shape;
+    result = [g reshapeTensor:result withShape:@[shape4D[0], shape4D[1], shape4D[3]] name:nil];
+    // Transpose from [B, C, W] to target layout using computePermutation
+    std::vector<int64_t> srcLayout = {0, 1, 2};  // B=0, C=1, W=2
+    std::vector<int64_t> dstLayout = {batchDim, featureDim, spatialDim};
+    NSArray<NSNumber*>* perm = computePermutation(srcLayout, dstLayout);
+    if (perm) {
+        result = [g transposeTensor:result permutation:perm name:nil];
+    }
+    return result;
+}
+
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
@@ -182,64 +221,32 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     int64_t output1DFeatureDim = outputFeatureDim;
     int64_t output1DSpatialDim = is1D ? outputSpatialDims[0] : 0;
 
-    if (is1D) {
-        // Lift input from 3D to 4D: reorder to [B, C, W] then reshape to [B, C, 1, W]
-        NSMutableArray<NSNumber*>* inputPerm = [NSMutableArray arrayWithCapacity:3];
-        [inputPerm addObject:@(inputBatchDim)];
-        [inputPerm addObject:@(inputFeatureDim)];
-        [inputPerm addObject:@(inputSpatialDims[0])];
+    if (spatialRank > 2) {
+        MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
+                      spatialRank);
+        return nullptr;
+    }
 
-        MPSGraphTensor* bcwInput = input;
-        if (!(inputBatchDim == 0 && inputFeatureDim == 1 && inputSpatialDims[0] == 2)) {
-            bcwInput = [g transposeTensor:input permutation:inputPerm name:nil];
-        }
-        NSArray<NSNumber*>* bcwShape = bcwInput.shape;
-        if (!bcwShape || bcwShape.count != 3) {
-            MPS_LOG_ERROR("1D convolution expects rank-3 input\n");
+    if (is1D) {
+        // Lift 1D tensors to 2D for unified processing
+        input = lift1DInputTo2D(g, input, inputBatchDim, inputFeatureDim, inputSpatialDims[0]);
+        if (!input)
             return nullptr;
-        }
-        input = [g reshapeTensor:bcwInput
-                       withShape:@[bcwShape[0], bcwShape[1], @1, bcwShape[2]]
-                            name:nil];
-        // Input is now NCHW with H=1
         inputBatchDim = 0;
         inputFeatureDim = 1;
 
-        // Lift kernel from 3D to 4D: reorder to [O, I, K] then reshape to [O, I, 1, K]
-        NSMutableArray<NSNumber*>* kernelPerm = [NSMutableArray arrayWithCapacity:3];
-        [kernelPerm addObject:@(kernelOutputFeatureDim)];
-        [kernelPerm addObject:@(kernelInputFeatureDim)];
-        [kernelPerm addObject:@(kernelSpatialDims[0])];
-
-        MPSGraphTensor* oikKernel = kernel;
-        if (!(kernelOutputFeatureDim == 0 && kernelInputFeatureDim == 1 &&
-              kernelSpatialDims[0] == 2)) {
-            oikKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
-        }
-        NSArray<NSNumber*>* oikShape = oikKernel.shape;
-        if (!oikShape || oikShape.count != 3) {
-            MPS_LOG_ERROR("1D convolution expects rank-3 kernel\n");
+        kernel = lift1DKernelTo2D(g, kernel, kernelOutputFeatureDim, kernelInputFeatureDim,
+                                  kernelSpatialDims[0]);
+        if (!kernel)
             return nullptr;
-        }
-        kernel = [g reshapeTensor:oikKernel
-                        withShape:@[oikShape[0], oikShape[1], @1, oikShape[2]]
-                             name:nil];
-        // Kernel is now OIHW with H=1
         kernelOutputFeatureDim = 0;
         kernelInputFeatureDim = 1;
 
-        // Set output layout to NCHW (will squeeze H later)
         outputBatchDim = 0;
         outputFeatureDim = 1;
     }
 
     // === From here on, we have 2D tensors (or 1D lifted to 2D) ===
-
-    if (spatialRank != 1 && spatialRank != 2) {
-        MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
-                      spatialRank);
-        return nullptr;
-    }
 
     // Extract convolution parameters
     ConvParams p = extractConvParams(convOp, is1D);
@@ -359,22 +366,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     // Output is in NHWC format from MPS
 
     if (is1D) {
-        // Convert from NHWC [B, 1, W, C] to target 1D layout
-        // First transpose to NCHW [B, C, 1, W]
-        result = [g transposeTensor:result permutation:@[@0, @3, @1, @2] name:nil];
-        // Squeeze to [B, C, W]
-        NSArray<NSNumber*>* shape4D = result.shape;
-        result = [g reshapeTensor:result withShape:@[shape4D[0], shape4D[1], shape4D[3]] name:nil];
-        // Transpose from [B, C, W] to target layout
-        if (!(output1DBatchDim == 0 && output1DFeatureDim == 1 && output1DSpatialDim == 2)) {
-            NSMutableArray<NSNumber*>* outPerm = [NSMutableArray arrayWithCapacity:3];
-            for (int i = 0; i < 3; ++i)
-                [outPerm addObject:@0];
-            outPerm[(NSUInteger)output1DBatchDim] = @0;
-            outPerm[(NSUInteger)output1DFeatureDim] = @1;
-            outPerm[(NSUInteger)output1DSpatialDim] = @2;
-            result = [g transposeTensor:result permutation:outPerm name:nil];
-        }
+        result = convert2DOutputTo1D(g, result, output1DBatchDim, output1DFeatureDim,
+                                     output1DSpatialDim);
     } else {
         // Transpose 2D output from NHWC to expected layout
         std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outputSpatialDims[0],
