@@ -212,8 +212,10 @@ static ProcessResult processSortOp(MPSGraph* graph, mlir::Operation* op, ValueMa
         if (!input) {
             return ProcessResult::Error("stablehlo.sort input tensor not found");
         }
-        MPSGraphTensor* sorted =
-            [graph sortWithTensor:input axis:axis descending:descending name:nil];
+        MPSGraphTensor* sorted = [graph sortWithTensor:input
+                                                  axis:axis
+                                            descending:descending
+                                                  name:nil];
         if (!sorted) {
             return ProcessResult::Error("stablehlo.sort lowering failed");
         }
@@ -239,11 +241,13 @@ static ProcessResult processSortOp(MPSGraph* graph, mlir::Operation* op, ValueMa
                 return ProcessResult::Error("stablehlo.sort key tensor missing");
             }
             MPSGraphTensor* keyAtPerm = [graph gatherAlongAxis:axis
-                                              withUpdatesTensor:keyTensor
-                                                  indicesTensor:perm
-                                                           name:nil];
-            MPSGraphTensor* localOrder =
-                [graph argSortWithTensor:keyAtPerm axis:axis descending:descending name:nil];
+                                             withUpdatesTensor:keyTensor
+                                                 indicesTensor:perm
+                                                          name:nil];
+            MPSGraphTensor* localOrder = [graph argSortWithTensor:keyAtPerm
+                                                             axis:axis
+                                                       descending:descending
+                                                             name:nil];
             if (!localOrder) {
                 return ProcessResult::Error("stablehlo.sort argSort lowering failed");
             }
@@ -260,9 +264,9 @@ static ProcessResult processSortOp(MPSGraph* graph, mlir::Operation* op, ValueMa
                 return ProcessResult::Error("stablehlo.sort operand tensor missing");
             }
             MPSGraphTensor* sorted = [graph gatherAlongAxis:axis
-                                           withUpdatesTensor:operandTensor
-                                               indicesTensor:perm
-                                                        name:nil];
+                                          withUpdatesTensor:operandTensor
+                                              indicesTensor:perm
+                                                       name:nil];
             if (!sorted) {
                 return ProcessResult::Error("stablehlo.sort gather lowering failed");
             }
@@ -274,7 +278,8 @@ static ProcessResult processSortOp(MPSGraph* graph, mlir::Operation* op, ValueMa
     return ProcessResult::Error("Unsupported stablehlo.sort operand/result shape");
 }
 
-static int64_t inferTopKFromShapes(NSArray<NSNumber*>* inputShape, NSArray<NSNumber*>* outputShape) {
+static int64_t inferTopKFromShapes(NSArray<NSNumber*>* inputShape,
+                                   NSArray<NSNumber*>* outputShape) {
     if (!inputShape || !outputShape || inputShape.count != outputShape.count ||
         outputShape.count == 0) {
         return -1;
@@ -289,7 +294,8 @@ static int64_t inferTopKFromShapes(NSArray<NSNumber*>* inputShape, NSArray<NSNum
     return [outputShape.lastObject longLongValue];
 }
 
-static NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape, NSArray<NSNumber*>* outputShape) {
+static NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape,
+                                         NSArray<NSNumber*>* outputShape) {
     if (!inputShape || !outputShape || inputShape.count != outputShape.count ||
         inputShape.count == 0) {
         return -1;
@@ -305,7 +311,7 @@ static NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape, NSArray
 }
 
 static bool isTopKCustomCallTarget(const std::string& target) {
-    return target == "stablehlo.dynamic_top_k";
+    return target == "stablehlo.dynamic_top_k" || target == "mhlo.topk" || target == "mhlo.top_k";
 }
 
 static ProcessResult processTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
@@ -512,6 +518,14 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
 
         // Check for multi-result operations (not yet supported)
         if (op->getNumResults() > 1) {
+            if (op_name == "stablehlo.custom_call") {
+                if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
+                    return ProcessResult::Error(
+                        "Operation 'stablehlo.custom_call' target='" +
+                        customCallOp.getCallTargetName().str() +
+                        "' has multiple results which is not yet supported");
+                }
+            }
             return ProcessResult::Error("Operation '" + op_name +
                                         "' has multiple results which is not yet supported");
         }

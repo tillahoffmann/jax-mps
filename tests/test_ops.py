@@ -158,6 +158,9 @@ def assert_all_ops_tested():
             for pattern in patterns:
                 op_names.update(pattern.findall(content))
 
+    # These ops are lowered directly in mps_executable.mm rather than OpRegistry handlers.
+    op_names.update({"stablehlo.sort", "chlo.top_k"})
+
     assert op_names, "Failed to discover any ops."
     exercised = OperationTestConfig.EXERCISED_STABLEHLO_OPS - mlir_lowered_ops
     unsupported = exercised - op_names
