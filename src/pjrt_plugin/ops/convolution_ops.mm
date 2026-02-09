@@ -52,6 +52,75 @@ static std::vector<int64_t> makeLayout4D(int64_t batchDim, int64_t featureDim, i
 static const std::vector<int64_t> LAYOUT_NHWC = {0, 3, 1, 2};  // batch=0, feature=3, H=1, W=2
 static const std::vector<int64_t> LAYOUT_OIHW = {0, 1, 2, 3};  // O=0, I=1, H=2, W=3
 
+// Convolution parameters bundled together for clarity
+struct ConvParams {
+    int64_t strideH = 1, strideW = 1;
+    int64_t padTop = 0, padBottom = 0, padLeft = 0, padRight = 0;
+    int64_t dilationH = 1, dilationW = 1;
+    int64_t inputDilationH = 1, inputDilationW = 1;
+    int64_t featureGroupCount = 1;
+    bool isTransposed = false;
+};
+
+// Extract convolution parameters from StableHLO op, handling 1D vs 2D
+static ConvParams extractConvParams(mlir::stablehlo::ConvolutionOp& convOp, bool is1D) {
+    ConvParams p;
+    p.featureGroupCount = convOp.getFeatureGroupCount();
+
+    auto windowStrides = convOp.getWindowStrides();
+    if (windowStrides) {
+        auto v = windowStrides.value();
+        if (is1D && v.size() >= 1) {
+            p.strideW = v[0];
+        } else if (v.size() >= 2) {
+            p.strideH = v[0];
+            p.strideW = v[1];
+        }
+    }
+
+    auto padding = convOp.getPadding();
+    if (padding) {
+        auto paddingAttr = padding.value();
+        if (is1D && paddingAttr.getNumElements() >= 2) {
+            auto pv = paddingAttr.getValues<int64_t>();
+            p.padLeft = pv[{0, 0}];
+            p.padRight = pv[{0, 1}];
+        } else if (paddingAttr.getNumElements() >= 4) {
+            auto pv = paddingAttr.getValues<int64_t>();
+            p.padTop = pv[{0, 0}];
+            p.padBottom = pv[{0, 1}];
+            p.padLeft = pv[{1, 0}];
+            p.padRight = pv[{1, 1}];
+        }
+    }
+
+    auto rhsDilation = convOp.getRhsDilation();
+    if (rhsDilation) {
+        auto v = rhsDilation.value();
+        if (is1D && v.size() >= 1) {
+            p.dilationW = v[0];
+        } else if (v.size() >= 2) {
+            p.dilationH = v[0];
+            p.dilationW = v[1];
+        }
+    }
+
+    auto lhsDilation = convOp.getLhsDilation();
+    if (lhsDilation) {
+        auto v = lhsDilation.value();
+        if (is1D && v.size() >= 1) {
+            p.inputDilationW = v[0];
+            p.isTransposed = (p.inputDilationW != 1);
+        } else if (v.size() >= 2) {
+            p.inputDilationH = v[0];
+            p.inputDilationW = v[1];
+            p.isTransposed = (p.inputDilationH != 1 || p.inputDilationW != 1);
+        }
+    }
+
+    return p;
+}
+
 // Compute forward convolution padding from transposed convolution parameters.
 // Forward padding = effective_kernel_size - 1 - transposed_padding, clamped to >= 0.
 static int64_t forwardPadding(int64_t kernelSize, int64_t dilation, int64_t transposedPad) {
@@ -99,19 +168,9 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     int64_t outputFeatureDim = dimNumbers.getOutputFeatureDimension();
     auto outputSpatialDims = dimNumbers.getOutputSpatialDimensions();
 
-    // Get convolution attributes
-    auto windowStrides = convOp.getWindowStrides();
-    auto padding = convOp.getPadding();
-    auto lhsDilation = convOp.getLhsDilation();  // input dilation
-    auto rhsDilation = convOp.getRhsDilation();  // kernel dilation
-    int64_t featureGroupCount = convOp.getFeatureGroupCount();
-    int64_t batchGroupCount = convOp.getBatchGroupCount();
-
-    // Determine spatial rank
+    // Determine spatial rank and check batch group count
     size_t spatialRank = inputSpatialDims.size();
-
-    // Check batch group count
-    if (batchGroupCount != 1) {
+    if (convOp.getBatchGroupCount() != 1) {
         MPS_LOG_ERROR("batch_group_count != 1 not yet supported\n");
         return nullptr;
     }
@@ -182,61 +241,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         return nullptr;
     }
 
-    // Extract strides (default to 1)
-    int64_t strideH = 1, strideW = 1;
-    if (windowStrides) {
-        auto stridesVec = windowStrides.value();
-        if (is1D && stridesVec.size() >= 1) {
-            strideW = stridesVec[0];
-        } else if (stridesVec.size() >= 2) {
-            strideH = stridesVec[0];
-            strideW = stridesVec[1];
-        }
-    }
-
-    // Extract padding (default to 0)
-    int64_t padTop = 0, padBottom = 0, padLeft = 0, padRight = 0;
-    if (padding) {
-        auto paddingAttr = padding.value();
-        if (is1D && paddingAttr.getNumElements() >= 2) {
-            auto paddingValues = paddingAttr.getValues<int64_t>();
-            padLeft = paddingValues[{0, 0}];
-            padRight = paddingValues[{0, 1}];
-        } else if (paddingAttr.getNumElements() >= 4) {
-            auto paddingValues = paddingAttr.getValues<int64_t>();
-            padTop = paddingValues[{0, 0}];
-            padBottom = paddingValues[{0, 1}];
-            padLeft = paddingValues[{1, 0}];
-            padRight = paddingValues[{1, 1}];
-        }
-    }
-
-    // Extract dilations (default to 1)
-    int64_t dilationH = 1, dilationW = 1;
-    if (rhsDilation) {
-        auto dilationVec = rhsDilation.value();
-        if (is1D && dilationVec.size() >= 1) {
-            dilationW = dilationVec[0];
-        } else if (dilationVec.size() >= 2) {
-            dilationH = dilationVec[0];
-            dilationW = dilationVec[1];
-        }
-    }
-
-    // Extract input dilation (for transposed convolution)
-    int64_t inputDilationH = 1, inputDilationW = 1;
-    bool isTransposedConv = false;
-    if (lhsDilation) {
-        auto lhsDilationVec = lhsDilation.value();
-        if (is1D && lhsDilationVec.size() >= 1) {
-            inputDilationW = lhsDilationVec[0];
-            isTransposedConv = (inputDilationW != 1);
-        } else if (lhsDilationVec.size() >= 2) {
-            inputDilationH = lhsDilationVec[0];
-            inputDilationW = lhsDilationVec[1];
-            isTransposedConv = (inputDilationH != 1 || inputDilationW != 1);
-        }
-    }
+    // Extract convolution parameters
+    ConvParams p = extractConvParams(convOp, is1D);
 
     // Build input layout for permutation computation
     // For 1D lifted to 2D, we already have NCHW (batch=0, feature=1, H=2, W=3)
@@ -269,23 +275,23 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
 
     // Create convolution descriptor (always use NHWC since we transpose above)
     MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
-        descriptorWithStrideInX:(NSUInteger)strideW
-                      strideInY:(NSUInteger)strideH
-                dilationRateInX:(NSUInteger)dilationW
-                dilationRateInY:(NSUInteger)dilationH
-                         groups:(NSUInteger)featureGroupCount
+        descriptorWithStrideInX:(NSUInteger)p.strideW
+                      strideInY:(NSUInteger)p.strideH
+                dilationRateInX:(NSUInteger)p.dilationW
+                dilationRateInY:(NSUInteger)p.dilationH
+                         groups:(NSUInteger)p.featureGroupCount
                    paddingStyle:MPSGraphPaddingStyleExplicit
                      dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                   weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
 
-    desc.paddingLeft = (NSUInteger)padLeft;
-    desc.paddingRight = (NSUInteger)padRight;
-    desc.paddingTop = (NSUInteger)padTop;
-    desc.paddingBottom = (NSUInteger)padBottom;
+    desc.paddingLeft = (NSUInteger)p.padLeft;
+    desc.paddingRight = (NSUInteger)p.padRight;
+    desc.paddingTop = (NSUInteger)p.padTop;
+    desc.paddingBottom = (NSUInteger)p.padBottom;
 
     // Perform convolution (or transposed convolution)
     MPSGraphTensor* result;
-    if (isTransposedConv) {
+    if (p.isTransposed) {
         // Transposed convolution using DataGradient API
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
         if (!resultType) {
@@ -313,21 +319,21 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // Compute forward padding from transposed conv parameters
         int64_t kH = [mpsKernel.shape[2] longLongValue];
         int64_t kW = [mpsKernel.shape[3] longLongValue];
-        int64_t fwdPadTop = forwardPadding(kH, dilationH, padTop);
-        int64_t fwdPadBottom = forwardPadding(kH, dilationH, padBottom);
-        int64_t fwdPadLeft = forwardPadding(kW, dilationW, padLeft);
-        int64_t fwdPadRight = forwardPadding(kW, dilationW, padRight);
+        int64_t fwdPadTop = forwardPadding(kH, p.dilationH, p.padTop);
+        int64_t fwdPadBottom = forwardPadding(kH, p.dilationH, p.padBottom);
+        int64_t fwdPadLeft = forwardPadding(kW, p.dilationW, p.padLeft);
+        int64_t fwdPadRight = forwardPadding(kW, p.dilationW, p.padRight);
 
         // Prepare kernel for DataGradient API
         MPSGraphTensor* preparedKernel = prepareKernelForDataGradient(g, mpsKernel, @[@2, @3]);
 
         // Create forward conv descriptor
         MPSGraphConvolution2DOpDescriptor* fwdDesc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:(NSUInteger)inputDilationW
-                          strideInY:(NSUInteger)inputDilationH
-                    dilationRateInX:(NSUInteger)dilationW
-                    dilationRateInY:(NSUInteger)dilationH
-                             groups:(NSUInteger)featureGroupCount
+            descriptorWithStrideInX:(NSUInteger)p.inputDilationW
+                          strideInY:(NSUInteger)p.inputDilationH
+                    dilationRateInX:(NSUInteger)p.dilationW
+                    dilationRateInY:(NSUInteger)p.dilationH
+                             groups:(NSUInteger)p.featureGroupCount
                        paddingStyle:MPSGraphPaddingStyleExplicit
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
