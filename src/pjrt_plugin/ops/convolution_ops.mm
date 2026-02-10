@@ -4,6 +4,159 @@
 
 namespace jax_mps {
 
+// Compute permutation to transpose from source layout to target layout.
+// Both layouts are specified as arrays where layout[i] = position of dimension i in the tensor.
+// For example, NHWC input layout: {batch=0, feature=3, spatial=[1,2]} means N at 0, H at 1, W at 2,
+// C at 3. Returns nil if no transpose is needed (identity permutation).
+static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLayout,
+                                              const std::vector<int64_t>& dstLayout) {
+    size_t rank = srcLayout.size();
+    if (rank != dstLayout.size())
+        return nil;
+
+    // perm[dstPos] = srcPos where the dimension at dstPos in dst was at srcPos in src
+    NSMutableArray<NSNumber*>* perm = [NSMutableArray arrayWithCapacity:rank];
+    bool isIdentity = true;
+    for (size_t dstPos = 0; dstPos < rank; ++dstPos) {
+        // Find which dimension should be at dstPos in the destination
+        int64_t dim = -1;
+        for (size_t d = 0; d < rank; ++d) {
+            if (dstLayout[d] == (int64_t)dstPos) {
+                dim = d;
+                break;
+            }
+        }
+        // Find where that dimension was in the source
+        int64_t srcPos = srcLayout[dim];
+        [perm addObject:@(srcPos)];
+        if (srcPos != (int64_t)dstPos)
+            isIdentity = false;
+    }
+    return isIdentity ? nil : perm;
+}
+
+// Standard NHWC layout: batch=0, feature=3, H=1, W=2
+static const std::vector<int64_t> LAYOUT_NHWC = {0, 3, 1, 2};
+
+// Convolution parameters bundled together for clarity
+struct ConvParams {
+    int64_t strideH = 1, strideW = 1;
+    int64_t padTop = 0, padBottom = 0, padLeft = 0, padRight = 0;
+    int64_t dilationH = 1, dilationW = 1;
+    int64_t inputDilationH = 1, inputDilationW = 1;
+    int64_t featureGroupCount = 1;
+    bool isTransposed = false;
+};
+
+// Extract convolution parameters from StableHLO op, handling 1D vs 2D
+static ConvParams extractConvParams(mlir::stablehlo::ConvolutionOp& convOp, bool is1D) {
+    ConvParams p;
+    p.featureGroupCount = convOp.getFeatureGroupCount();
+
+    auto windowStrides = convOp.getWindowStrides();
+    if (windowStrides) {
+        auto v = windowStrides.value();
+        if (is1D && v.size() >= 1) {
+            p.strideW = v[0];
+        } else if (v.size() >= 2) {
+            p.strideH = v[0];
+            p.strideW = v[1];
+        }
+    }
+
+    auto padding = convOp.getPadding();
+    if (padding) {
+        auto paddingAttr = padding.value();
+        if (is1D && paddingAttr.getNumElements() >= 2) {
+            auto pv = paddingAttr.getValues<int64_t>();
+            p.padLeft = pv[{0, 0}];
+            p.padRight = pv[{0, 1}];
+        } else if (paddingAttr.getNumElements() >= 4) {
+            auto pv = paddingAttr.getValues<int64_t>();
+            p.padTop = pv[{0, 0}];
+            p.padBottom = pv[{0, 1}];
+            p.padLeft = pv[{1, 0}];
+            p.padRight = pv[{1, 1}];
+        }
+    }
+
+    auto rhsDilation = convOp.getRhsDilation();
+    if (rhsDilation) {
+        auto v = rhsDilation.value();
+        if (is1D && v.size() >= 1) {
+            p.dilationW = v[0];
+        } else if (v.size() >= 2) {
+            p.dilationH = v[0];
+            p.dilationW = v[1];
+        }
+    }
+
+    auto lhsDilation = convOp.getLhsDilation();
+    if (lhsDilation) {
+        auto v = lhsDilation.value();
+        if (is1D && v.size() >= 1) {
+            p.inputDilationW = v[0];
+            p.isTransposed = (p.inputDilationW != 1);
+        } else if (v.size() >= 2) {
+            p.inputDilationH = v[0];
+            p.inputDilationW = v[1];
+            p.isTransposed = (p.inputDilationH != 1 || p.inputDilationW != 1);
+        }
+    }
+
+    return p;
+}
+
+// Compute forward convolution padding from transposed convolution parameters.
+// Forward padding = effective_kernel_size - 1 - transposed_padding, clamped to >= 0.
+static int64_t forwardPadding(int64_t kernelSize, int64_t dilation, int64_t transposedPad) {
+    int64_t effectiveK = 1 + (kernelSize - 1) * dilation;
+    return std::max(0LL, effectiveK - 1 - transposedPad);
+}
+
+// Prepare kernel for DataGradient API: un-reverse spatial dimensions and swap I/O channels.
+// Input kernel is in OIHW format (from StableHLO transposed conv, which pre-reverses the kernel).
+// Returns kernel ready for convolution2DDataGradient.
+static MPSGraphTensor* prepareKernelForDataGradient(MPSGraph* g, MPSGraphTensor* kernel,
+                                                    NSArray<NSNumber*>* spatialAxes) {
+    // Un-reverse kernel: StableHLO pre-reverses spatial dims for transposed conv
+    MPSGraphTensor* unreversed = [g reverseTensor:kernel axes:spatialAxes name:nil];
+    // DataGradient API has I/O semantically swapped; swap dims 0 and 1 (O <-> I in OIHW)
+    return [g transposeTensor:unreversed permutation:@[@1, @0, @2, @3] name:nil];
+}
+
+// Lift a 1D (rank-3) tensor to 2D (rank-4) by reordering to canonical order [dim0, dim1, dim2]
+// then reshaping to [dim0, dim1, 1, dim2] (inserting singleton at position 2).
+static MPSGraphTensor* lift1DTo2D(MPSGraph* g, MPSGraphTensor* tensor, int64_t dim0, int64_t dim1,
+                                  int64_t dim2) {
+    MPSGraphTensor* reordered = tensor;
+    if (!(dim0 == 0 && dim1 == 1 && dim2 == 2)) {
+        reordered = [g transposeTensor:tensor permutation:@[@(dim0), @(dim1), @(dim2)] name:nil];
+    }
+    NSArray<NSNumber*>* shape = reordered.shape;
+    if (!shape || shape.count != 3)
+        return nullptr;
+    return [g reshapeTensor:reordered withShape:@[shape[0], shape[1], @1, shape[2]] name:nil];
+}
+
+// Convert 2D output back to 1D layout: squeeze the singleton H dimension and transpose to target.
+static MPSGraphTensor* convert2DOutputTo1D(MPSGraph* g, MPSGraphTensor* result, int64_t batchDim,
+                                           int64_t featureDim, int64_t spatialDim) {
+    // Input is NHWC [B, 1, W, C], transpose to NCHW [B, C, 1, W]
+    result = [g transposeTensor:result permutation:@[@0, @3, @1, @2] name:nil];
+    // Squeeze to [B, C, W]
+    NSArray<NSNumber*>* shape4D = result.shape;
+    result = [g reshapeTensor:result withShape:@[shape4D[0], shape4D[1], shape4D[3]] name:nil];
+    // Transpose from [B, C, W] to target layout using computePermutation
+    std::vector<int64_t> srcLayout = {0, 1, 2};  // B=0, C=1, W=2
+    std::vector<int64_t> dstLayout = {batchDim, featureDim, spatialDim};
+    NSArray<NSNumber*>* perm = computePermutation(srcLayout, dstLayout);
+    if (perm) {
+        result = [g transposeTensor:result permutation:perm name:nil];
+    }
+    return result;
+}
+
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
@@ -33,340 +186,74 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     int64_t outputFeatureDim = dimNumbers.getOutputFeatureDimension();
     auto outputSpatialDims = dimNumbers.getOutputSpatialDimensions();
 
-    // Get convolution attributes
-    auto windowStrides = convOp.getWindowStrides();
-    auto padding = convOp.getPadding();
-    auto lhsDilation = convOp.getLhsDilation();  // input dilation
-    auto rhsDilation = convOp.getRhsDilation();  // kernel dilation
-    int64_t featureGroupCount = convOp.getFeatureGroupCount();
-    int64_t batchGroupCount = convOp.getBatchGroupCount();
-
-    // Determine spatial rank
+    // Determine spatial rank and check batch group count
     size_t spatialRank = inputSpatialDims.size();
-
-    // 1D convolution support: lift to 2D with a singleton height dimension.
-    if (spatialRank == 1) {
-        if (batchGroupCount != 1) {
-            MPS_LOG_ERROR("1D convolution: batch_group_count != 1 not yet supported\n");
-            return nullptr;
-        }
-
-        int64_t strideW = 1;
-        if (windowStrides && windowStrides->size() >= 1) {
-            strideW = (*windowStrides)[0];
-        }
-
-        int64_t padLeft = 0, padRight = 0;
-        if (padding) {
-            auto paddingAttr = *padding;
-            if (paddingAttr.getNumElements() >= 2) {
-                auto paddingValues = paddingAttr.getValues<int64_t>();
-                padLeft = paddingValues[{0, 0}];
-                padRight = paddingValues[{0, 1}];
-            }
-        }
-
-        int64_t dilationW = 1;
-        if (rhsDilation && rhsDilation->size() >= 1) {
-            dilationW = (*rhsDilation)[0];
-        }
-
-        int64_t inputDilationW = 1;
-        if (lhsDilation && lhsDilation->size() >= 1) {
-            inputDilationW = (*lhsDilation)[0];
-        }
-        if (inputDilationW != 1) {
-            MPS_LOG_ERROR("1D transposed convolution (lhs_dilation != 1) not yet supported\n");
-            return nullptr;
-        }
-
-        // Reorder input to [B, F, S], then reshape to NCHW [B, F, 1, S].
-        NSMutableArray<NSNumber*>* inputPerm = [NSMutableArray arrayWithCapacity:3];
-        [inputPerm addObject:@(inputBatchDim)];
-        [inputPerm addObject:@(inputFeatureDim)];
-        [inputPerm addObject:@(inputSpatialDims[0])];
-        MPSGraphTensor* bfsInput = input;
-        if (!(inputBatchDim == 0 && inputFeatureDim == 1 && inputSpatialDims[0] == 2)) {
-            bfsInput = [g transposeTensor:input permutation:inputPerm name:nil];
-        }
-        NSArray<NSNumber*>* bfsShape = bfsInput.shape;
-        if (!bfsShape || bfsShape.count != 3) {
-            MPS_LOG_ERROR("1D convolution expects rank-3 input\n");
-            return nullptr;
-        }
-        MPSGraphTensor* convInput = [g reshapeTensor:bfsInput
-                                           withShape:@[bfsShape[0], bfsShape[1], @1, bfsShape[2]]
-                                                name:nil];
-
-        // Reorder kernel to [O, I, K], then reshape to OIHW [O, I, 1, K].
-        NSMutableArray<NSNumber*>* kernelPerm = [NSMutableArray arrayWithCapacity:3];
-        [kernelPerm addObject:@(kernelOutputFeatureDim)];
-        [kernelPerm addObject:@(kernelInputFeatureDim)];
-        [kernelPerm addObject:@(kernelSpatialDims[0])];
-        MPSGraphTensor* oikKernel = kernel;
-        if (!(kernelOutputFeatureDim == 0 && kernelInputFeatureDim == 1 &&
-              kernelSpatialDims[0] == 2)) {
-            oikKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
-        }
-        NSArray<NSNumber*>* oikShape = oikKernel.shape;
-        if (!oikShape || oikShape.count != 3) {
-            MPS_LOG_ERROR("1D convolution expects rank-3 kernel\n");
-            return nullptr;
-        }
-        MPSGraphTensor* mpsKernel = [g reshapeTensor:oikKernel
-                                           withShape:@[oikShape[0], oikShape[1], @1, oikShape[2]]
-                                                name:nil];
-
-        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:(NSUInteger)strideW
-                          strideInY:1
-                    dilationRateInX:(NSUInteger)dilationW
-                    dilationRateInY:1
-                             groups:(NSUInteger)featureGroupCount
-                       paddingStyle:MPSGraphPaddingStyleExplicit
-                         dataLayout:MPSGraphTensorNamedDataLayoutNCHW
-                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-        desc.paddingTop = 0;
-        desc.paddingBottom = 0;
-        desc.paddingLeft = (NSUInteger)padLeft;
-        desc.paddingRight = (NSUInteger)padRight;
-
-        MPSGraphTensor* convOut = [g convolution2DWithSourceTensor:convInput
-                                                     weightsTensor:mpsKernel
-                                                        descriptor:desc
-                                                              name:nil];
-        if (!convOut) {
-            MPS_LOG_ERROR("1D convolution lowering failed\n");
-            return nullptr;
-        }
-
-        // Back to [B, F, S].
-        NSArray<NSNumber*>* out4Shape = convOut.shape;
-        if (!out4Shape || out4Shape.count != 4) {
-            MPS_LOG_ERROR("1D convolution output rank mismatch\n");
-            return nullptr;
-        }
-        MPSGraphTensor* bfsOut = [g reshapeTensor:convOut
-                                        withShape:@[out4Shape[0], out4Shape[1], out4Shape[3]]
-                                             name:nil];
-
-        // Reorder [B, F, S] into the StableHLO output layout.
-        NSMutableArray<NSNumber*>* outPerm = [NSMutableArray arrayWithCapacity:3];
-        for (int i = 0; i < 3; ++i)
-            [outPerm addObject:@0];
-        outPerm[(NSUInteger)outputBatchDim] = @0;
-        outPerm[(NSUInteger)outputFeatureDim] = @1;
-        outPerm[(NSUInteger)outputSpatialDims[0]] = @2;
-
-        MPSGraphTensor* out = bfsOut;
-        if (!(outputBatchDim == 0 && outputFeatureDim == 1 && outputSpatialDims[0] == 2)) {
-            out = [g transposeTensor:bfsOut permutation:outPerm name:nil];
-        }
-        return out;
+    if (convOp.getBatchGroupCount() != 1) {
+        MPS_LOG_ERROR("batch_group_count != 1 not yet supported\n");
+        return nullptr;
     }
 
-    // Currently only support 1D and 2D convolutions.
-    if (spatialRank != 2) {
+    bool is1D = (spatialRank == 1);
+    if (spatialRank > 2) {
         MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
                       spatialRank);
         return nullptr;
     }
 
-    // Check batch group count (used for gradient computations)
-    if (batchGroupCount != 1) {
-        MPS_LOG_ERROR("batch_group_count != 1 not yet supported\n");
-        return nullptr;
-    }
+    // For 1D: save spatial dim before lifting (batch/feature dims don't change)
+    int64_t output1DSpatialDim = is1D ? outputSpatialDims[0] : 0;
 
-    // Extract strides (default to 1)
-    int64_t strideH = 1, strideW = 1;
-    if (windowStrides) {
-        auto stridesVec = windowStrides.value();
-        if (stridesVec.size() >= 2) {
-            strideH = stridesVec[0];
-            strideW = stridesVec[1];
+    if (is1D) {
+        // Lift 1D tensors to 2D for unified processing
+        input = lift1DTo2D(g, input, inputBatchDim, inputFeatureDim, inputSpatialDims[0]);
+        kernel = lift1DTo2D(g, kernel, kernelOutputFeatureDim, kernelInputFeatureDim,
+                            kernelSpatialDims[0]);
+        if (!input || !kernel) {
+            MPS_LOG_ERROR("1D convolution expects rank-3 input and kernel\n");
+            return nullptr;
         }
     }
 
-    // Extract padding (default to 0)
-    int64_t padTop = 0, padBottom = 0, padLeft = 0, padRight = 0;
-    if (padding) {
-        auto paddingAttr = padding.value();
-        // padding is a 2D array: [[pad_top, pad_bottom], [pad_left, pad_right]]
-        if (paddingAttr.getNumElements() >= 4) {
-            auto paddingValues = paddingAttr.getValues<int64_t>();
-            padTop = paddingValues[{0, 0}];
-            padBottom = paddingValues[{0, 1}];
-            padLeft = paddingValues[{1, 0}];
-            padRight = paddingValues[{1, 1}];
-        }
-    }
+    // === Normalize to 4D dimension numbers ===
+    // After 1D lifting: input is NCHW (0,1,2,3), kernel is OIHW (0,1,2,3)
+    // For 2D: use original dimension numbers
+    int64_t inBatch = is1D ? 0 : inputBatchDim;
+    int64_t inFeature = is1D ? 1 : inputFeatureDim;
+    int64_t inSpatial0 = is1D ? 2 : inputSpatialDims[0];
+    int64_t inSpatial1 = is1D ? 3 : inputSpatialDims[1];
 
-    // Extract dilations (default to 1)
-    int64_t dilationH = 1, dilationW = 1;
-    if (rhsDilation) {
-        auto dilationVec = rhsDilation.value();
-        if (dilationVec.size() >= 2) {
-            dilationH = dilationVec[0];
-            dilationW = dilationVec[1];
-        }
-    }
+    int64_t kOutput = is1D ? 0 : kernelOutputFeatureDim;
+    int64_t kInput = is1D ? 1 : kernelInputFeatureDim;
+    int64_t kSpatial0 = is1D ? 2 : kernelSpatialDims[0];
+    int64_t kSpatial1 = is1D ? 3 : kernelSpatialDims[1];
 
-    // Extract input dilation (for transposed convolution)
-    int64_t inputDilationH = 1, inputDilationW = 1;
-    bool isTransposedConv = false;
-    if (lhsDilation) {
-        auto lhsDilationVec = lhsDilation.value();
-        if (lhsDilationVec.size() >= 2) {
-            inputDilationH = lhsDilationVec[0];
-            inputDilationW = lhsDilationVec[1];
-            isTransposedConv = (inputDilationH != 1 || inputDilationW != 1);
-        }
-    }
+    int64_t outSpatial0 = is1D ? 2 : outputSpatialDims[0];
+    int64_t outSpatial1 = is1D ? 3 : outputSpatialDims[1];
 
-    // Determine if we need to transpose input/kernel to match MPS expected layout
-    // MPS expects NHWC for input and OHWI for kernel (output, height, width, input)
-    // But it can also work with NCHW via dataLayout setting
+    // Extract convolution parameters
+    ConvParams p = extractConvParams(convOp, is1D);
 
-    // Check if input is NHWC (batch=0, feature=3, spatial=[1,2])
-    bool inputIsNHWC =
-        (inputBatchDim == 0 && inputFeatureDim == 3 && inputSpatialDims.size() == 2 &&
-         inputSpatialDims[0] == 1 && inputSpatialDims[1] == 2);
+    // Transpose input to NHWC and kernel to OIHW using normalized dims
+    std::vector<int64_t> inputLayout = {inBatch, inFeature, inSpatial0, inSpatial1};
+    std::vector<int64_t> kernelLayout = {kOutput, kInput, kSpatial0, kSpatial1};
 
-    // Check if input is NCHW (batch=0, feature=1, spatial=[2,3])
-    bool inputIsNCHW =
-        (inputBatchDim == 0 && inputFeatureDim == 1 && inputSpatialDims.size() == 2 &&
-         inputSpatialDims[0] == 2 && inputSpatialDims[1] == 3);
-
-    // Check if input is CHWN (batch=3, feature=0, spatial=[1,2]) - used in gradient computation
-    bool inputIsCHWN =
-        (inputBatchDim == 3 && inputFeatureDim == 0 && inputSpatialDims.size() == 2 &&
-         inputSpatialDims[0] == 1 && inputSpatialDims[1] == 2);
-
-    // Check if input is CNHW (batch=1, feature=0, spatial=[2,3]) - used in kernel gradient of NCHW
-    // conv
-    bool inputIsCNHW =
-        (inputBatchDim == 1 && inputFeatureDim == 0 && inputSpatialDims.size() == 2 &&
-         inputSpatialDims[0] == 2 && inputSpatialDims[1] == 3);
-
-    // MPS kernel layout is OHWI (output_features, height, width, input_features)
-    // StableHLO default is often HWIO (height, width, input_features, output_features)
-    // Check kernel layout: HWIO means spatial=[0,1], input=2, output=3
-    bool kernelIsHWIO =
-        (kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 0 && kernelSpatialDims[1] == 1 &&
-         kernelInputFeatureDim == 2 && kernelOutputFeatureDim == 3);
-
-    // Also check for OIHW (common in some frameworks)
-    bool kernelIsOIHW =
-        (kernelOutputFeatureDim == 0 && kernelInputFeatureDim == 1 &&
-         kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 2 && kernelSpatialDims[1] == 3);
-
-    // Check for IHWO (used in gradient computation) - input=0, spatial=[1,2], output=3
-    bool kernelIsIHWO =
-        (kernelInputFeatureDim == 0 && kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 1 &&
-         kernelSpatialDims[1] == 2 && kernelOutputFeatureDim == 3);
-
-    // Check for HWOI (used in input gradient computation) - spatial=[0,1], output=2, input=3
-    bool kernelIsHWOI =
-        (kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 0 && kernelSpatialDims[1] == 1 &&
-         kernelOutputFeatureDim == 2 && kernelInputFeatureDim == 3);
-
-    // Check if it's already OHWI
-    bool kernelIsOHWI =
-        (kernelOutputFeatureDim == 0 && kernelSpatialDims.size() == 2 &&
-         kernelSpatialDims[0] == 1 && kernelSpatialDims[1] == 2 && kernelInputFeatureDim == 3);
-
-    // Check for IOHW (used in gradient computation of NCHW conv) - input=0, output=1, spatial=[2,3]
-    bool kernelIsIOHW =
-        (kernelInputFeatureDim == 0 && kernelOutputFeatureDim == 1 &&
-         kernelSpatialDims.size() == 2 && kernelSpatialDims[0] == 2 && kernelSpatialDims[1] == 3);
-
-    if (!inputIsNHWC && !inputIsNCHW && !inputIsCHWN && !inputIsCNHW) {
-        MPS_LOG_ERROR(
-            "Unsupported input layout. Expected NHWC, NCHW, CHWN, or CNHW. Got batch=%lld, "
-            "feature=%lld, spatial=[%lld,%lld]\n",
-            inputBatchDim, inputFeatureDim, inputSpatialDims[0], inputSpatialDims[1]);
-        return nullptr;
-    }
-
-    // Transpose kernel directly to OIHW format for MPS
-    // MPS weightsLayout OIHW expects [outputChannels, inputChannels/groups, kH, kW]
-    // Fused transpose: combine intermediate OHWI step into single permutation
     MPSGraphTensor* mpsKernel = kernel;
-    if (kernelIsHWIO) {
-        // HWIO [H, W, I, O] -> OIHW [O, I, H, W] directly
-        // Fused permutation: [3, 0, 1, 2] then [0, 3, 1, 2] = [3, 2, 0, 1]
-        mpsKernel = [g transposeTensor:kernel permutation:@[@3, @2, @0, @1] name:nil];
-    } else if (kernelIsOIHW) {
-        // OIHW [O, I, H, W] -> OIHW: no transpose needed (identity)
-        // Fused permutation: [0, 2, 3, 1] then [0, 3, 1, 2] = [0, 1, 2, 3]
-        mpsKernel = kernel;
-    } else if (kernelIsIHWO) {
-        // IHWO [I, H, W, O] -> OIHW [O, I, H, W] directly
-        // Fused permutation: [3, 1, 2, 0] then [0, 3, 1, 2] = [3, 0, 1, 2]
-        mpsKernel = [g transposeTensor:kernel permutation:@[@3, @0, @1, @2] name:nil];
-    } else if (kernelIsHWOI) {
-        // HWOI [H, W, O, I] -> OIHW [O, I, H, W] directly
-        // Fused permutation: [2, 0, 1, 3] then [0, 3, 1, 2] = [2, 3, 0, 1]
-        mpsKernel = [g transposeTensor:kernel permutation:@[@2, @3, @0, @1] name:nil];
-    } else if (kernelIsOHWI) {
-        // OHWI [O, H, W, I] -> OIHW [O, I, H, W]
-        // Permutation: [0, 3, 1, 2]
-        mpsKernel = [g transposeTensor:kernel permutation:@[@0, @3, @1, @2] name:nil];
-    } else if (kernelIsIOHW) {
-        // IOHW [I, O, H, W] -> OIHW [O, I, H, W]
-        // Swap dims 0 and 1
-        mpsKernel = [g transposeTensor:kernel permutation:@[@1, @0, @2, @3] name:nil];
-    } else {
-        MPS_LOG_ERROR("Unsupported kernel layout. Got output=%lld, input=%lld, "
-                      "spatial=[%lld,%lld]\n",
-                      kernelOutputFeatureDim, kernelInputFeatureDim, kernelSpatialDims[0],
-                      kernelSpatialDims[1]);
-        return nullptr;
+    NSArray<NSNumber*>* kernelPerm = computePermutation(kernelLayout, {0, 1, 2, 3});
+    if (kernelPerm) {
+        mpsKernel = [g transposeTensor:kernel permutation:kernelPerm name:nil];
     }
 
-    // Create convolution descriptor
-    MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
-        descriptorWithStrideInX:(NSUInteger)strideW
-                      strideInY:(NSUInteger)strideH
-                dilationRateInX:(NSUInteger)dilationW
-                dilationRateInY:(NSUInteger)dilationH
-                         groups:(NSUInteger)featureGroupCount
-                   paddingStyle:MPSGraphPaddingStyleExplicit
-                     dataLayout:inputIsNHWC ? MPSGraphTensorNamedDataLayoutNHWC
-                                            : MPSGraphTensorNamedDataLayoutNCHW
-                  weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-
-    // Set explicit padding
-    desc.paddingLeft = (NSUInteger)padLeft;
-    desc.paddingRight = (NSUInteger)padRight;
-    desc.paddingTop = (NSUInteger)padTop;
-    desc.paddingBottom = (NSUInteger)padBottom;
-
-    // Handle input layout - transpose to NHWC for MPS
+    // Transpose input to NHWC (MPS is more reliable with NHWC)
+    NSArray<NSNumber*>* inputPerm = computePermutation(inputLayout, LAYOUT_NHWC);
     MPSGraphTensor* convInput = input;
-    if (inputIsNCHW) {
-        // For NCHW, transpose to NHWC first since MPS is more reliable with NHWC
-        // NCHW -> NHWC: [0, 2, 3, 1]
-        convInput = [g transposeTensor:input permutation:@[@0, @2, @3, @1] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
-    } else if (inputIsCHWN) {
-        // For CHWN (used in gradient computation), transpose to NHWC
-        // CHWN [C, H, W, N] -> NHWC [N, H, W, C]: [3, 1, 2, 0]
-        convInput = [g transposeTensor:input permutation:@[@3, @1, @2, @0] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
-    } else if (inputIsCNHW) {
-        // For CNHW (used in kernel gradient of NCHW conv), transpose to NHWC
-        // CNHW [C, N, H, W] -> NHWC [N, H, W, C]: [1, 2, 3, 0]
-        convInput = [g transposeTensor:input permutation:@[@1, @2, @3, @0] name:nil];
-        desc.dataLayout = MPSGraphTensorNamedDataLayoutNHWC;
+    if (inputPerm) {
+        convInput = [g transposeTensor:input permutation:inputPerm name:nil];
     }
 
     // Perform convolution (or transposed convolution)
     MPSGraphTensor* result;
-    if (isTransposedConv) {
-        // Transposed convolution (used in backward pass of strided conv)
-        // For transposed conv, MPS needs the output shape
+    if (p.isTransposed) {
+        // Transposed convolution using DataGradient API
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
         if (!resultType) {
             MPS_LOG_ERROR("Could not get result type for transposed convolution\n");
@@ -374,133 +261,75 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         }
 
         // Get output shape in NHWC format
+        // Note: resultShape uses original MLIR dims (3D for 1D conv, 4D for 2D)
         auto resultShape = resultType.getShape();
-        NSMutableArray<NSNumber*>* outputShape = [NSMutableArray array];
-
-        // The result shape is in the output dimension layout, need to convert to NHWC
         int64_t outN = resultShape[outputBatchDim];
-        int64_t outH = resultShape[outputSpatialDims[0]];
-        int64_t outW = resultShape[outputSpatialDims[1]];
+        int64_t outH = is1D ? 1 : resultShape[outputSpatialDims[0]];
+        int64_t outW = resultShape[is1D ? output1DSpatialDim : outputSpatialDims[1]];
         int64_t outC = resultShape[outputFeatureDim];
+        NSArray<NSNumber*>* outputShape = @[@(outN), @(outH), @(outW), @(outC)];
 
-        [outputShape addObject:@(outN)];
-        [outputShape addObject:@(outH)];
-        [outputShape addObject:@(outW)];
-        [outputShape addObject:@(outC)];
+        // Compute forward padding from transposed conv parameters
+        int64_t kH = [mpsKernel.shape[2] longLongValue];
+        int64_t kW = [mpsKernel.shape[3] longLongValue];
 
-        // For transposed convolution, the kernel's I and O have swapped semantics:
-        // - MPS transpose conv expects source_channels == kernel_O
-        // - But StableHLO kernel has source_channels == kernel_I
-        // So we need to swap I and O: OIHW [O, I, H, W] -> [I, O, H, W]
-        //
-        // Additionally, MPS transposed conv correlates (no kernel flip) while
-        // StableHLO expects convolution semantics (kernel flipped).
-        // We must flip the kernel in both spatial dimensions to match.
-        // Kernel is in OIHW format, flip H (dim 2) and W (dim 3).
-        MPSGraphTensor* flippedKernel = [g reverseTensor:mpsKernel axes:@[@2, @3] name:nil];
-        MPSGraphTensor* transposeKernel = [g transposeTensor:flippedKernel
-                                                 permutation:@[@1, @0, @2, @3]
-                                                        name:nil];
+        // Prepare kernel for DataGradient API
+        MPSGraphTensor* preparedKernel = prepareKernelForDataGradient(g, mpsKernel, @[@2, @3]);
 
-        // For transposed convolution, MPS stride controls upsampling factor.
-        // This corresponds to StableHLO's lhs_dilation (input dilation).
-        // For backward pass of stride=N forward conv, inputDilation=N.
-        MPSGraphConvolution2DOpDescriptor* transposeDesc = [MPSGraphConvolution2DOpDescriptor
-            descriptorWithStrideInX:(NSUInteger)inputDilationW
-                          strideInY:(NSUInteger)inputDilationH
-                    dilationRateInX:(NSUInteger)dilationW
-                    dilationRateInY:(NSUInteger)dilationH
-                             groups:(NSUInteger)featureGroupCount
+        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
+            descriptorWithStrideInX:(NSUInteger)p.inputDilationW
+                          strideInY:(NSUInteger)p.inputDilationH
+                    dilationRateInX:(NSUInteger)p.dilationW
+                    dilationRateInY:(NSUInteger)p.dilationH
+                             groups:(NSUInteger)p.featureGroupCount
                        paddingStyle:MPSGraphPaddingStyleExplicit
                          dataLayout:MPSGraphTensorNamedDataLayoutNHWC
                       weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+        desc.paddingTop = (NSUInteger)forwardPadding(kH, p.dilationH, p.padTop);
+        desc.paddingBottom = (NSUInteger)forwardPadding(kH, p.dilationH, p.padBottom);
+        desc.paddingLeft = (NSUInteger)forwardPadding(kW, p.dilationW, p.padLeft);
+        desc.paddingRight = (NSUInteger)forwardPadding(kW, p.dilationW, p.padRight);
 
-        // For transposed convolution with explicit outputShape, MPS computes
-        // padding internally based on input/output shapes and stride. However,
-        // when strides are asymmetric (inputDilationH != inputDilationW), MPS's
-        // default alignment doesn't match StableHLO's expected output position.
-        //
-        // For symmetric strides (2,2), (3,3), etc., MPS's default alignment is
-        // correct and we don't need any padding adjustment.
-        //
-        // For asymmetric strides like (2,1) or (1,2), MPS produces spatially
-        // shifted output. The shift direction and amount are determined by the
-        // padding asymmetry in the StableHLO operation:
-        // - padTop - padBottom gives the H direction shift amount
-        // - padLeft - padRight gives the W direction shift amount
-        //
-        // Empirically, MPS transposed conv applies these shifts in swapped
-        // dimensions: H padding asymmetry affects W output position and vice versa.
-        // We only apply this correction when strides are actually asymmetric.
-        int64_t shiftH = 0;
-        int64_t shiftW = 0;
-        if (inputDilationH != inputDilationW) {
-            // Asymmetric strides - apply cross-dimensional shift correction
-            shiftH = padLeft - padRight;  // W padding asymmetry -> H shift
-            shiftW = padTop - padBottom;  // H padding asymmetry -> W shift
-        }
-
-        transposeDesc.paddingLeft = (NSUInteger)(shiftW > 0 ? shiftW : 0);
-        transposeDesc.paddingRight = 0;
-        transposeDesc.paddingTop = (NSUInteger)(shiftH > 0 ? shiftH : 0);
-        transposeDesc.paddingBottom = 0;
-
-        result = [g convolutionTranspose2DWithSourceTensor:convInput
-                                             weightsTensor:transposeKernel
-                                               outputShape:outputShape
-                                                descriptor:transposeDesc
-                                                      name:nil];
+        result = [g convolution2DDataGradientWithIncomingGradientTensor:convInput
+                                                          weightsTensor:preparedKernel
+                                                            outputShape:outputShape
+                                           forwardConvolutionDescriptor:desc
+                                                                   name:nil];
     } else {
         // Normal convolution
+        MPSGraphConvolution2DOpDescriptor* desc = [MPSGraphConvolution2DOpDescriptor
+            descriptorWithStrideInX:(NSUInteger)p.strideW
+                          strideInY:(NSUInteger)p.strideH
+                    dilationRateInX:(NSUInteger)p.dilationW
+                    dilationRateInY:(NSUInteger)p.dilationH
+                             groups:(NSUInteger)p.featureGroupCount
+                       paddingStyle:MPSGraphPaddingStyleExplicit
+                         dataLayout:MPSGraphTensorNamedDataLayoutNHWC
+                      weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+        desc.paddingLeft = (NSUInteger)p.padLeft;
+        desc.paddingRight = (NSUInteger)p.padRight;
+        desc.paddingTop = (NSUInteger)p.padTop;
+        desc.paddingBottom = (NSUInteger)p.padBottom;
+
         result = [g convolution2DWithSourceTensor:convInput
                                     weightsTensor:mpsKernel
                                        descriptor:desc
                                              name:nil];
     }
 
-    // Transpose output back to expected layout if needed
-    // Output is currently in NHWC format from MPS
-    // Note: For kernel gradient computations, "batch" dim holds input features and
-    // "feature" dim holds output features, effectively making the output a kernel tensor.
-    bool outputIsNHWC =
-        (outputBatchDim == 0 && outputFeatureDim == 3 && outputSpatialDims.size() == 2 &&
-         outputSpatialDims[0] == 1 && outputSpatialDims[1] == 2);
-    bool outputIsNCHW =
-        (outputBatchDim == 0 && outputFeatureDim == 1 && outputSpatialDims.size() == 2 &&
-         outputSpatialDims[0] == 2 && outputSpatialDims[1] == 3);
-    bool outputIsCHWN =
-        (outputBatchDim == 3 && outputFeatureDim == 0 && outputSpatialDims.size() == 2 &&
-         outputSpatialDims[0] == 1 && outputSpatialDims[1] == 2);
-    // For kernel gradient: HWIO layout (spatial=[0,1], input=2, output=3)
-    // The "batch" dim represents input features, "feature" dim represents output features
-    bool outputIsHWIO = (outputSpatialDims.size() == 2 && outputSpatialDims[0] == 0 &&
-                         outputSpatialDims[1] == 1 && outputBatchDim == 2 && outputFeatureDim == 3);
-    // For kernel gradient of NCHW conv: CNHW layout (feature=0, batch=1, spatial=[2,3])
-    // "feature" dim (0) holds output channels, "batch" dim (1) holds input channels
-    bool outputIsCNHW =
-        (outputFeatureDim == 0 && outputBatchDim == 1 && outputSpatialDims.size() == 2 &&
-         outputSpatialDims[0] == 2 && outputSpatialDims[1] == 3);
+    // Output is in NHWC format from MPS
 
-    if (outputIsNCHW) {
-        // NHWC -> NCHW: [0, 3, 1, 2]
-        result = [g transposeTensor:result permutation:@[@0, @3, @1, @2] name:nil];
-    } else if (outputIsCHWN) {
-        // NHWC -> CHWN: [3, 1, 2, 0]
-        result = [g transposeTensor:result permutation:@[@3, @1, @2, @0] name:nil];
-    } else if (outputIsHWIO) {
-        // NHWC [N, H, W, C] -> HWIO [H, W, I, O]
-        // For kernel gradient, N=I (input features), C=O (output features)
-        // So [N, H, W, C] -> [H, W, N, C] which is HWIO
-        // Permutation: [1, 2, 0, 3]
-        result = [g transposeTensor:result permutation:@[@1, @2, @0, @3] name:nil];
-    } else if (outputIsCNHW) {
-        // NHWC [N, H, W, C] -> CNHW [C, N, H, W]
-        // For kernel gradient of NCHW conv, N=I (input features), C=O (output features)
-        // Permutation: [3, 0, 1, 2]
-        result = [g transposeTensor:result permutation:@[@3, @0, @1, @2] name:nil];
-    } else if (!outputIsNHWC) {
-        MPS_LOG_WARN("Unexpected output layout batch=%lld, feature=%lld, spatial=[%lld,%lld]\n",
-                     outputBatchDim, outputFeatureDim, outputSpatialDims[0], outputSpatialDims[1]);
+    if (is1D) {
+        result =
+            convert2DOutputTo1D(g, result, outputBatchDim, outputFeatureDim, output1DSpatialDim);
+    } else {
+        // Transpose 2D output from NHWC to expected layout using normalized dims
+        std::vector<int64_t> outputLayout = {outputBatchDim, outputFeatureDim, outSpatial0,
+                                             outSpatial1};
+        NSArray<NSNumber*>* outputPerm = computePermutation(LAYOUT_NHWC, outputLayout);
+        if (outputPerm) {
+            result = [g transposeTensor:result permutation:outputPerm name:nil];
+        }
     }
 
     return result;
