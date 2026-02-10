@@ -56,19 +56,22 @@ jobs:
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           fail-on-cache-miss: true
 
-      - name: clang-format
-        run: |
-          brew install clang-format
-          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+      - name: Install clang-format
+        run: brew install clang-format
 
-      - name: Build for clang-tidy
+      - name: Install llvm
+        run: brew install llvm
+
+      - name: cmake configure
         run: |
           mkdir -p build && cd build
           cmake .. -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.jax-mps-deps"
 
+      - name: clang-format
+        run: find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+
       - name: clang-tidy
         run: |
-          brew install llvm
           export PATH="$(brew --prefix llvm)/bin:$PATH"
           find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) clang-tidy -p build
 
