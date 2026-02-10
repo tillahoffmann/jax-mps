@@ -29,18 +29,16 @@ static std::string GetReductionOpType(mlir::Region& body) {
 }
 
 // Reduce operation - identifies reduction type and maps to MPS reduction
-static MPSGraphTensor* Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
     if (!reduceOp) {
-        MPS_LOG_ERROR(" Expected ReduceOp\n");
-        return nullptr;
+        return ProcessResult::Error("reduce: expected ReduceOp");
     }
 
     // Get the input tensor (first operand)
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input) {
-        MPS_LOG_ERROR(" reduce input tensor not found\n");
-        return nullptr;
+        return ProcessResult::Error("reduce: input tensor not found");
     }
 
     // Get reduction dimensions
@@ -67,8 +65,7 @@ static MPSGraphTensor* Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap&
     } else if (reductionType == "stablehlo.or") {
         result = [g reductionOrWithTensor:input axes:axes name:nil];
     } else {
-        MPS_LOG_ERROR(" Unsupported reduction type: %s\n", reductionType.c_str());
-        return nullptr;
+        return ProcessResult::Error("reduce: unsupported reduction type: " + reductionType);
     }
 
     // MPS Graph reduction keeps dimensions (with size 1), but StableHLO reduce removes them
@@ -78,17 +75,20 @@ static MPSGraphTensor* Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap&
         result = [g reshapeTensor:result withShape:outputShape name:nil];
     }
 
-    return result;
+    if (!result)
+        return ProcessResult::Error("reduce: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.reduce", Handle_reduce);
 
 // stablehlo.return is a terminator used inside regions (e.g., reduce body)
 // It's handled implicitly by parent operations, not executed directly
-static MPSGraphTensor* Handle_return(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_return(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     // This should never be called directly - it's handled by the parent operation
     // But we register it so it's not flagged as unsupported during module verification
     MPS_LOG_WARN("stablehlo.return should not be called directly\n");
-    return nullptr;
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.return", Handle_return);
 

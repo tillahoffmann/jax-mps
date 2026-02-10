@@ -30,9 +30,6 @@ namespace {
 const std::unordered_set<std::string>& getSupportedOps() {
     static std::unordered_set<std::string> supported = []() {
         auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Add multi-result ops from MultiResultOpRegistry
-        auto mrOps = jax_mps::MultiResultOpRegistry::GetRegisteredOps();
-        ops.insert(mrOps.begin(), mrOps.end());
         // Add ops handled directly in mps_executable.mm (not via OpRegistry).
         ops.insert("func.return");
         ops.insert("func.call");

@@ -12,14 +12,17 @@ REGISTER_MLIR_UNARY_OP("stablehlo.negate", negative, negate);
 // abs: MPS absoluteWithTensor: on complex input returns complex (magnitude in
 // real part, zero imaginary). StableHLO expects a real-valued result, so we
 // extract the real part for complex inputs.
-static MPSGraphTensor* Handle_abs(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_abs(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("abs: missing input tensor");
     MPSGraphTensor* result = [g absoluteWithTensor:input name:nil];
     if (input.dataType == MPSDataTypeComplexFloat32 || input.dataType == MPSDataTypeComplexFloat16)
         result = [g realPartOfTensor:result name:nil];
-    return result;
+    if (!result)
+        return ProcessResult::Error("abs: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.abs", Handle_abs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
@@ -29,42 +32,58 @@ REGISTER_MLIR_UNARY_OP("chlo.erf", erf, chlo_erf);
 REGISTER_MLIR_UNARY_OP("stablehlo.floor", floor, floor);
 // sign: for complex inputs, stablehlo.sign returns x / |x| (or 0 for x == 0).
 // MPS signWithTensor: applies component-wise sign which is wrong for complex.
-static MPSGraphTensor* Handle_sign(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_sign(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
-    if (input.dataType != MPSDataTypeComplexFloat32 && input.dataType != MPSDataTypeComplexFloat16)
-        return [g signWithTensor:input name:nil];
+        return ProcessResult::Error("sign: missing input tensor");
 
-    MPSGraphTensor* re = [g realPartOfTensor:input name:nil];
-    MPSGraphTensor* im = [g imaginaryPartOfTensor:input name:nil];
-    MPSDataType floatType = re.dataType;
+    MPSGraphTensor* result = nil;
+    if (input.dataType != MPSDataTypeComplexFloat32 &&
+        input.dataType != MPSDataTypeComplexFloat16) {
+        result = [g signWithTensor:input name:nil];
+    } else {
+        MPSGraphTensor* re = [g realPartOfTensor:input name:nil];
+        MPSGraphTensor* im = [g imaginaryPartOfTensor:input name:nil];
+        MPSDataType floatType = re.dataType;
 
-    // magnitude = |x| (as real)
-    MPSGraphTensor* magnitude = [g realPartOfTensor:[g absoluteWithTensor:input name:nil] name:nil];
+        // magnitude = |x| (as real)
+        MPSGraphTensor* magnitude = [g realPartOfTensor:[g absoluteWithTensor:input name:nil]
+                                                   name:nil];
 
-    // Avoid division by zero: use 1 where magnitude is 0, then mask result to 0.
-    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:floatType];
-    MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:floatType];
-    MPSGraphTensor* is_zero = [g equalWithPrimaryTensor:magnitude secondaryTensor:zero name:nil];
-    MPSGraphTensor* safe_mag = [g selectWithPredicateTensor:is_zero
-                                        truePredicateTensor:one
-                                       falsePredicateTensor:magnitude
+        // Avoid division by zero: use 1 where magnitude is 0, then mask result to 0.
+        MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:floatType];
+        MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:floatType];
+        MPSGraphTensor* is_zero = [g equalWithPrimaryTensor:magnitude
+                                            secondaryTensor:zero
                                                        name:nil];
+        MPSGraphTensor* safe_mag = [g selectWithPredicateTensor:is_zero
+                                            truePredicateTensor:one
+                                           falsePredicateTensor:magnitude
+                                                           name:nil];
 
-    // x / |x|, zeroed where |x| == 0
-    MPSGraphTensor* norm_re = [g divisionWithPrimaryTensor:re secondaryTensor:safe_mag name:nil];
-    MPSGraphTensor* norm_im = [g divisionWithPrimaryTensor:im secondaryTensor:safe_mag name:nil];
-    norm_re = [g selectWithPredicateTensor:is_zero
-                       truePredicateTensor:zero
-                      falsePredicateTensor:norm_re
-                                      name:nil];
-    norm_im = [g selectWithPredicateTensor:is_zero
-                       truePredicateTensor:zero
-                      falsePredicateTensor:norm_im
-                                      name:nil];
+        // x / |x|, zeroed where |x| == 0
+        MPSGraphTensor* norm_re = [g divisionWithPrimaryTensor:re
+                                               secondaryTensor:safe_mag
+                                                          name:nil];
+        MPSGraphTensor* norm_im = [g divisionWithPrimaryTensor:im
+                                               secondaryTensor:safe_mag
+                                                          name:nil];
+        norm_re = [g selectWithPredicateTensor:is_zero
+                           truePredicateTensor:zero
+                          falsePredicateTensor:norm_re
+                                          name:nil];
+        norm_im = [g selectWithPredicateTensor:is_zero
+                           truePredicateTensor:zero
+                          falsePredicateTensor:norm_im
+                                          name:nil];
 
-    return [g complexTensorWithRealTensor:norm_re imaginaryTensor:norm_im name:nil];
+        result = [g complexTensorWithRealTensor:norm_re imaginaryTensor:norm_im name:nil];
+    }
+
+    if (!result)
+        return ProcessResult::Error("sign: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.sign", Handle_sign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);
@@ -93,63 +112,83 @@ REGISTER_CUSTOM_CALL_UNARY_OP("mhlo.acosh", acosh, mhlo_acosh);
 REGISTER_CUSTOM_CALL_UNARY_OP("mhlo.atanh", atanh, mhlo_atanh);
 
 // Complex part extraction (methods use OfTensor, not WithTensor, so can't use the macro)
-static MPSGraphTensor* Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
-    return [g realPartOfTensor:input name:nil];
+        return ProcessResult::Error("real: missing input tensor");
+    MPSGraphTensor* result = [g realPartOfTensor:input name:nil];
+    if (!result)
+        return ProcessResult::Error("real: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.real", Handle_real);
 
-static MPSGraphTensor* Handle_imag(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_imag(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
-    return [g imaginaryPartOfTensor:input name:nil];
+        return ProcessResult::Error("imag: missing input tensor");
+    MPSGraphTensor* result = [g imaginaryPartOfTensor:input name:nil];
+    if (!result)
+        return ProcessResult::Error("imag: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.imag", Handle_imag);
 
 // Complex construction from real and imaginary parts
-static MPSGraphTensor* Handle_complex(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_complex(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* real = GetInputTensor(values, op, 0);
     MPSGraphTensor* imag = GetInputTensor(values, op, 1);
     if (!real || !imag)
-        return nullptr;
-    return [g complexTensorWithRealTensor:real imaginaryTensor:imag name:nil];
+        return ProcessResult::Error("complex: missing input tensor");
+    MPSGraphTensor* result = [g complexTensorWithRealTensor:real imaginaryTensor:imag name:nil];
+    if (!result)
+        return ProcessResult::Error("complex: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.complex", Handle_complex);
 
 // exponential_minus_one: exp(x) - 1
-static MPSGraphTensor* Handle_expm1(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_expm1(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("exponential_minus_one: missing input tensor");
     MPSGraphTensor* exp_x = [g exponentWithTensor:input name:nil];
     MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:input.dataType];
-    return [g subtractionWithPrimaryTensor:exp_x secondaryTensor:one name:nil];
+    MPSGraphTensor* result = [g subtractionWithPrimaryTensor:exp_x secondaryTensor:one name:nil];
+    if (!result)
+        return ProcessResult::Error("exponential_minus_one: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.exponential_minus_one", Handle_expm1);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
-static MPSGraphTensor* Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("log_plus_one: missing input tensor");
 
     // FIXME: This naive implementation is numerically unstable for small inputs.
     MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:input.dataType];
     MPSGraphTensor* onePlusX = [g additionWithPrimaryTensor:input secondaryTensor:one name:nil];
-    return [g logarithmWithTensor:onePlusX name:nil];
+    MPSGraphTensor* result = [g logarithmWithTensor:onePlusX name:nil];
+    if (!result)
+        return ProcessResult::Error("log_plus_one: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.log_plus_one", Handle_log_plus_one);
 
 // Inverse error function (erfinv) using Winitzki approximation
 // erfinv(x) ≈ sign(x) * sqrt(sqrt(t² - log(1-x²)/a) - t)
 // where t = 2/(π*a) + log(1-x²)/2, a ≈ 0.147
-static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     if (!x)
-        return nullptr;
+        return ProcessResult::Error("erf_inv: missing input tensor");
 
     MPSDataType dtype = x.dataType;
 
@@ -212,20 +251,34 @@ static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap
 
     // sign(x) * |result|
     MPSGraphTensor* sign_x = [g signWithTensor:x name:nil];
-    return [g multiplicationWithPrimaryTensor:sign_x secondaryTensor:abs_result name:nil];
+    MPSGraphTensor* result = [g multiplicationWithPrimaryTensor:sign_x
+                                                secondaryTensor:abs_result
+                                                           name:nil];
+    if (!result)
+        return ProcessResult::Error("erf_inv: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
 
 // cbrt: cube root via sign(x) * pow(|x|, 1/3)
-static MPSGraphTensor* Handle_cbrt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_cbrt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("cbrt: missing input tensor");
     MPSGraphTensor* abs_input = [g absoluteWithTensor:input name:nil];
     MPSGraphTensor* third = [g constantWithScalar:(1.0 / 3.0) dataType:input.dataType];
-    MPSGraphTensor* result = [g powerWithPrimaryTensor:abs_input secondaryTensor:third name:nil];
+    MPSGraphTensor* pow_result = [g powerWithPrimaryTensor:abs_input
+                                           secondaryTensor:third
+                                                      name:nil];
     MPSGraphTensor* sign = [g signWithTensor:input name:nil];
-    return [g multiplicationWithPrimaryTensor:sign secondaryTensor:result name:nil];
+    MPSGraphTensor* result = [g multiplicationWithPrimaryTensor:sign
+                                                secondaryTensor:pow_result
+                                                           name:nil];
+    if (!result)
+        return ProcessResult::Error("cbrt: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.cbrt", Handle_cbrt);
 

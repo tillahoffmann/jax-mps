@@ -16,28 +16,33 @@ REGISTER_MLIR_BINARY_OP("stablehlo.power", power, power);
 REGISTER_MLIR_BINARY_OP("stablehlo.atan2", atan2, atan2);
 
 // Matrix multiplication (dot)
-static MPSGraphTensor* Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
     MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
-        return nullptr;
-    return [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        return ProcessResult::Error("dot: missing input tensor");
+    MPSGraphTensor* result = [g matrixMultiplicationWithPrimaryTensor:lhs
+                                                      secondaryTensor:rhs
+                                                                 name:nil];
+    if (!result)
+        return ProcessResult::Error("dot: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
-static bool _reg_dot = ::jax_mps::OpRegistry::Register("stablehlo.dot", Handle_dot);
+REGISTER_MPS_OP("stablehlo.dot", Handle_dot);
 
 // Generalized matrix multiplication (dot_general)
 // Handles contracting dimensions and batch dimensions
-static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
     if (!dotOp) {
-        MPS_LOG_ERROR(" Expected DotGeneralOp\n");
-        return nullptr;
+        return ProcessResult::Error("dot_general: expected DotGeneralOp");
     }
 
     MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
     MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
-        return nullptr;
+        return ProcessResult::Error("dot_general: missing input tensor");
 
     auto dimNumbers = dotOp.getDotDimensionNumbers();
     auto lhsContractingDims = dimNumbers.getLhsContractingDimensions();
@@ -50,6 +55,8 @@ static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, Valu
     NSUInteger lhsRank = lhsShape.count;
     NSUInteger rhsRank = rhsShape.count;
 
+    MPSGraphTensor* result = nil;
+
     // Simple case: standard 2D matmul with contraction on last/first dims
     // LHS: (M, K), RHS: (K, N) -> (M, N)
     if (lhsBatchDims.empty() && rhsBatchDims.empty() && lhsRank == 2 && rhsRank == 2 &&
@@ -59,109 +66,124 @@ static MPSGraphTensor* Handle_dot_general(MPSGraph* g, mlir::Operation* op, Valu
 
         // Standard matmul: LHS contracts on dim 1, RHS contracts on dim 0
         if (lhsContractDim == 1 && rhsContractDim == 0) {
-            return [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
         }
-
         // LHS contracts on dim 0: need to transpose LHS
-        // (K, M) @ (K, N) -> transpose LHS to (M, K), then (M, K) @ ...
-        if (lhsContractDim == 0 && rhsContractDim == 0) {
-            // Need: LHS^T @ RHS where inner dims match
-            // LHS is (K, M), LHS^T is (M, K)
-            // RHS is (K, N)
-            // (M, K) @ (K, N) = (M, N)
+        else if (lhsContractDim == 0 && rhsContractDim == 0) {
             MPSGraphTensor* lhsT = [g transposeTensor:lhs permutation:@[@1, @0] name:nil];
-            return [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhs name:nil];
+            result = [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhs name:nil];
         }
-
         // LHS contracts on dim 1, RHS contracts on dim 1: need to transpose RHS
-        if (lhsContractDim == 1 && rhsContractDim == 1) {
-            // LHS is (M, K), RHS is (N, K), RHS^T is (K, N)
-            // (M, K) @ (K, N) = (M, N)
+        else if (lhsContractDim == 1 && rhsContractDim == 1) {
             MPSGraphTensor* rhsT = [g transposeTensor:rhs permutation:@[@1, @0] name:nil];
-            return [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhsT name:nil];
+            result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhsT name:nil];
         }
-
         // LHS contracts on dim 0, RHS contracts on dim 1: transpose both
-        if (lhsContractDim == 0 && rhsContractDim == 1) {
-            // LHS is (K, M), RHS is (N, K)
-            // LHS^T is (M, K), RHS^T is (K, N)
-            // (M, K) @ (K, N) = (M, N)
+        else if (lhsContractDim == 0 && rhsContractDim == 1) {
             MPSGraphTensor* lhsT = [g transposeTensor:lhs permutation:@[@1, @0] name:nil];
             MPSGraphTensor* rhsT = [g transposeTensor:rhs permutation:@[@1, @0] name:nil];
-            return [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhsT name:nil];
+            result = [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhsT name:nil];
         }
     }
 
     // Fall back to simple matmul for unhandled cases
-    MPS_LOG_WARN("dot_general with complex contracting/batch dims, falling back to simple matmul. "
-                 "LHS contracting: %lld, RHS contracting: %lld\n",
-                 lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
-                 rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
-    return [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+    if (!result) {
+        MPS_LOG_WARN(
+            "dot_general with complex contracting/batch dims, falling back to simple matmul. "
+            "LHS contracting: %lld, RHS contracting: %lld\n",
+            lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
+            rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
+        result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+    }
+
+    if (!result)
+        return ProcessResult::Error("dot_general: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
-static bool _reg_dot_general =
-    ::jax_mps::OpRegistry::Register("stablehlo.dot_general", Handle_dot_general);
+REGISTER_MPS_OP("stablehlo.dot_general", Handle_dot_general);
 
 // Compare operation
-static MPSGraphTensor* Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
     if (!compareOp) {
-        MPS_LOG_ERROR(" Expected CompareOp\n");
-        return nullptr;
+        return ProcessResult::Error("compare: expected CompareOp");
     }
 
     MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
     MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
-        return nullptr;
+        return ProcessResult::Error("compare: missing input tensor");
 
     auto direction = compareOp.getComparisonDirection();
     using Dir = mlir::stablehlo::ComparisonDirection;
 
+    MPSGraphTensor* result = nil;
     switch (direction) {
         case Dir::LT:
-            return [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         case Dir::LE:
-            return [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         case Dir::GT:
-            return [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         case Dir::GE:
-            return [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         case Dir::EQ:
-            return [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         case Dir::NE:
-            return [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            break;
         default:
-            MPS_LOG_ERROR(" Unknown compare direction\n");
-            return nullptr;
+            return ProcessResult::Error("compare: unknown compare direction");
     }
+
+    if (!result)
+        return ProcessResult::Error("compare: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
 
 // Select operation (conditional selection: pred ? true_val : false_val)
-static MPSGraphTensor* Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* pred = GetInputTensor(values, op, 0);
     MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
     MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
     if (!pred || !onTrue || !onFalse)
-        return nullptr;
+        return ProcessResult::Error("select: missing input tensor");
 
-    return [g selectWithPredicateTensor:pred
-                    truePredicateTensor:onTrue
-                   falsePredicateTensor:onFalse
-                                   name:nil];
+    MPSGraphTensor* result = [g selectWithPredicateTensor:pred
+                                      truePredicateTensor:onTrue
+                                     falsePredicateTensor:onFalse
+                                                     name:nil];
+    if (!result)
+        return ProcessResult::Error("select: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.select", Handle_select);
 
 // Clamp operation: clamp(min, x, max)
-static MPSGraphTensor* Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
     MPSGraphTensor* operand = GetInputTensor(values, op, 1);
     MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
     if (!minVal || !operand || !maxVal)
-        return nullptr;
+        return ProcessResult::Error("clamp: missing input tensor");
 
-    return [g clampWithTensor:operand minValueTensor:minVal maxValueTensor:maxVal name:nil];
+    MPSGraphTensor* result = [g clampWithTensor:operand
+                                 minValueTensor:minVal
+                                 maxValueTensor:maxVal
+                                           name:nil];
+    if (!result)
+        return ProcessResult::Error("clamp: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 
@@ -171,11 +193,11 @@ REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 // 2. If x or y is NaN, return NaN
 // 3. If x == 0, return smallest subnormal with sign of y
 // 4. Otherwise, treat x as integer bits and increment/decrement based on direction
-static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     MPSGraphTensor* y = GetInputTensor(values, op, 1);
     if (!x || !y)
-        return nullptr;
+        return ProcessResult::Error("next_after: missing input tensor");
 
     MPSDataType dtype = x.dataType;
 
@@ -259,7 +281,10 @@ static MPSGraphTensor* Handle_next_after(MPSGraph* g, mlir::Operation* op, Value
         result = [g reshapeTensor:result withShape:@[] name:nil];
     }
 
-    return result;
+    if (!result)
+        return ProcessResult::Error("next_after: handler returned null");
+    SetOutputTensor(values, op, result);
+    return ProcessResult{};
 }
 REGISTER_MPS_OP("chlo.next_after", Handle_next_after);
 

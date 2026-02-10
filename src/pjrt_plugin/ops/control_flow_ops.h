@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-// registry.h provides MPSGraph types, mlir types, and ValueMap
+// registry.h provides MPSGraph types, mlir types, ValueMap, and ProcessResult
 #include "pjrt_plugin/ops/registry.h"
 
 // Forward declarations for MLIR types used in signatures
@@ -13,24 +13,6 @@ class ModuleOp;
 }  // namespace mlir
 
 namespace jax_mps {
-
-// Result type for control flow operations - can be an error or return values
-struct ProcessResult {
-    std::string error;
-    std::vector<mlir::Value> return_values;
-    // Auxiliary tensors from multi-output ops that need to be computed
-    // but aren't part of the return values (to satisfy MPS graph execution)
-    std::vector<void*> auxiliary_tensors;  // MPSGraphTensor*
-
-    bool ok() const {
-        return error.empty();
-    }
-    static ProcessResult Error(const std::string& msg) {
-        ProcessResult r;
-        r.error = msg;
-        return r;
-    }
-};
 
 // Block processor function type for recursive processing
 using BlockProcessor = ProcessResult (*)(MPSGraph* graph, mlir::Block& block, ValueMap& values,

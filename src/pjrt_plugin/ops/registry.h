@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
@@ -21,16 +22,29 @@ namespace jax_mps {
 // Maps mlir::Value (via opaque pointer) to MPSGraphTensor*
 using ValueMap = std::unordered_map<void*, MPSGraphTensor*>;
 
-// Handler signature: takes MLIR operation directly
-using OpHandler = MPSGraphTensor* (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+// Result type for op handlers - can be an error or success with optional auxiliary tensors
+struct ProcessResult {
+    std::string error;
+    std::vector<mlir::Value> return_values;
+    // Auxiliary tensors from multi-output ops that need to be computed
+    // but aren't part of the return values (to satisfy MPS graph execution)
+    std::vector<void*> auxiliary_tensors;  // MPSGraphTensor*
 
-// Forward declaration for ProcessResult (defined in control_flow_ops.h)
-struct ProcessResult;
+    bool ok() const {
+        return error.empty();
+    }
+    static ProcessResult Error(const std::string& msg) {
+        ProcessResult r;
+        r.error = msg;
+        return r;
+    }
+};
 
-// Handler for multi-result operations that return ProcessResult
-using MultiResultOpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+// Unified handler signature: all handlers return ProcessResult and set outputs in values map
+using OpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
 
 // Global op registry - ops register themselves at static init time
+// NOTE: Do not create additional registries. Use this single registry for all ops.
 class OpRegistry {
 public:
     static bool Register(const char* name, OpHandler handler) {
@@ -74,37 +88,8 @@ private:
     }
 };
 
-// Registry for multi-result operations (return ProcessResult instead of MPSGraphTensor*)
-class MultiResultOpRegistry {
-public:
-    static bool Register(const char* name, MultiResultOpHandler handler) {
-        GetMutableHandlers()[name] = handler;
-        return true;
-    }
-
-    static MultiResultOpHandler Find(const std::string& name) {
-        auto& handlers = GetMutableHandlers();
-        auto it = handlers.find(name);
-        return it != handlers.end() ? it->second : nullptr;
-    }
-
-    // Returns set of all registered multi-result operation names
-    static std::unordered_set<std::string> GetRegisteredOps() {
-        std::unordered_set<std::string> ops;
-        for (const auto& pair : GetMutableHandlers()) {
-            ops.insert(pair.first);
-        }
-        return ops;
-    }
-
-private:
-    static std::unordered_map<std::string, MultiResultOpHandler>& GetMutableHandlers() {
-        static std::unordered_map<std::string, MultiResultOpHandler> handlers;
-        return handlers;
-    }
-};
-
 // Global custom-call-target registry - custom call targets register themselves at static init time
+// NOTE: Do not create additional registries. Use this single registry for all custom calls.
 class CustomCallRegistry {
 public:
     static bool Register(const char* target, OpHandler handler) {
@@ -121,27 +106,6 @@ public:
 private:
     static std::unordered_map<std::string, OpHandler>& GetMutableHandlers() {
         static std::unordered_map<std::string, OpHandler> handlers;
-        return handlers;
-    }
-};
-
-// Registry for multi-result custom call targets
-class MultiResultCustomCallRegistry {
-public:
-    static bool Register(const char* target, MultiResultOpHandler handler) {
-        GetMutableHandlers()[target] = handler;
-        return true;
-    }
-
-    static MultiResultOpHandler Find(const std::string& target) {
-        auto& handlers = GetMutableHandlers();
-        auto it = handlers.find(target);
-        return it != handlers.end() ? it->second : nullptr;
-    }
-
-private:
-    static std::unordered_map<std::string, MultiResultOpHandler>& GetMutableHandlers() {
-        static std::unordered_map<std::string, MultiResultOpHandler> handlers;
         return handlers;
     }
 };
@@ -220,54 +184,55 @@ inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
     static bool _reg_##handler_fn = ::jax_mps::OpRegistry::Register(mlir_op_name, handler_fn)
 
 // Convenience macro for simple binary ops
-#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                 \
-    static MPSGraphTensor* Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
-                                                    ::jax_mps::ValueMap& values) {    \
-        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                          \
-        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                          \
-        if (!lhs || !rhs)                                                             \
-            return nullptr;                                                           \
-        return [g mps_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];    \
-    }                                                                                 \
+#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                             \
+    static ::jax_mps::ProcessResult Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op,    \
+                                                             ::jax_mps::ValueMap& values) {       \
+        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                      \
+        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                      \
+        if (!lhs || !rhs)                                                                         \
+            return ::jax_mps::ProcessResult::Error("binary op: missing input tensor");            \
+        MPSGraphTensor* out = [g mps_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil]; \
+        if (!out)                                                                                 \
+            return ::jax_mps::ProcessResult::Error("binary op: handler returned null");           \
+        SetOutputTensor(values, op, out);                                                         \
+        return ::jax_mps::ProcessResult{};                                                        \
+    }                                                                                             \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
 
 // Convenience macro for simple unary ops
-#define REGISTER_MLIR_UNARY_OP(mlir_op_name, mps_method, reg_suffix)                  \
-    static MPSGraphTensor* Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
-                                                    ::jax_mps::ValueMap& values) {    \
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);                        \
-        if (!input)                                                                   \
-            return nullptr;                                                           \
-        return [g mps_method##WithTensor:input name:nil];                             \
-    }                                                                                 \
+#define REGISTER_MLIR_UNARY_OP(mlir_op_name, mps_method, reg_suffix)                           \
+    static ::jax_mps::ProcessResult Handle_mlir_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
+                                                             ::jax_mps::ValueMap& values) {    \
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);                                 \
+        if (!input)                                                                            \
+            return ::jax_mps::ProcessResult::Error("unary op: missing input tensor");          \
+        MPSGraphTensor* out = [g mps_method##WithTensor:input name:nil];                       \
+        if (!out)                                                                              \
+            return ::jax_mps::ProcessResult::Error("unary op: handler returned null");         \
+        SetOutputTensor(values, op, out);                                                      \
+        return ::jax_mps::ProcessResult{};                                                     \
+    }                                                                                          \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
 
-// Macro for registering multi-result ops (handlers that return ProcessResult)
-#define REGISTER_MULTI_RESULT_OP(mlir_op_name, handler_fn) \
-    static bool _mr_reg_##handler_fn =                     \
-        ::jax_mps::MultiResultOpRegistry::Register(mlir_op_name, handler_fn)
-
 // Macro for registering custom call targets
-#define REGISTER_CUSTOM_CALL_TARGET(target_name, handler_fn) \
-    static bool _cc_reg_##handler_fn =                       \
+// Use unique_suffix to allow registering the same handler for multiple targets
+#define REGISTER_CUSTOM_CALL(target_name, handler_fn, unique_suffix) \
+    static bool _cc_reg_##unique_suffix =                            \
         ::jax_mps::CustomCallRegistry::Register(target_name, handler_fn)
 
-// Macro for registering multi-result custom call targets
-// Use unique_suffix to allow registering the same handler for multiple targets
-#define REGISTER_MULTI_RESULT_CUSTOM_CALL(target_name, handler_fn, unique_suffix) \
-    static bool _mrcc_reg_##unique_suffix =                                       \
-        ::jax_mps::MultiResultCustomCallRegistry::Register(target_name, handler_fn)
-
 // Convenience macro for simple unary custom call targets
-#define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)          \
-    static MPSGraphTensor* Handle_cc_##reg_suffix(MPSGraph* g, mlir::Operation* op, \
-                                                  ::jax_mps::ValueMap& values) {    \
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);                      \
-        if (!input)                                                                 \
-            return nullptr;                                                         \
-        return [g mps_method##WithTensor:input name:nil];                           \
-    }                                                                               \
-    static bool _cc_reg_##reg_suffix =                                              \
-        ::jax_mps::CustomCallRegistry::Register(target_name, Handle_cc_##reg_suffix)
+#define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)                         \
+    static ::jax_mps::ProcessResult Handle_cc_##reg_suffix(MPSGraph* g, mlir::Operation* op,       \
+                                                           ::jax_mps::ValueMap& values) {          \
+        MPSGraphTensor* input = GetInputTensor(values, op, 0);                                     \
+        if (!input)                                                                                \
+            return ::jax_mps::ProcessResult::Error("custom call unary op: missing input tensor");  \
+        MPSGraphTensor* out = [g mps_method##WithTensor:input name:nil];                           \
+        if (!out)                                                                                  \
+            return ::jax_mps::ProcessResult::Error("custom call unary op: handler returned null"); \
+        SetOutputTensor(values, op, out);                                                          \
+        return ::jax_mps::ProcessResult{};                                                         \
+    }                                                                                              \
+    REGISTER_CUSTOM_CALL(target_name, Handle_cc_##reg_suffix, reg_suffix)
 
 }  // namespace jax_mps

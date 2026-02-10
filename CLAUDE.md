@@ -8,6 +8,7 @@
 - You may NEVER delete operations or tests without my explicit approval.
 - For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See `tests/configs/unary.py` for an example and `tests/configs/util.py` for the signature of `OperationTestConfig`.
 - You may NEVER claim that a failed test is "a known limitation" or "unrelated to our changes" without providing proof. CI is always green.
+- You may NEVER create new op registries. Use `OpRegistry` for all ops and `CustomCallRegistry` for custom call targets. See `src/pjrt_plugin/ops/registry.h`.
 
 # Adding New Ops
 

@@ -335,13 +335,13 @@ ProcessResult HandleTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& value
     return result;
 }
 
-// Register sort-related ops using the multi-result registry
-REGISTER_MULTI_RESULT_OP("stablehlo.sort", HandleSortOp);
-REGISTER_MULTI_RESULT_OP("chlo.top_k", HandleTopKOp);
+// Register sort-related ops
+REGISTER_MPS_OP("stablehlo.sort", HandleSortOp);
+REGISTER_MPS_OP("chlo.top_k", HandleTopKOp);
 
 // Register top_k custom call targets
-REGISTER_MULTI_RESULT_CUSTOM_CALL("stablehlo.dynamic_top_k", HandleTopKOp, stablehlo_dynamic_top_k);
-REGISTER_MULTI_RESULT_CUSTOM_CALL("mhlo.topk", HandleTopKOp, mhlo_topk);
-REGISTER_MULTI_RESULT_CUSTOM_CALL("mhlo.top_k", HandleTopKOp, mhlo_top_k);
+REGISTER_CUSTOM_CALL("stablehlo.dynamic_top_k", HandleTopKOp, stablehlo_dynamic_top_k);
+REGISTER_CUSTOM_CALL("mhlo.topk", HandleTopKOp, mhlo_topk);
+REGISTER_CUSTOM_CALL("mhlo.top_k", HandleTopKOp, mhlo_top_k);
 
 }  // namespace jax_mps

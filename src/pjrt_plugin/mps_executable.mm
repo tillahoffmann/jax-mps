@@ -164,74 +164,46 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         }
 
         // Handle multi-result reduce (argmax/argmin) specially
+        // stablehlo.reduce can have single or multiple results, requiring special dispatch
         if (op_name == "stablehlo.reduce" && op->getNumResults() > 1) {
-            ProcessResult multiReduceResult = HandleMultiResultReduceOp(graph, op, values);
-            if (!multiReduceResult.ok())
-                return multiReduceResult;
+            ProcessResult reduceResult = HandleMultiResultReduceOp(graph, op, values);
+            if (!reduceResult.ok())
+                return reduceResult;
             continue;
         }
 
-        // Check for multi-result op handlers first
-        if (MultiResultOpHandler mrHandler = MultiResultOpRegistry::Find(op_name)) {
-            ProcessResult mrResult = mrHandler(graph, op, values);
-            if (!mrResult.ok())
-                return mrResult;
-            // Collect auxiliary tensors from the handler
-            for (void* aux : mrResult.auxiliary_tensors) {
-                result.auxiliary_tensors.push_back(aux);
-            }
-            continue;
-        }
-
-        // Check for multi-result custom call handlers
+        // Look up handler in registry (handles custom_call via CustomCallRegistry)
+        OpHandler handler = nullptr;
+        std::string custom_call_target;
         if (op_name == "stablehlo.custom_call") {
             if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
-                std::string target = customCallOp.getCallTargetName().str();
-                if (MultiResultOpHandler mrHandler = MultiResultCustomCallRegistry::Find(target)) {
-                    ProcessResult mrResult = mrHandler(graph, op, values);
-                    if (!mrResult.ok())
-                        return mrResult;
-                    // Collect auxiliary tensors from the handler
-                    for (void* aux : mrResult.auxiliary_tensors) {
-                        result.auxiliary_tensors.push_back(aux);
-                    }
-                    continue;
-                }
+                custom_call_target = customCallOp.getCallTargetName().str();
+                handler = CustomCallRegistry::Find(custom_call_target);
             }
         }
-
-        // Look up single-result handler in registry
-        OpHandler handler = OpRegistry::Find(op_name);
         if (!handler) {
-            return ProcessResult::Error(UnsupportedOpsMessage({op_name}) +
+            handler = OpRegistry::Find(op_name);
+        }
+        if (!handler) {
+            // For custom_call, report the target name rather than the op name
+            std::string unsupported_name =
+                custom_call_target.empty()
+                    ? op_name
+                    : ("stablehlo.custom_call (target: " + custom_call_target + ")");
+            return ProcessResult::Error(UnsupportedOpsMessage({unsupported_name}) +
                                         "\n\n"
                                         "Supported operations: " +
                                         OpRegistry::ListRegistered());
         }
 
-        // Check for multi-result operations (not yet supported)
-        if (op->getNumResults() > 1) {
-            if (op_name == "stablehlo.custom_call") {
-                if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
-                    return ProcessResult::Error(
-                        "Operation 'stablehlo.custom_call' target='" +
-                        customCallOp.getCallTargetName().str() +
-                        "' has multiple results which is not yet supported");
-                }
-            }
-            return ProcessResult::Error("Operation '" + op_name +
-                                        "' has multiple results which is not yet supported");
-        }
+        // Execute the handler - it sets outputs in values map and returns ProcessResult
+        ProcessResult opResult = handler(graph, op, values);
+        if (!opResult.ok())
+            return opResult;
 
-        // Execute the handler
-        MPSGraphTensor* out = handler(graph, op, values);
-        if (!out) {
-            return ProcessResult::Error("Operation '" + op_name + "' handler returned null");
-        }
-
-        // Map the result to the output tensor
-        if (op->getNumResults() > 0) {
-            values[op->getResult(0).getAsOpaquePointer()] = out;
+        // Collect auxiliary tensors from the handler (for MPS multi-output ops)
+        for (void* aux : opResult.auxiliary_tensors) {
+            result.auxiliary_tensors.push_back(aux);
         }
     }
 
