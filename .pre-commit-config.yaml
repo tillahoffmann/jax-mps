@@ -28,6 +28,18 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: clang-tidy
+        name: clang-tidy
+        entry: |
+          bash -c '
+            CLANG_TIDY=$(command -v clang-tidy || echo "$(brew --prefix llvm 2>/dev/null)/bin/clang-tidy")
+            [ -x "$CLANG_TIDY" ] || { echo "clang-tidy not found. Install with: brew install llvm"; exit 127; }
+            cmake -B build -S .
+            find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) "$CLANG_TIDY" -p build
+          '
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: build
         name: build
         entry: bash -c 'uv pip install -e . -q'

@@ -185,7 +185,7 @@ ProcessResult HandleCaseOp(MPSGraph* graph, mlir::Operation* op, ValueMap& value
     for (size_t r = 0; r < numResults; ++r) {
         MPSGraphTensor* selected = branchOutputs[numBranches - 1][r];
         for (size_t i = numBranches - 1; i > 0; --i) {
-            MPSGraphTensor* branchIndex = [graph constantWithScalar:(NSInteger)(i - 1)
+            MPSGraphTensor* branchIndex = [graph constantWithScalar:static_cast<double>(i - 1)
                                                            dataType:selector.dataType];
             MPSGraphTensor* pred = [graph equalWithPrimaryTensor:selector
                                                  secondaryTensor:branchIndex

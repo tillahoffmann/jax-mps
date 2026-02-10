@@ -60,7 +60,7 @@ static int getBitWidth(mlir::Operation* op) {
         return 0;
     auto elemType = tensorType.getElementType();
     if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
-        return intType.getWidth();
+        return static_cast<int>(intType.getWidth());
     }
     return 0;
 }

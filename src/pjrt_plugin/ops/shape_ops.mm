@@ -304,7 +304,6 @@ static MPSGraphTensor* Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& va
         return nullptr;
 
     auto edgePaddingLow = padOp.getEdgePaddingLow();
-    auto edgePaddingHigh = padOp.getEdgePaddingHigh();
     auto interiorPadding = padOp.getInteriorPadding();
 
     // Check if interior padding is all zeros (simple edge padding case)
@@ -438,7 +437,6 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
     auto collapsedSliceDims = dimNumbers.getCollapsedSliceDims();
     auto startIndexMap = dimNumbers.getStartIndexMap();
     int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
-    auto sliceSizes = gatherOp.getSliceSizes();
 
     // Handle common embedding lookup pattern:
     // operand: [num_embeddings, embedding_dim]
@@ -588,7 +586,7 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
         return [g scatterWithDataTensor:input
                           updatesTensor:updates
                           indicesTensor:squeezedIndices
-                                   axis:(NSUInteger)scatterAxis
+                                   axis:static_cast<NSInteger>(scatterAxis)
                                    mode:mode
                                    name:nil];
     }

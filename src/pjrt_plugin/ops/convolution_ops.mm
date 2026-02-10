@@ -21,8 +21,8 @@ static NSArray<NSNumber*>* computePermutation(const std::vector<int64_t>& srcLay
         // Find which dimension should be at dstPos in the destination
         int64_t dim = -1;
         for (size_t d = 0; d < rank; ++d) {
-            if (dstLayout[d] == (int64_t)dstPos) {
-                dim = d;
+            if (dstLayout[d] == static_cast<int64_t>(dstPos)) {
+                dim = static_cast<int64_t>(d);
                 break;
             }
         }
@@ -51,12 +51,12 @@ struct ConvParams {
 // Extract convolution parameters from StableHLO op, handling 1D vs 2D
 static ConvParams extractConvParams(mlir::stablehlo::ConvolutionOp& convOp, bool is1D) {
     ConvParams p;
-    p.featureGroupCount = convOp.getFeatureGroupCount();
+    p.featureGroupCount = static_cast<int64_t>(convOp.getFeatureGroupCount());
 
     auto windowStrides = convOp.getWindowStrides();
     if (windowStrides) {
         auto v = windowStrides.value();
-        if (is1D && v.size() >= 1) {
+        if (is1D && !v.empty()) {
             p.strideW = v[0];
         } else if (v.size() >= 2) {
             p.strideH = v[0];
@@ -83,7 +83,7 @@ static ConvParams extractConvParams(mlir::stablehlo::ConvolutionOp& convOp, bool
     auto rhsDilation = convOp.getRhsDilation();
     if (rhsDilation) {
         auto v = rhsDilation.value();
-        if (is1D && v.size() >= 1) {
+        if (is1D && !v.empty()) {
             p.dilationW = v[0];
         } else if (v.size() >= 2) {
             p.dilationH = v[0];
@@ -94,7 +94,7 @@ static ConvParams extractConvParams(mlir::stablehlo::ConvolutionOp& convOp, bool
     auto lhsDilation = convOp.getLhsDilation();
     if (lhsDilation) {
         auto v = lhsDilation.value();
-        if (is1D && v.size() >= 1) {
+        if (is1D && !v.empty()) {
             p.inputDilationW = v[0];
             p.isTransposed = (p.inputDilationW != 1);
         } else if (v.size() >= 2) {

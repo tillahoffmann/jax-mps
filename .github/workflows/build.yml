@@ -42,6 +42,36 @@ jobs:
           ls -la ${{ github.workspace }}/.jax-mps-deps/lib/libprotobuf.a
           ${{ github.workspace }}/.jax-mps-deps/bin/protoc --version
 
+  lint-cpp:
+    name: Lint C++
+    needs: build-deps
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore deps from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          fail-on-cache-miss: true
+
+      - name: clang-format
+        run: |
+          brew install clang-format
+          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+
+      - name: Build for clang-tidy
+        run: |
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.jax-mps-deps"
+
+      - name: clang-tidy
+        run: |
+          brew install llvm
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) clang-tidy -p build
+
   build-and-test:
     name: Build and test (Python ${{ matrix.python }})
     needs: build-deps
@@ -75,11 +105,6 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
-      - name: clang-format
-        run: |
-          brew install clang-format
-          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
-
       - name: ruff format
         run: uv run ruff format --check src tests
 
@@ -108,7 +133,7 @@ jobs:
 
   release:
     name: Release
-    needs: build-and-test
+    needs: [lint-cpp, build-and-test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:

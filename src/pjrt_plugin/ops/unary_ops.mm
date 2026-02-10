@@ -159,8 +159,6 @@ static MPSGraphTensor* Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap
     double two_over_pi_a = 2.0 / (M_PI * a);  // ≈ 4.546884
 
     MPSGraphTensor* one = [g constantWithScalar:1.0 dataType:dtype];
-    MPSGraphTensor* two = [g constantWithScalar:2.0 dataType:dtype];
-    MPSGraphTensor* neg_one = [g constantWithScalar:-1.0 dataType:dtype];
     MPSGraphTensor* half = [g constantWithScalar:0.5 dataType:dtype];
     MPSGraphTensor* const_a = [g constantWithScalar:a dataType:dtype];
     MPSGraphTensor* const_two_pi_a = [g constantWithScalar:two_over_pi_a dataType:dtype];
