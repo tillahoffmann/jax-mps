@@ -144,7 +144,7 @@ jobs:
     name: Publish dev release
     needs: [lint-cpp, build-and-test]
     runs-on: macos-14
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: always() && !failure() && !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       id-token: write  # Required for PyPI trusted publishing
 
