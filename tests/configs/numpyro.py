@@ -128,7 +128,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Binomial requires 'stablehlo.not'.",
+                            reason="Sampling from Binomial requires unsupported gather pattern.",
                             strict=True,
                         )
                     ],
@@ -147,18 +147,10 @@ def make_numpyro_op_configs():
                         )
                     ],
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.Poisson,
-                        numpy.random.gamma(5, 5, batch_shape),
-                        differentiable_argnums=(1,),
-                    ),
-                    marks=[
-                        pytest.mark.xfail(
-                            reason="Sampling from Poisson requires 'stablehlo.not'.",
-                            strict=True,
-                        )
-                    ],
+                NumpyroDistributionTestConfig(
+                    dists.Poisson,
+                    numpy.random.gamma(5, 5, batch_shape),
+                    differentiable_argnums=(1,),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.GeometricProbs,
@@ -166,19 +158,11 @@ def make_numpyro_op_configs():
                     differentiable_argnums=(1,),
                     name="Geometric",
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.NegativeBinomial2,
-                        numpy.random.gamma(5, 5, batch_shape),  # mean
-                        numpy.random.gamma(5, 5, batch_shape),  # concentration
-                        differentiable_argnums=(1, 2),
-                    ),
-                    marks=[
-                        pytest.mark.xfail(
-                            reason="Sampling from NegativeBinomial2 requires 'stablehlo.not'.",
-                            strict=True,
-                        )
-                    ],
+                NumpyroDistributionTestConfig(
+                    dists.NegativeBinomial2,
+                    numpy.random.gamma(5, 5, batch_shape),  # mean
+                    numpy.random.gamma(5, 5, batch_shape),  # concentration
+                    differentiable_argnums=(1, 2),
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
@@ -233,18 +217,10 @@ def make_numpyro_op_configs():
                     numpy.random.gamma(5, 5, batch_shape),  # concentration
                     numpy.random.gamma(5, 5, batch_shape),  # rate
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.VonMises,
-                        numpy.random.uniform(-numpy.pi, numpy.pi, batch_shape),  # loc
-                        numpy.random.gamma(5, 5, batch_shape),  # concentration
-                    ),
-                    marks=[
-                        pytest.mark.xfail(
-                            reason="Sampling from VonMises requires 'stablehlo.not'.",
-                            strict=True,
-                        )
-                    ],
+                NumpyroDistributionTestConfig(
+                    dists.VonMises,
+                    numpy.random.uniform(-numpy.pi, numpy.pi, batch_shape),  # loc
+                    numpy.random.gamma(5, 5, batch_shape),  # concentration
                 ),
                 # Multivariate distributions.
                 pytest.param(

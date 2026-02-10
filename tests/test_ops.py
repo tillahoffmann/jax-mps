@@ -149,7 +149,7 @@ def assert_all_ops_tested():
 
     # Ops that appear in StableHLO IR but get lowered by MLIR before reaching
     # our handlers. They work but don't need explicit registration.
-    mlir_lowered_ops = {"chlo.lgamma", "chlo.digamma"}
+    mlir_lowered_ops = {"chlo.lgamma", "chlo.digamma", "chlo.bessel_i1e"}
 
     op_names = set()
     for mm_file in ops_dir.glob("*.mm"):
