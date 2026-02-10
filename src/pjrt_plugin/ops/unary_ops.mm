@@ -12,7 +12,7 @@ REGISTER_MLIR_UNARY_OP("stablehlo.negate", negative, negate);
 // abs: MPS absoluteWithTensor: on complex input returns complex (magnitude in
 // real part, zero imaginary). StableHLO expects a real-valued result, so we
 // extract the real part for complex inputs.
-static ProcessResult Handle_abs(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleAbs(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("abs: missing input tensor");
@@ -21,7 +21,7 @@ static ProcessResult Handle_abs(MPSGraph* g, mlir::Operation* op, ValueMap& valu
         result = [g realPartOfTensor:result name:nil];
     return Result(values, op, result, "abs");
 }
-REGISTER_MPS_OP("stablehlo.abs", Handle_abs);
+REGISTER_MPS_OP("stablehlo.abs", HandleAbs);
 REGISTER_MLIR_UNARY_OP("stablehlo.sqrt", squareRoot, sqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.rsqrt", reciprocalSquareRoot, rsqrt);
 REGISTER_MLIR_UNARY_OP("stablehlo.erf", erf, erf);
@@ -29,7 +29,7 @@ REGISTER_MLIR_UNARY_OP("chlo.erf", erf, chlo_erf);
 REGISTER_MLIR_UNARY_OP("stablehlo.floor", floor, floor);
 // sign: for complex inputs, stablehlo.sign returns x / |x| (or 0 for x == 0).
 // MPS signWithTensor: applies component-wise sign which is wrong for complex.
-static ProcessResult Handle_sign(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleSign(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("sign: missing input tensor");
@@ -79,7 +79,7 @@ static ProcessResult Handle_sign(MPSGraph* g, mlir::Operation* op, ValueMap& val
 
     return Result(values, op, result, "sign");
 }
-REGISTER_MPS_OP("stablehlo.sign", Handle_sign);
+REGISTER_MPS_OP("stablehlo.sign", HandleSign);
 REGISTER_MLIR_UNARY_OP("stablehlo.is_finite", isFinite, is_finite);
 REGISTER_MLIR_UNARY_OP("chlo.square", square, chlo_square);
 REGISTER_MLIR_UNARY_OP("stablehlo.ceil", ceil, ceil);
@@ -106,26 +106,26 @@ REGISTER_CUSTOM_CALL_UNARY_OP("mhlo.acosh", acosh, mhlo_acosh);
 REGISTER_CUSTOM_CALL_UNARY_OP("mhlo.atanh", atanh, mhlo_atanh);
 
 // Complex part extraction (methods use OfTensor, not WithTensor, so can't use the macro)
-static ProcessResult Handle_real(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReal(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("real: missing input tensor");
     MPSGraphTensor* result = [g realPartOfTensor:input name:nil];
     return Result(values, op, result, "real");
 }
-REGISTER_MPS_OP("stablehlo.real", Handle_real);
+REGISTER_MPS_OP("stablehlo.real", HandleReal);
 
-static ProcessResult Handle_imag(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleImag(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("imag: missing input tensor");
     MPSGraphTensor* result = [g imaginaryPartOfTensor:input name:nil];
     return Result(values, op, result, "imag");
 }
-REGISTER_MPS_OP("stablehlo.imag", Handle_imag);
+REGISTER_MPS_OP("stablehlo.imag", HandleImag);
 
 // Complex construction from real and imaginary parts
-static ProcessResult Handle_complex(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleComplex(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* real = GetInputTensor(values, op, 0);
     MPSGraphTensor* imag = GetInputTensor(values, op, 1);
     if (!real || !imag)
@@ -133,10 +133,10 @@ static ProcessResult Handle_complex(MPSGraph* g, mlir::Operation* op, ValueMap& 
     MPSGraphTensor* result = [g complexTensorWithRealTensor:real imaginaryTensor:imag name:nil];
     return Result(values, op, result, "complex");
 }
-REGISTER_MPS_OP("stablehlo.complex", Handle_complex);
+REGISTER_MPS_OP("stablehlo.complex", HandleComplex);
 
 // exponential_minus_one: exp(x) - 1
-static ProcessResult Handle_expm1(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleExpm1(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("exponential_minus_one: missing input tensor");
@@ -145,10 +145,10 @@ static ProcessResult Handle_expm1(MPSGraph* g, mlir::Operation* op, ValueMap& va
     MPSGraphTensor* result = [g subtractionWithPrimaryTensor:exp_x secondaryTensor:one name:nil];
     return Result(values, op, result, "exponential_minus_one");
 }
-REGISTER_MPS_OP("stablehlo.exponential_minus_one", Handle_expm1);
+REGISTER_MPS_OP("stablehlo.exponential_minus_one", HandleExpm1);
 
 // log_plus_one: log(1+x) - matches PyTorch MPS implementation
-static ProcessResult Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleLogPlusOne(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("log_plus_one: missing input tensor");
@@ -159,12 +159,12 @@ static ProcessResult Handle_log_plus_one(MPSGraph* g, mlir::Operation* op, Value
     MPSGraphTensor* result = [g logarithmWithTensor:onePlusX name:nil];
     return Result(values, op, result, "log_plus_one");
 }
-REGISTER_MPS_OP("stablehlo.log_plus_one", Handle_log_plus_one);
+REGISTER_MPS_OP("stablehlo.log_plus_one", HandleLogPlusOne);
 
 // Inverse error function (erfinv) using Winitzki approximation
 // erfinv(x) ≈ sign(x) * sqrt(sqrt(t² - log(1-x²)/a) - t)
 // where t = 2/(π*a) + log(1-x²)/2, a ≈ 0.147
-static ProcessResult Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleErfInv(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     if (!x)
         return ProcessResult::Error("erf_inv: missing input tensor");
@@ -235,10 +235,10 @@ static ProcessResult Handle_erf_inv(MPSGraph* g, mlir::Operation* op, ValueMap& 
                                                            name:nil];
     return Result(values, op, result, "erf_inv");
 }
-REGISTER_MPS_OP("chlo.erf_inv", Handle_erf_inv);
+REGISTER_MPS_OP("chlo.erf_inv", HandleErfInv);
 
 // cbrt: cube root via sign(x) * pow(|x|, 1/3)
-static ProcessResult Handle_cbrt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleCbrt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("cbrt: missing input tensor");
@@ -253,6 +253,6 @@ static ProcessResult Handle_cbrt(MPSGraph* g, mlir::Operation* op, ValueMap& val
                                                            name:nil];
     return Result(values, op, result, "cbrt");
 }
-REGISTER_MPS_OP("stablehlo.cbrt", Handle_cbrt);
+REGISTER_MPS_OP("stablehlo.cbrt", HandleCbrt);
 
 }  // namespace jax_mps

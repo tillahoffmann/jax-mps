@@ -16,7 +16,7 @@ REGISTER_MLIR_BINARY_OP("stablehlo.power", power, power);
 REGISTER_MLIR_BINARY_OP("stablehlo.atan2", atan2, atan2);
 
 // Matrix multiplication (dot)
-static ProcessResult Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleDot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
     MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
     if (!lhs || !rhs)
@@ -26,11 +26,11 @@ static ProcessResult Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& valu
                                                                  name:nil];
     return Result(values, op, result, "dot");
 }
-REGISTER_MPS_OP("stablehlo.dot", Handle_dot);
+REGISTER_MPS_OP("stablehlo.dot", HandleDot);
 
 // Generalized matrix multiplication (dot_general)
 // Handles contracting dimensions and batch dimensions
-static ProcessResult Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleDotGeneral(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
     if (!dotOp) {
         return ProcessResult::Error("dot_general: expected DotGeneralOp");
@@ -95,10 +95,10 @@ static ProcessResult Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueM
 
     return Result(values, op, result, "dot_general");
 }
-REGISTER_MPS_OP("stablehlo.dot_general", Handle_dot_general);
+REGISTER_MPS_OP("stablehlo.dot_general", HandleDotGeneral);
 
 // Compare operation
-static ProcessResult Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleCompare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
     if (!compareOp) {
         return ProcessResult::Error("compare: expected CompareOp");
@@ -138,10 +138,10 @@ static ProcessResult Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& 
 
     return Result(values, op, result, "compare");
 }
-REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
+REGISTER_MPS_OP("stablehlo.compare", HandleCompare);
 
 // Select operation (conditional selection: pred ? true_val : false_val)
-static ProcessResult Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleSelect(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* pred = GetInputTensor(values, op, 0);
     MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
     MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
@@ -154,10 +154,10 @@ static ProcessResult Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& v
                                                      name:nil];
     return Result(values, op, result, "select");
 }
-REGISTER_MPS_OP("stablehlo.select", Handle_select);
+REGISTER_MPS_OP("stablehlo.select", HandleSelect);
 
 // Clamp operation: clamp(min, x, max)
-static ProcessResult Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleClamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
     MPSGraphTensor* operand = GetInputTensor(values, op, 1);
     MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
@@ -170,7 +170,7 @@ static ProcessResult Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& va
                                            name:nil];
     return Result(values, op, result, "clamp");
 }
-REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
+REGISTER_MPS_OP("stablehlo.clamp", HandleClamp);
 
 // next_after(x, y) - returns the next representable floating point value from x towards y
 // Implementation follows IEEE 754 nextafter semantics:
@@ -178,7 +178,7 @@ REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 // 2. If x or y is NaN, return NaN
 // 3. If x == 0, return smallest subnormal with sign of y
 // 4. Otherwise, treat x as integer bits and increment/decrement based on direction
-static ProcessResult Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleNextAfter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* x = GetInputTensor(values, op, 0);
     MPSGraphTensor* y = GetInputTensor(values, op, 1);
     if (!x || !y)
@@ -268,6 +268,6 @@ static ProcessResult Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMa
 
     return Result(values, op, result, "next_after");
 }
-REGISTER_MPS_OP("chlo.next_after", Handle_next_after);
+REGISTER_MPS_OP("chlo.next_after", HandleNextAfter);
 
 }  // namespace jax_mps

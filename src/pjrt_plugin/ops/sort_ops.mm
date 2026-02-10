@@ -37,7 +37,7 @@ NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape, NSArray<NSNumb
 
 }  // namespace
 
-static ProcessResult HandleSortOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleSort(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
     auto sortOp = mlir::dyn_cast<mlir::stablehlo::SortOp>(op);
     if (!sortOp) {
         return ProcessResult::Error("Expected stablehlo.sort");
@@ -134,16 +134,16 @@ static ProcessResult HandleSortOp(MPSGraph* graph, mlir::Operation* op, ValueMap
     return ProcessResult::Error("Unsupported stablehlo.sort operand/result shape");
 }
 
-static ProcessResult HandleTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
     ProcessResult result;
-    MPS_LOG_DEBUG("HandleTopKOp: entering with %u operands, %u results\n", op->getNumOperands(),
+    MPS_LOG_DEBUG("HandleTopK: entering with %u operands, %u results\n", op->getNumOperands(),
                   op->getNumResults());
     if (op->getNumOperands() < 1 || op->getNumResults() != 2) {
         return ProcessResult::Error("Unsupported top_k operand/result shape");
     }
 
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPS_LOG_DEBUG("HandleTopKOp: got input tensor %p\n", (void*)input);
+    MPS_LOG_DEBUG("HandleTopK: got input tensor %p\n", (void*)input);
     if (!input) {
         return ProcessResult::Error("top_k input tensor not found");
     }
@@ -173,23 +173,23 @@ static ProcessResult HandleTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap
         return ProcessResult::Error("Failed to infer top_k axis");
     }
 
-    MPS_LOG_DEBUG("HandleTopKOp: k=%lld, axis=%ld\n", k, (long)axis);
+    MPS_LOG_DEBUG("HandleTopK: k=%lld, axis=%ld\n", k, (long)axis);
     NSArray<MPSGraphTensor*>* topk = nil;
     if (axis == (NSInteger)input.shape.count - 1) {
-        MPS_LOG_DEBUG("HandleTopKOp: calling topKWithSourceTensor (last axis)\n");
+        MPS_LOG_DEBUG("HandleTopK: calling topKWithSourceTensor (last axis)\n");
         topk = [graph topKWithSourceTensor:input k:(NSUInteger)k name:nil];
     } else {
-        MPS_LOG_DEBUG("HandleTopKOp: calling topKWithSourceTensor axis=%ld\n", (long)axis);
+        MPS_LOG_DEBUG("HandleTopK: calling topKWithSourceTensor axis=%ld\n", (long)axis);
         topk = [graph topKWithSourceTensor:input axis:axis k:(NSUInteger)k name:nil];
     }
-    MPS_LOG_DEBUG("HandleTopKOp: topk result count=%lu\n", topk ? (unsigned long)topk.count : 0UL);
+    MPS_LOG_DEBUG("HandleTopK: topk result count=%lu\n", topk ? (unsigned long)topk.count : 0UL);
     if (!topk || topk.count != 2) {
         return ProcessResult::Error("top_k lowering failed");
     }
 
     MPSGraphTensor* valueOut = topk[0];
     MPSGraphTensor* indexOut = topk[1];
-    MPS_LOG_DEBUG("HandleTopKOp: valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
+    MPS_LOG_DEBUG("HandleTopK: valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
 
     MPSDataType valueType = GetResultMpsType(op, 0);
     if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
@@ -208,7 +208,7 @@ static ProcessResult HandleTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap
         indexOut = [graph reshapeTensor:indexOut withShape:indexShape name:nil];
     }
 
-    MPS_LOG_DEBUG("HandleTopKOp: storing results at %p and %p\n",
+    MPS_LOG_DEBUG("HandleTopK: storing results at %p and %p\n",
                   op->getResult(0).getAsOpaquePointer(), op->getResult(1).getAsOpaquePointer());
     values[op->getResult(0).getAsOpaquePointer()] = valueOut;
     values[op->getResult(1).getAsOpaquePointer()] = indexOut;
@@ -218,17 +218,17 @@ static ProcessResult HandleTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap
     result.auxiliary_tensors.push_back((__bridge void*)valueOut);
     result.auxiliary_tensors.push_back((__bridge void*)indexOut);
 
-    MPS_LOG_DEBUG("HandleTopKOp: done\n");
+    MPS_LOG_DEBUG("HandleTopK: done\n");
     return result;
 }
 
 // Register sort-related ops
-REGISTER_MPS_OP("stablehlo.sort", HandleSortOp);
-REGISTER_MPS_OP("chlo.top_k", HandleTopKOp);
+REGISTER_MPS_OP("stablehlo.sort", HandleSort);
+REGISTER_MPS_OP("chlo.top_k", HandleTopK);
 
 // Register top_k custom call targets
-REGISTER_CUSTOM_CALL("stablehlo.dynamic_top_k", HandleTopKOp, stablehlo_dynamic_top_k);
-REGISTER_CUSTOM_CALL("mhlo.topk", HandleTopKOp, mhlo_topk);
-REGISTER_CUSTOM_CALL("mhlo.top_k", HandleTopKOp, mhlo_top_k);
+REGISTER_CUSTOM_CALL("stablehlo.dynamic_top_k", HandleTopK, stablehlo_dynamic_top_k);
+REGISTER_CUSTOM_CALL("mhlo.topk", HandleTopK, mhlo_topk);
+REGISTER_CUSTOM_CALL("mhlo.top_k", HandleTopK, mhlo_top_k);
 
 }  // namespace jax_mps

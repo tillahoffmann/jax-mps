@@ -5,7 +5,7 @@
 namespace jax_mps {
 
 // Constant creation - creates a constant tensor from MLIR constant op
-static ProcessResult Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleConstant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
     if (!constantOp) {
         return ProcessResult::Error("constant: expected ConstantOp");
@@ -102,10 +102,10 @@ static ProcessResult Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap&
         return ProcessResult::Error("constant: unsupported value type");
     return Result(values, op, result, "constant");
 }
-REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
+REGISTER_MPS_OP("stablehlo.constant", HandleConstant);
 
 // Iota - create an array of indices
-static ProcessResult Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleIota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op);
     if (!iotaOp) {
         return ProcessResult::Error("iota: expected IotaOp");
@@ -129,6 +129,6 @@ static ProcessResult Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& val
 
     return Result(values, op, result, "iota");
 }
-REGISTER_MPS_OP("stablehlo.iota", Handle_iota);
+REGISTER_MPS_OP("stablehlo.iota", HandleIota);
 
 }  // namespace jax_mps

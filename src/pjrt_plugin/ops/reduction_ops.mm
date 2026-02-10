@@ -198,22 +198,22 @@ static ProcessResult HandleMultiResultReduce(MPSGraph* g, mlir::Operation* op, V
 }
 
 // Unified reduce handler - dispatches based on result count
-static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     if (op->getNumResults() > 1) {
         return HandleMultiResultReduce(g, op, values);
     }
     return HandleSingleResultReduce(g, op, values);
 }
-REGISTER_MPS_OP("stablehlo.reduce", Handle_reduce);
+REGISTER_MPS_OP("stablehlo.reduce", HandleReduce);
 
 // stablehlo.return is a terminator used inside regions (e.g., reduce body)
 // It's handled implicitly by parent operations, not executed directly
-static ProcessResult Handle_return(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReturn(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     // This should never be called directly - it's handled by the parent operation
     // But we register it so it's not flagged as unsupported during module verification
     MPS_LOG_WARN("stablehlo.return should not be called directly\n");
     return ProcessResult{};
 }
-REGISTER_MPS_OP("stablehlo.return", Handle_return);
+REGISTER_MPS_OP("stablehlo.return", HandleReturn);
 
 }  // namespace jax_mps

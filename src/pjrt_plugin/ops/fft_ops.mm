@@ -4,7 +4,7 @@
 
 namespace jax_mps {
 
-static ProcessResult Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleFft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto fftOp = mlir::dyn_cast<mlir::stablehlo::FftOp>(op);
     if (!fftOp) {
         return ProcessResult::Error("fft: expected FftOp");
@@ -64,6 +64,6 @@ static ProcessResult Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& valu
 
     return Result(values, op, result, "fft");
 }
-REGISTER_MPS_OP("stablehlo.fft", Handle_fft);
+REGISTER_MPS_OP("stablehlo.fft", HandleFft);
 
 }  // namespace jax_mps

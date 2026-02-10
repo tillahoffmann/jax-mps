@@ -41,7 +41,7 @@ REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, and);
 REGISTER_LOGICAL_BITWISE_OP("stablehlo.or", logicalOR, bitwiseOR, or);
 REGISTER_LOGICAL_BITWISE_OP("stablehlo.xor", logicalXOR, bitwiseXOR, xor);
 
-static ProcessResult Handle_not(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleNot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("not: missing input tensor");
@@ -56,7 +56,7 @@ static ProcessResult Handle_not(MPSGraph* g, mlir::Operation* op, ValueMap& valu
 
     return Result(values, op, result, "not");
 }
-REGISTER_MPS_OP("stablehlo.not", Handle_not);
+REGISTER_MPS_OP("stablehlo.not", HandleNot);
 
 // Helper to get bit width from tensor's element type
 static int getBitWidth(mlir::Operation* op) {
@@ -158,27 +158,26 @@ static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap&
                                    name:nil];
 }
 
-static ProcessResult Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleShiftLeft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kLeft);
     return Result(values, op, result, "shift_left");
 }
-REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
+REGISTER_MPS_OP("stablehlo.shift_left", HandleShiftLeft);
 
-static ProcessResult Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
-                                                ValueMap& values) {
+static ProcessResult HandleShiftRightLogical(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightLogical);
     return Result(values, op, result, "shift_right_logical");
 }
-REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
+REGISTER_MPS_OP("stablehlo.shift_right_logical", HandleShiftRightLogical);
 
-static ProcessResult Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operation* op,
-                                                   ValueMap& values) {
+static ProcessResult HandleShiftRightArithmetic(MPSGraph* g, mlir::Operation* op,
+                                                ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightArithmetic);
     return Result(values, op, result, "shift_right_arithmetic");
 }
-REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", Handle_shift_right_arithmetic);
+REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", HandleShiftRightArithmetic);
 
-static ProcessResult Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandlePopcnt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("popcnt: missing input tensor");
@@ -204,6 +203,6 @@ static ProcessResult Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& v
 
     return Result(values, op, result, "popcnt");
 }
-REGISTER_MPS_OP("stablehlo.popcnt", Handle_popcnt);
+REGISTER_MPS_OP("stablehlo.popcnt", HandlePopcnt);
 
 }  // namespace jax_mps

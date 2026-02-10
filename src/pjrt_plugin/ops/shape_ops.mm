@@ -5,7 +5,7 @@
 
 namespace jax_mps {
 
-static ProcessResult Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleBroadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("broadcast: missing input tensor");
@@ -13,10 +13,10 @@ static ProcessResult Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap
     MPSGraphTensor* result = [g broadcastTensor:input toShape:outputShape name:nil];
     return Result(values, op, result, "broadcast");
 }
-REGISTER_MPS_OP("stablehlo.broadcast", Handle_broadcast);
+REGISTER_MPS_OP("stablehlo.broadcast", HandleBroadcast);
 
 // broadcast_in_dim needs special handling for dimension mapping
-static ProcessResult Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleBroadcastInDim(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto broadcastOp = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(op);
     if (!broadcastOp) {
         return ProcessResult::Error("broadcast_in_dim: expected BroadcastInDimOp");
@@ -65,9 +65,9 @@ static ProcessResult Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, V
 
     return Result(values, op, result, "broadcast_in_dim");
 }
-REGISTER_MPS_OP("stablehlo.broadcast_in_dim", Handle_broadcast_in_dim);
+REGISTER_MPS_OP("stablehlo.broadcast_in_dim", HandleBroadcastInDim);
 
-static ProcessResult Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReshape(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("reshape: missing input tensor");
@@ -75,9 +75,9 @@ static ProcessResult Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap& 
     MPSGraphTensor* result = [g reshapeTensor:input withShape:outputShape name:nil];
     return Result(values, op, result, "reshape");
 }
-REGISTER_MPS_OP("stablehlo.reshape", Handle_reshape);
+REGISTER_MPS_OP("stablehlo.reshape", HandleReshape);
 
-static ProcessResult Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleTranspose(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op);
     if (!transposeOp) {
         return ProcessResult::Error("transpose: expected TransposeOp");
@@ -96,9 +96,9 @@ static ProcessResult Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap
     MPSGraphTensor* result = [g transposeTensor:input permutation:perm name:nil];
     return Result(values, op, result, "transpose");
 }
-REGISTER_MPS_OP("stablehlo.transpose", Handle_transpose);
+REGISTER_MPS_OP("stablehlo.transpose", HandleTranspose);
 
-static ProcessResult Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleConvert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("convert: missing input tensor");
@@ -110,10 +110,10 @@ static ProcessResult Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap& 
     MPSGraphTensor* result = [g castTensor:input toType:dtype name:nil];
     return Result(values, op, result, "convert");
 }
-REGISTER_MPS_OP("stablehlo.convert", Handle_convert);
+REGISTER_MPS_OP("stablehlo.convert", HandleConvert);
 
 // Slice - extract a portion of a tensor (static indices)
-static ProcessResult Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op);
     if (!sliceOp) {
         return ProcessResult::Error("slice: expected SliceOp");
@@ -140,10 +140,10 @@ static ProcessResult Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& va
     MPSGraphTensor* result = [g sliceTensor:input starts:starts ends:ends strides:strides name:nil];
     return Result(values, op, result, "slice");
 }
-REGISTER_MPS_OP("stablehlo.slice", Handle_slice);
+REGISTER_MPS_OP("stablehlo.slice", HandleSlice);
 
 // Dynamic slice - extract a portion using runtime indices
-static ProcessResult Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleDynamicSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto dynSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op);
     if (!dynSliceOp) {
         return ProcessResult::Error("dynamic_slice: expected DynamicSliceOp");
@@ -200,10 +200,10 @@ static ProcessResult Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Valu
                                                      name:nil];
     return Result(values, op, result, "dynamic_slice");
 }
-REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
+REGISTER_MPS_OP("stablehlo.dynamic_slice", HandleDynamicSlice);
 
 // Bitcast convert - reinterpret bits as a different type
-static ProcessResult Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleBitcastConvert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("bitcast_convert: missing input tensor");
@@ -233,10 +233,10 @@ static ProcessResult Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, Va
 
     return Result(values, op, result, "bitcast_convert");
 }
-REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
+REGISTER_MPS_OP("stablehlo.bitcast_convert", HandleBitcastConvert);
 
 // Concatenate - joins tensors along a dimension
-static ProcessResult Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleConcatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
     if (!concatOp) {
         return ProcessResult::Error("concatenate: expected ConcatenateOp");
@@ -261,20 +261,20 @@ static ProcessResult Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueM
     MPSGraphTensor* result = [g concatTensors:input_tensors dimension:dimension name:nil];
     return Result(values, op, result, "concatenate");
 }
-REGISTER_MPS_OP("stablehlo.concatenate", Handle_concatenate);
+REGISTER_MPS_OP("stablehlo.concatenate", HandleConcatenate);
 
 // Sharding is a marker used by JAX for partitioning - just pass through the input
-static ProcessResult Handle_sharding(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleSharding(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
         return ProcessResult::Error("sharding: missing input tensor");
     SetOutputTensor(values, op, input);
     return ProcessResult{};
 }
-REGISTER_CUSTOM_CALL("Sharding", Handle_sharding, sharding);
+REGISTER_CUSTOM_CALL("Sharding", HandleSharding, sharding);
 
 // Pad - add padding around tensor
-static ProcessResult Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandlePad(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(op);
     if (!padOp) {
         return ProcessResult::Error("pad: expected PadOp");
@@ -328,11 +328,10 @@ static ProcessResult Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& valu
                                                  name:nil];
     return Result(values, op, result, "pad");
 }
-REGISTER_MPS_OP("stablehlo.pad", Handle_pad);
+REGISTER_MPS_OP("stablehlo.pad", HandlePad);
 
 // Dynamic update slice - update a portion of a tensor with new values
-static ProcessResult Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation* op,
-                                                 ValueMap& values) {
+static ProcessResult HandleDynamicUpdateSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto updateSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op);
     if (!updateSliceOp) {
         return ProcessResult::Error("dynamic_update_slice: expected DynamicUpdateSliceOp");
@@ -396,11 +395,11 @@ static ProcessResult Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation* o
                                                    name:nil];
     return Result(values, op, result, "dynamic_update_slice");
 }
-REGISTER_MPS_OP("stablehlo.dynamic_update_slice", Handle_dynamic_update_slice);
+REGISTER_MPS_OP("stablehlo.dynamic_update_slice", HandleDynamicUpdateSlice);
 
 // Gather - generalized indexing operation
 // Handles embedding lookups and other gather patterns
-static ProcessResult Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleGather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto gatherOp = mlir::dyn_cast<mlir::stablehlo::GatherOp>(op);
     if (!gatherOp) {
         return ProcessResult::Error("gather: expected GatherOp");
@@ -463,7 +462,7 @@ static ProcessResult Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& v
     // For now, log unsupported patterns
     return ProcessResult::Error("gather: unsupported gather pattern");
 }
-REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
+REGISTER_MPS_OP("stablehlo.gather", HandleGather);
 
 // Helper to determine scatter mode from the update computation region
 static MPSGraphScatterMode GetScatterMode(mlir::stablehlo::ScatterOp scatterOp) {
@@ -492,7 +491,7 @@ static MPSGraphScatterMode GetScatterMode(mlir::stablehlo::ScatterOp scatterOp) 
 
 // Scatter - update tensor at specified indices
 // This handles the common pattern used by gather gradients
-static ProcessResult Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleScatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
     if (!scatterOp) {
         return ProcessResult::Error("scatter: expected ScatterOp");
@@ -600,10 +599,10 @@ static ProcessResult Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& 
 
     return ProcessResult::Error("scatter: unsupported scatter pattern");
 }
-REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);
+REGISTER_MPS_OP("stablehlo.scatter", HandleScatter);
 
 // Reverse - reverse elements along specified dimensions
-static ProcessResult Handle_reverse(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReverse(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(op);
     if (!reverseOp) {
         return ProcessResult::Error("reverse: expected ReverseOp");
@@ -622,6 +621,6 @@ static ProcessResult Handle_reverse(MPSGraph* g, mlir::Operation* op, ValueMap& 
     MPSGraphTensor* result = [g reverseTensor:input axes:axes name:nil];
     return Result(values, op, result, "reverse");
 }
-REGISTER_MPS_OP("stablehlo.reverse", Handle_reverse);
+REGISTER_MPS_OP("stablehlo.reverse", HandleReverse);
 
 }  // namespace jax_mps

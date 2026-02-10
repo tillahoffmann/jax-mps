@@ -160,7 +160,7 @@ static MPSGraphTensor* convert2DOutputTo1D(MPSGraph* g, MPSGraphTensor* result, 
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
-static ProcessResult Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleConvolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
     if (!convOp) {
         return ProcessResult::Error("convolution: expected ConvolutionOp");
@@ -330,6 +330,6 @@ static ProcessResult Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueM
 
     return Result(values, op, result, "convolution");
 }
-REGISTER_MPS_OP("stablehlo.convolution", Handle_convolution);
+REGISTER_MPS_OP("stablehlo.convolution", HandleConvolution);
 
 }  // namespace jax_mps
