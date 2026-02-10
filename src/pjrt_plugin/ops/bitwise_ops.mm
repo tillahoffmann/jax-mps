@@ -33,10 +33,7 @@ static bool isBooleanResult(mlir::Operation* op) {
         } else {                                                                                   \
             result = [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];       \
         }                                                                                          \
-        if (!result)                                                                               \
-            return ProcessResult::Error(#reg_suffix ": handler returned null");                    \
-        SetOutputTensor(values, op, result);                                                       \
-        return ProcessResult{};                                                                    \
+        return Result(values, op, result, #reg_suffix);                                            \
     }                                                                                              \
     REGISTER_MPS_OP(mlir_op_name, Handle_##reg_suffix)
 
@@ -57,10 +54,7 @@ static ProcessResult Handle_not(MPSGraph* g, mlir::Operation* op, ValueMap& valu
         result = [g bitwiseNOTWithTensor:input name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("not: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "not");
 }
 REGISTER_MPS_OP("stablehlo.not", Handle_not);
 
@@ -166,30 +160,21 @@ static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap&
 
 static ProcessResult Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kLeft);
-    if (!result)
-        return ProcessResult::Error("shift_left: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "shift_left");
 }
 REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
 
 static ProcessResult Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
                                                 ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightLogical);
-    if (!result)
-        return ProcessResult::Error("shift_right_logical: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "shift_right_logical");
 }
 REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
 
 static ProcessResult Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operation* op,
                                                    ValueMap& values) {
     MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightArithmetic);
-    if (!result)
-        return ProcessResult::Error("shift_right_arithmetic: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "shift_right_arithmetic");
 }
 REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", Handle_shift_right_arithmetic);
 
@@ -209,7 +194,7 @@ static ProcessResult Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& v
 
     MPSGraphTensor* count = [g bitwisePopulationCountWithTensor:input name:nil];
     if (!count)
-        return ProcessResult::Error("popcnt: handler returned null");
+        return ProcessResult::Error("popcnt: bitwisePopulationCount returned null");
 
     MPSDataType outType = GetResultMpsType(op);
     MPSGraphTensor* result = count;
@@ -217,8 +202,7 @@ static ProcessResult Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& v
         result = [g castTensor:count toType:outType name:nil];
     }
 
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "popcnt");
 }
 REGISTER_MPS_OP("stablehlo.popcnt", Handle_popcnt);
 

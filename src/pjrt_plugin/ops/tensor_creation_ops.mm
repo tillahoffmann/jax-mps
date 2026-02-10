@@ -60,10 +60,7 @@ static ProcessResult Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap&
                                                shape:shape
                                             dataType:dtype];
                 }
-                if (!result)
-                    return ProcessResult::Error("constant: handler returned null");
-                SetOutputTensor(values, op, result);
-                return ProcessResult{};
+                return Result(values, op, result, "constant");
             }
 
             if (elemType.isF32()) {
@@ -103,8 +100,7 @@ static ProcessResult Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMap&
 
     if (!result)
         return ProcessResult::Error("constant: unsupported value type");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "constant");
 }
 REGISTER_MPS_OP("stablehlo.constant", Handle_constant);
 
@@ -131,10 +127,7 @@ static ProcessResult Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& val
         result = [g castTensor:result toType:dtype name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("iota: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "iota");
 }
 REGISTER_MPS_OP("stablehlo.iota", Handle_iota);
 

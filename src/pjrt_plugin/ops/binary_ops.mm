@@ -24,10 +24,7 @@ static ProcessResult Handle_dot(MPSGraph* g, mlir::Operation* op, ValueMap& valu
     MPSGraphTensor* result = [g matrixMultiplicationWithPrimaryTensor:lhs
                                                       secondaryTensor:rhs
                                                                  name:nil];
-    if (!result)
-        return ProcessResult::Error("dot: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "dot");
 }
 REGISTER_MPS_OP("stablehlo.dot", Handle_dot);
 
@@ -96,10 +93,7 @@ static ProcessResult Handle_dot_general(MPSGraph* g, mlir::Operation* op, ValueM
         result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("dot_general: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "dot_general");
 }
 REGISTER_MPS_OP("stablehlo.dot_general", Handle_dot_general);
 
@@ -142,10 +136,7 @@ static ProcessResult Handle_compare(MPSGraph* g, mlir::Operation* op, ValueMap& 
             return ProcessResult::Error("compare: unknown compare direction");
     }
 
-    if (!result)
-        return ProcessResult::Error("compare: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "compare");
 }
 REGISTER_MPS_OP("stablehlo.compare", Handle_compare);
 
@@ -161,10 +152,7 @@ static ProcessResult Handle_select(MPSGraph* g, mlir::Operation* op, ValueMap& v
                                       truePredicateTensor:onTrue
                                      falsePredicateTensor:onFalse
                                                      name:nil];
-    if (!result)
-        return ProcessResult::Error("select: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "select");
 }
 REGISTER_MPS_OP("stablehlo.select", Handle_select);
 
@@ -180,10 +168,7 @@ static ProcessResult Handle_clamp(MPSGraph* g, mlir::Operation* op, ValueMap& va
                                  minValueTensor:minVal
                                  maxValueTensor:maxVal
                                            name:nil];
-    if (!result)
-        return ProcessResult::Error("clamp: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "clamp");
 }
 REGISTER_MPS_OP("stablehlo.clamp", Handle_clamp);
 
@@ -281,10 +266,7 @@ static ProcessResult Handle_next_after(MPSGraph* g, mlir::Operation* op, ValueMa
         result = [g reshapeTensor:result withShape:@[] name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("next_after: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "next_after");
 }
 REGISTER_MPS_OP("chlo.next_after", Handle_next_after);
 

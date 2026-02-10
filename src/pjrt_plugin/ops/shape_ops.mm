@@ -11,10 +11,7 @@ static ProcessResult Handle_broadcast(MPSGraph* g, mlir::Operation* op, ValueMap
         return ProcessResult::Error("broadcast: missing input tensor");
     NSArray<NSNumber*>* outputShape = GetOutputShape(op);
     MPSGraphTensor* result = [g broadcastTensor:input toShape:outputShape name:nil];
-    if (!result)
-        return ProcessResult::Error("broadcast: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "broadcast");
 }
 REGISTER_MPS_OP("stablehlo.broadcast", Handle_broadcast);
 
@@ -66,10 +63,7 @@ static ProcessResult Handle_broadcast_in_dim(MPSGraph* g, mlir::Operation* op, V
         result = [g broadcastTensor:reshaped toShape:outputShape name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("broadcast_in_dim: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "broadcast_in_dim");
 }
 REGISTER_MPS_OP("stablehlo.broadcast_in_dim", Handle_broadcast_in_dim);
 
@@ -79,10 +73,7 @@ static ProcessResult Handle_reshape(MPSGraph* g, mlir::Operation* op, ValueMap& 
         return ProcessResult::Error("reshape: missing input tensor");
     NSArray<NSNumber*>* outputShape = GetOutputShape(op);
     MPSGraphTensor* result = [g reshapeTensor:input withShape:outputShape name:nil];
-    if (!result)
-        return ProcessResult::Error("reshape: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "reshape");
 }
 REGISTER_MPS_OP("stablehlo.reshape", Handle_reshape);
 
@@ -103,10 +94,7 @@ static ProcessResult Handle_transpose(MPSGraph* g, mlir::Operation* op, ValueMap
     }
 
     MPSGraphTensor* result = [g transposeTensor:input permutation:perm name:nil];
-    if (!result)
-        return ProcessResult::Error("transpose: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "transpose");
 }
 REGISTER_MPS_OP("stablehlo.transpose", Handle_transpose);
 
@@ -120,10 +108,7 @@ static ProcessResult Handle_convert(MPSGraph* g, mlir::Operation* op, ValueMap& 
         return ProcessResult::Error("convert: invalid dtype for convert operation");
     }
     MPSGraphTensor* result = [g castTensor:input toType:dtype name:nil];
-    if (!result)
-        return ProcessResult::Error("convert: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "convert");
 }
 REGISTER_MPS_OP("stablehlo.convert", Handle_convert);
 
@@ -153,10 +138,7 @@ static ProcessResult Handle_slice(MPSGraph* g, mlir::Operation* op, ValueMap& va
     }
 
     MPSGraphTensor* result = [g sliceTensor:input starts:starts ends:ends strides:strides name:nil];
-    if (!result)
-        return ProcessResult::Error("slice: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "slice");
 }
 REGISTER_MPS_OP("stablehlo.slice", Handle_slice);
 
@@ -216,10 +198,7 @@ static ProcessResult Handle_dynamic_slice(MPSGraph* g, mlir::Operation* op, Valu
                                             indicesTensor:indices
                                           batchDimensions:0
                                                      name:nil];
-    if (!result)
-        return ProcessResult::Error("dynamic_slice: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "dynamic_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", Handle_dynamic_slice);
 
@@ -252,10 +231,7 @@ static ProcessResult Handle_bitcast_convert(MPSGraph* g, mlir::Operation* op, Va
         result = [g reshapeTensor:result withShape:@[] name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("bitcast_convert: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "bitcast_convert");
 }
 REGISTER_MPS_OP("stablehlo.bitcast_convert", Handle_bitcast_convert);
 
@@ -283,10 +259,7 @@ static ProcessResult Handle_concatenate(MPSGraph* g, mlir::Operation* op, ValueM
     NSInteger dimension = static_cast<NSInteger>(concatOp.getDimension());
 
     MPSGraphTensor* result = [g concatTensors:input_tensors dimension:dimension name:nil];
-    if (!result)
-        return ProcessResult::Error("concatenate: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "concatenate");
 }
 REGISTER_MPS_OP("stablehlo.concatenate", Handle_concatenate);
 
@@ -353,10 +326,7 @@ static ProcessResult Handle_pad(MPSGraph* g, mlir::Operation* op, ValueMap& valu
                                                  ends:ends
                                               strides:strides
                                                  name:nil];
-    if (!result)
-        return ProcessResult::Error("pad: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "pad");
 }
 REGISTER_MPS_OP("stablehlo.pad", Handle_pad);
 
@@ -424,10 +394,7 @@ static ProcessResult Handle_dynamic_update_slice(MPSGraph* g, mlir::Operation* o
                                         batchDimensions:0
                                                    mode:MPSGraphScatterModeSet
                                                    name:nil];
-    if (!result)
-        return ProcessResult::Error("dynamic_update_slice: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "dynamic_update_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_update_slice", Handle_dynamic_update_slice);
 
@@ -490,10 +457,7 @@ static ProcessResult Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap& v
                                             batchDimensions:0
                                                        name:nil];
 
-        if (!result)
-            return ProcessResult::Error("gather: handler returned null");
-        SetOutputTensor(values, op, result);
-        return ProcessResult{};
+        return Result(values, op, result, "gather");
     }
 
     // For now, log unsupported patterns
@@ -584,10 +548,7 @@ static ProcessResult Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& 
                                        indicesTensor:squeezedIndices
                                                 mode:mode
                                                 name:nil];
-        if (!result)
-            return ProcessResult::Error("scatter: handler returned null");
-        SetOutputTensor(values, op, result);
-        return ProcessResult{};
+        return Result(values, op, result, "scatter");
     }
 
     // Handle common embedding gradient pattern (reverse of gather):
@@ -634,10 +595,7 @@ static ProcessResult Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& 
                                                      axis:static_cast<NSInteger>(scatterAxis)
                                                      mode:mode
                                                      name:nil];
-        if (!result)
-            return ProcessResult::Error("scatter: handler returned null");
-        SetOutputTensor(values, op, result);
-        return ProcessResult{};
+        return Result(values, op, result, "scatter");
     }
 
     return ProcessResult::Error("scatter: unsupported scatter pattern");
@@ -662,10 +620,7 @@ static ProcessResult Handle_reverse(MPSGraph* g, mlir::Operation* op, ValueMap& 
     }
 
     MPSGraphTensor* result = [g reverseTensor:input axes:axes name:nil];
-    if (!result)
-        return ProcessResult::Error("reverse: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "reverse");
 }
 REGISTER_MPS_OP("stablehlo.reverse", Handle_reverse);
 

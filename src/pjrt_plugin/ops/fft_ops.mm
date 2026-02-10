@@ -62,10 +62,7 @@ static ProcessResult Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& valu
             return ProcessResult::Error("fft: unsupported fft type");
     }
 
-    if (!result)
-        return ProcessResult::Error("fft: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "fft");
 }
 REGISTER_MPS_OP("stablehlo.fft", Handle_fft);
 

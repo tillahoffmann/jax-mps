@@ -75,10 +75,7 @@ static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& v
         result = [g reshapeTensor:result withShape:outputShape name:nil];
     }
 
-    if (!result)
-        return ProcessResult::Error("reduce: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "reduce");
 }
 REGISTER_MPS_OP("stablehlo.reduce", Handle_reduce);
 

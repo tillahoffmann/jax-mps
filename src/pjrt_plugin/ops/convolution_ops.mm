@@ -328,10 +328,7 @@ static ProcessResult Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueM
         }
     }
 
-    if (!result)
-        return ProcessResult::Error("convolution: handler returned null");
-    SetOutputTensor(values, op, result);
-    return ProcessResult{};
+    return Result(values, op, result, "convolution");
 }
 REGISTER_MPS_OP("stablehlo.convolution", Handle_convolution);
 
