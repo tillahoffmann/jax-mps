@@ -56,19 +56,23 @@ jobs:
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           fail-on-cache-miss: true
 
-      - name: Cache llvm
+      - name: Cache llvm and clang-format
         id: cache-llvm
         uses: actions/cache@v4
         with:
-          path: /opt/homebrew/opt/llvm
-          key: llvm-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            /opt/homebrew/Cellar/llvm
+            /opt/homebrew/Cellar/clang-format
+          key: llvm-clang-format-${{ runner.os }}-${{ runner.arch }}
 
-      - name: Install llvm
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        run: brew install llvm
-
-      - name: Install clang-format
-        run: brew install clang-format
+      - name: Install or link llvm and clang-format
+        run: |
+          if [ "${{ steps.cache-llvm.outputs.cache-hit }}" = "true" ]; then
+            brew link llvm --overwrite || true
+            brew link clang-format --overwrite || true
+          else
+            brew install llvm clang-format
+          fi
 
       - name: cmake configure
         run: |
