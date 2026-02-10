@@ -140,6 +140,43 @@ jobs:
           name: wheel-py${{ matrix.python }}
           path: dist/*.whl
 
+  publish-dev:
+    name: Publish dev release
+    needs: [lint-cpp, build-and-test]
+    runs-on: macos-14
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore deps from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Build dev wheel
+        run: |
+          # Extract base version and append dev suffix
+          BASE_VERSION=$(grep '^version' pyproject.toml | cut -d'"' -f2)
+          DEV_VERSION="${BASE_VERSION}.dev${{ github.run_number }}"
+          echo "Building version: $DEV_VERSION"
+          sed -i '' "s/^version = \".*\"/version = \"$DEV_VERSION\"/" pyproject.toml
+          uv build --wheel
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
   release:
     name: Release
     needs: [lint-cpp, build-and-test]
