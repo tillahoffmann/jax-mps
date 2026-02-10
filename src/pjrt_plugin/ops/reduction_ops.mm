@@ -1,12 +1,15 @@
-// Reduction operations: reduce (sum, product, max, min, and, or)
+// Reduction operations: reduce (sum, product, max, min, and, or, argmax, argmin)
 
 #import "pjrt_plugin/ops/registry.h"
+#include "stablehlo/dialect/StablehloOps.h"
 
 namespace jax_mps {
 
+namespace {
+
 // Helper to identify the reduction operation type from the region body
 // Returns the operation name if it's a simple binary reduction, empty string otherwise
-static std::string GetReductionOpType(mlir::Region& body) {
+std::string GetReductionOpType(mlir::Region& body) {
     if (body.empty())
         return "";
 
@@ -28,8 +31,62 @@ static std::string GetReductionOpType(mlir::Region& body) {
     return "";
 }
 
-// Reduce operation - identifies reduction type and maps to MPS reduction
-static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+// For detecting argmax/argmin patterns in multi-result reduce
+enum class ArgReduceKind { kUnknown, kMax, kMin };
+
+bool IsBlockArg(mlir::Value value, mlir::Block& block, unsigned index) {
+    auto arg = mlir::dyn_cast<mlir::BlockArgument>(value);
+    return arg && arg.getOwner() == &block && arg.getArgNumber() == index;
+}
+
+ArgReduceKind detectArgReduceKind(mlir::stablehlo::ReduceOp reduceOp) {
+    if (reduceOp.getBody().empty()) {
+        return ArgReduceKind::kUnknown;
+    }
+    mlir::Block& body = reduceOp.getBody().front();
+    if (body.getNumArguments() < 4) {
+        return ArgReduceKind::kUnknown;
+    }
+
+    for (mlir::Operation& nestedOp : body) {
+        auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(&nestedOp);
+        if (!compareOp) {
+            continue;
+        }
+
+        bool forwardValueCompare =
+            IsBlockArg(compareOp.getLhs(), body, 0) && IsBlockArg(compareOp.getRhs(), body, 2);
+        bool reversedValueCompare =
+            IsBlockArg(compareOp.getLhs(), body, 2) && IsBlockArg(compareOp.getRhs(), body, 0);
+        if (!forwardValueCompare && !reversedValueCompare) {
+            continue;
+        }
+
+        auto dir = compareOp.getComparisonDirection();
+        bool lhsWins = false;
+        if (dir == mlir::stablehlo::ComparisonDirection::GT ||
+            dir == mlir::stablehlo::ComparisonDirection::GE) {
+            lhsWins = true;
+        } else if (dir == mlir::stablehlo::ComparisonDirection::LT ||
+                   dir == mlir::stablehlo::ComparisonDirection::LE) {
+            lhsWins = false;
+        } else {
+            continue;
+        }
+
+        // If the compare operands are swapped, the max/min interpretation flips.
+        if (reversedValueCompare) {
+            lhsWins = !lhsWins;
+        }
+        return lhsWins ? ArgReduceKind::kMax : ArgReduceKind::kMin;
+    }
+    return ArgReduceKind::kUnknown;
+}
+
+}  // namespace
+
+// Single-result reduce: sum, product, max, min, and, or
+static ProcessResult HandleSingleResultReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
     if (!reduceOp) {
         return ProcessResult::Error("reduce: expected ReduceOp");
@@ -76,6 +133,76 @@ static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& v
     }
 
     return Result(values, op, result, "reduce");
+}
+
+// Multi-result reduce: argmax/argmin patterns
+static ProcessResult HandleMultiResultReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
+    if (!reduceOp) {
+        return ProcessResult::Error("reduce: expected ReduceOp");
+    }
+    if (op->getNumResults() != 2 || op->getNumOperands() < 2) {
+        return ProcessResult::Error("reduce: unsupported multi-result shape");
+    }
+
+    MPSGraphTensor* valueInput = GetInputTensor(values, op, 0);
+    if (!valueInput) {
+        return ProcessResult::Error("reduce: value input tensor not found");
+    }
+
+    auto dimensions = reduceOp.getDimensions();
+    if (dimensions.size() != 1) {
+        return ProcessResult::Error("reduce: only single-axis multi-result reduce is supported");
+    }
+    NSInteger axis = (NSInteger)dimensions[0];
+
+    ArgReduceKind kind = detectArgReduceKind(reduceOp);
+    if (kind == ArgReduceKind::kUnknown) {
+        return ProcessResult::Error("reduce: unsupported multi-result reduce body");
+    }
+
+    MPSGraphTensor* valueOut = nullptr;
+    MPSGraphTensor* indexOut = nullptr;
+    if (kind == ArgReduceKind::kMax) {
+        valueOut = [g reductionMaximumWithTensor:valueInput axis:axis name:nil];
+        indexOut = [g reductionArgMaximumWithTensor:valueInput axis:axis name:nil];
+    } else {
+        valueOut = [g reductionMinimumWithTensor:valueInput axis:axis name:nil];
+        indexOut = [g reductionArgMinimumWithTensor:valueInput axis:axis name:nil];
+    }
+    if (!valueOut || !indexOut) {
+        return ProcessResult::Error("reduce: failed to lower multi-result reduce");
+    }
+
+    MPSDataType valueType = GetResultMpsType(op, 0);
+    if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
+        valueOut = [g castTensor:valueOut toType:valueType name:nil];
+    }
+    MPSDataType indexType = GetResultMpsType(op, 1);
+    if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
+        indexOut = [g castTensor:indexOut toType:indexType name:nil];
+    }
+
+    NSArray<NSNumber*>* valueShape = GetOutputShape(op, 0);
+    if (valueShape && valueOut) {
+        valueOut = [g reshapeTensor:valueOut withShape:valueShape name:nil];
+    }
+    NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
+    if (indexShape && indexOut) {
+        indexOut = [g reshapeTensor:indexOut withShape:indexShape name:nil];
+    }
+
+    values[op->getResult(0).getAsOpaquePointer()] = valueOut;
+    values[op->getResult(1).getAsOpaquePointer()] = indexOut;
+    return ProcessResult{};
+}
+
+// Unified reduce handler - dispatches based on result count
+static ProcessResult Handle_reduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    if (op->getNumResults() > 1) {
+        return HandleMultiResultReduce(g, op, values);
+    }
+    return HandleSingleResultReduce(g, op, values);
 }
 REGISTER_MPS_OP("stablehlo.reduce", Handle_reduce);
 

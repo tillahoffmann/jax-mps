@@ -12,7 +12,6 @@
 #import "pjrt_plugin/mps_device.h"
 #import "pjrt_plugin/ops/control_flow_ops.h"
 #import "pjrt_plugin/ops/registry.h"
-#import "pjrt_plugin/ops/sort_ops.h"
 #import "pjrt_plugin/stablehlo_parser.h"
 
 namespace jax_mps {
@@ -160,15 +159,6 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
             }
             if (!cfResult.ok())
                 return cfResult;
-            continue;
-        }
-
-        // Handle multi-result reduce (argmax/argmin) specially
-        // stablehlo.reduce can have single or multiple results, requiring special dispatch
-        if (op_name == "stablehlo.reduce" && op->getNumResults() > 1) {
-            ProcessResult reduceResult = HandleMultiResultReduceOp(graph, op, values);
-            if (!reduceResult.ok())
-                return reduceResult;
             continue;
         }
 
