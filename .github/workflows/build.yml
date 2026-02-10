@@ -56,24 +56,10 @@ jobs:
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           fail-on-cache-miss: true
 
-      - name: Cache llvm and clang-format
-        id: cache-llvm
-        uses: actions/cache@v4
+      - name: Install llvm and clang-format
+        uses: tecolicom/actions-use-homebrew-tools@v1
         with:
-          path: |
-            /opt/homebrew/Cellar/llvm
-            /opt/homebrew/Cellar/clang-format
-          key: llvm-clang-format-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Install or link llvm and clang-format
-        run: |
-          if [ "${{ steps.cache-llvm.outputs.cache-hit }}" = "true" ]; then
-            # Recreate opt symlinks to cached Cellar directories
-            ln -sfn /opt/homebrew/Cellar/llvm/* /opt/homebrew/opt/llvm
-            ln -sfn /opt/homebrew/Cellar/clang-format/* /opt/homebrew/opt/clang-format
-          else
-            brew install llvm clang-format
-          fi
+          tools: llvm clang-format
 
       - name: cmake configure
         run: |
@@ -81,9 +67,7 @@ jobs:
           cmake .. -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.jax-mps-deps"
 
       - name: clang-format
-        run: |
-          export PATH="/opt/homebrew/opt/clang-format/bin:/opt/homebrew/opt/llvm/bin:$PATH"
-          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+        run: find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
 
       - name: clang-tidy
         run: |
