@@ -10,6 +10,7 @@
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/mps_client.h"
 #import "pjrt_plugin/mps_device.h"
+#import "pjrt_plugin/ops/control_flow_ops.h"
 #import "pjrt_plugin/ops/registry.h"
 #import "pjrt_plugin/stablehlo_parser.h"
 
@@ -62,21 +63,6 @@ static NSArray<NSNumber*>* GetShapeFromType(mlir::Type type) {
     }
     return shape;
 }
-
-// Result type for processOperations - can be an error or return values
-struct ProcessResult {
-    std::string error;
-    std::vector<mlir::Value> return_values;
-
-    bool ok() const {
-        return error.empty();
-    }
-    static ProcessResult Error(const std::string& msg) {
-        ProcessResult r;
-        r.error = msg;
-        return r;
-    }
-};
 
 // Forward declaration for recursive processing
 static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
@@ -145,8 +131,8 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         mlir::Operation* op = &operation;
         std::string op_name = op->getName().getStringRef().str();
 
-        // Handle func.return - collect return values
-        if (mlir::isa<mlir::func::ReturnOp>(op)) {
+        // Handle function and StableHLO region returns.
+        if (mlir::isa<mlir::func::ReturnOp>(op) || mlir::isa<mlir::stablehlo::ReturnOp>(op)) {
             for (mlir::Value operand : op->getOperands()) {
                 result.return_values.push_back(operand);
             }
@@ -159,6 +145,19 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
             if (!callResult.ok()) {
                 return callResult;
             }
+            continue;
+        }
+
+        // Check for control flow ops (stablehlo.while, stablehlo.case)
+        if (IsControlFlowOp(op_name)) {
+            ProcessResult cfResult;
+            if (op_name == "stablehlo.while") {
+                cfResult = HandleWhileOp(graph, op, values, module, depth, processOperations);
+            } else {
+                cfResult = HandleCaseOp(graph, op, values, module, depth, processOperations);
+            }
+            if (!cfResult.ok())
+                return cfResult;
             continue;
         }
 

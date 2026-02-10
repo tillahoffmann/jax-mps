@@ -1,4 +1,5 @@
 from .binary import make_binary_op_configs
+from .control_flow import make_control_flow_op_configs
 from .conv import make_conv_op_configs
 from .conversion import make_conversion_op_configs
 from .flax import make_flax_op_configs
@@ -14,6 +15,7 @@ from .util import OperationTestConfig
 __all__ = [
     "OperationTestConfig",
     "make_binary_op_configs",
+    "make_control_flow_op_configs",
     "make_conv_op_configs",
     "make_conversion_op_configs",
     "make_flax_op_configs",
