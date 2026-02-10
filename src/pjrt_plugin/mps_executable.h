@@ -82,9 +82,11 @@ private:
 
     // Cached MPSGraph state (built once, reused for all executions)
     bool graph_built_ = false;
-    void* cached_graph_ = nullptr;                 // MPSGraph* (prevent ObjC in header)
-    std::vector<void*> cached_placeholders_;       // MPSGraphTensor* for inputs
-    std::vector<void*> cached_targets_;            // MPSGraphTensor* for outputs
+    void* cached_graph_ = nullptr;            // MPSGraph* (prevent ObjC in header)
+    std::vector<void*> cached_placeholders_;  // MPSGraphTensor* for inputs
+    std::vector<void*> cached_targets_;       // MPSGraphTensor* for outputs
+    std::vector<void*>
+        cached_auxiliary_targets_;  // MPSGraphTensor* for multi-output op unused results
     std::vector<mlir::Type> cached_return_types_;  // Output types for dtype conversion
 };
 

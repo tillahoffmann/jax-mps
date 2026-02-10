@@ -4,16 +4,15 @@
 
 namespace jax_mps {
 
-static MPSGraphTensor* Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleFft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto fftOp = mlir::dyn_cast<mlir::stablehlo::FftOp>(op);
     if (!fftOp) {
-        MPS_LOG_ERROR("Expected FftOp\n");
-        return nullptr;
+        return ProcessResult::Error("fft: expected FftOp");
     }
 
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("fft: missing input tensor");
 
     NSArray<NSNumber*>* inputShape = input.shape;
     NSUInteger rank = inputShape.count;
@@ -21,8 +20,7 @@ static MPSGraphTensor* Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& va
     NSUInteger nAxes = fftLength.size();
 
     if (nAxes == 0 || nAxes > rank) {
-        MPS_LOG_ERROR("Invalid fft_length rank for stablehlo.fft\n");
-        return nullptr;
+        return ProcessResult::Error("fft: invalid fft_length rank");
     }
 
     NSMutableArray<NSNumber*>* axes = [NSMutableArray arrayWithCapacity:nAxes];
@@ -34,32 +32,38 @@ static MPSGraphTensor* Handle_fft(MPSGraph* g, mlir::Operation* op, ValueMap& va
     MPSGraphFFTDescriptor* desc = [MPSGraphFFTDescriptor descriptor];
     desc.roundToOddHermitean = NO;
 
+    MPSGraphTensor* result = nil;
     auto fftType = fftOp.getFftType();
     switch (fftType) {
         case mlir::stablehlo::FftType::FFT:
             desc.inverse = NO;
             desc.scalingMode = MPSGraphFFTScalingModeNone;
-            return [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
+            result = [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
+            break;
         case mlir::stablehlo::FftType::IFFT:
             desc.inverse = YES;
             desc.scalingMode = MPSGraphFFTScalingModeSize;
-            return [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
+            result = [g fastFourierTransformWithTensor:input axes:axes descriptor:desc name:nil];
+            break;
         case mlir::stablehlo::FftType::RFFT:
             desc.inverse = NO;
             desc.scalingMode = MPSGraphFFTScalingModeNone;
-            return [g realToHermiteanFFTWithTensor:input axes:axes descriptor:desc name:nil];
+            result = [g realToHermiteanFFTWithTensor:input axes:axes descriptor:desc name:nil];
+            break;
         case mlir::stablehlo::FftType::IRFFT:
             desc.inverse = YES;
             desc.scalingMode = MPSGraphFFTScalingModeSize;
             // For IRFFT, fft_length specifies the output size. When it's odd, we must
             // set roundToOddHermitean so MPS produces the correct output length.
             desc.roundToOddHermitean = (fftLength.back() % 2 == 1) ? YES : NO;
-            return [g HermiteanToRealFFTWithTensor:input axes:axes descriptor:desc name:nil];
+            result = [g HermiteanToRealFFTWithTensor:input axes:axes descriptor:desc name:nil];
+            break;
         default:
-            MPS_LOG_ERROR("Unsupported fft type\n");
-            return nullptr;
+            return ProcessResult::Error("fft: unsupported fft type");
     }
+
+    return Result(values, op, result, "fft");
 }
-REGISTER_MPS_OP("stablehlo.fft", Handle_fft);
+REGISTER_MPS_OP("stablehlo.fft", HandleFft);
 
 }  // namespace jax_mps

@@ -21,36 +21,42 @@ static bool isBooleanResult(mlir::Operation* op) {
 }
 
 // Macro for logical/bitwise operations (AND, OR, XOR) that dispatch based on boolean type
-#define REGISTER_LOGICAL_BITWISE_OP(mlir_op_name, logical_method, bitwise_method, reg_suffix) \
-    static MPSGraphTensor* Handle_##reg_suffix(MPSGraph* g, mlir::Operation* op,              \
-                                               ValueMap& values) {                            \
-        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                  \
-        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                  \
-        if (!lhs || !rhs)                                                                     \
-            return nullptr;                                                                   \
-        if (isBooleanResult(op)) {                                                            \
-            return [g logical_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];    \
-        }                                                                                     \
-        return [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];        \
-    }                                                                                         \
-    REGISTER_MPS_OP(mlir_op_name, Handle_##reg_suffix)
+#define REGISTER_LOGICAL_BITWISE_OP(mlir_op_name, logical_method, bitwise_method, reg_suffix)     \
+    static ProcessResult Handle##reg_suffix(MPSGraph* g, mlir::Operation* op, ValueMap& values) { \
+        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                      \
+        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                      \
+        if (!lhs || !rhs)                                                                         \
+            return ProcessResult::Error(#reg_suffix ": missing input tensor");                    \
+        MPSGraphTensor* result = nil;                                                             \
+        if (isBooleanResult(op)) {                                                                \
+            result = [g logical_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];      \
+        } else {                                                                                  \
+            result = [g bitwise_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil];      \
+        }                                                                                         \
+        return Result(values, op, result, #reg_suffix);                                           \
+    }                                                                                             \
+    REGISTER_MPS_OP(mlir_op_name, Handle##reg_suffix)
 
-REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, and);
-REGISTER_LOGICAL_BITWISE_OP("stablehlo.or", logicalOR, bitwiseOR, or);
-REGISTER_LOGICAL_BITWISE_OP("stablehlo.xor", logicalXOR, bitwiseXOR, xor);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.and", logicalAND, bitwiseAND, And);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.or", logicalOR, bitwiseOR, Or);
+REGISTER_LOGICAL_BITWISE_OP("stablehlo.xor", logicalXOR, bitwiseXOR, Xor);
 
-static MPSGraphTensor* Handle_not(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleNot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("not: missing input tensor");
 
+    MPSGraphTensor* result = nil;
     if (isBooleanResult(op)) {
         MPSGraphTensor* falseTensor = [g constantWithScalar:0 dataType:input.dataType];
-        return [g equalWithPrimaryTensor:input secondaryTensor:falseTensor name:nil];
+        result = [g equalWithPrimaryTensor:input secondaryTensor:falseTensor name:nil];
+    } else {
+        result = [g bitwiseNOTWithTensor:input name:nil];
     }
-    return [g bitwiseNOTWithTensor:input name:nil];
+
+    return Result(values, op, result, "not");
 }
-REGISTER_MPS_OP("stablehlo.not", Handle_not);
+REGISTER_MPS_OP("stablehlo.not", HandleNot);
 
 // Helper to get bit width from tensor's element type
 static int getBitWidth(mlir::Operation* op) {
@@ -152,46 +158,51 @@ static MPSGraphTensor* HandleShiftOp(MPSGraph* g, mlir::Operation* op, ValueMap&
                                    name:nil];
 }
 
-static MPSGraphTensor* Handle_shift_left(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    return HandleShiftOp(g, op, values, ShiftMode::kLeft);
+static ProcessResult HandleShiftLeft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kLeft);
+    return Result(values, op, result, "shift_left");
 }
-REGISTER_MPS_OP("stablehlo.shift_left", Handle_shift_left);
+REGISTER_MPS_OP("stablehlo.shift_left", HandleShiftLeft);
 
-static MPSGraphTensor* Handle_shift_right_logical(MPSGraph* g, mlir::Operation* op,
-                                                  ValueMap& values) {
-    return HandleShiftOp(g, op, values, ShiftMode::kRightLogical);
+static ProcessResult HandleShiftRightLogical(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+    MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightLogical);
+    return Result(values, op, result, "shift_right_logical");
 }
-REGISTER_MPS_OP("stablehlo.shift_right_logical", Handle_shift_right_logical);
+REGISTER_MPS_OP("stablehlo.shift_right_logical", HandleShiftRightLogical);
 
-static MPSGraphTensor* Handle_shift_right_arithmetic(MPSGraph* g, mlir::Operation* op,
-                                                     ValueMap& values) {
-    return HandleShiftOp(g, op, values, ShiftMode::kRightArithmetic);
+static ProcessResult HandleShiftRightArithmetic(MPSGraph* g, mlir::Operation* op,
+                                                ValueMap& values) {
+    MPSGraphTensor* result = HandleShiftOp(g, op, values, ShiftMode::kRightArithmetic);
+    return Result(values, op, result, "shift_right_arithmetic");
 }
-REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", Handle_shift_right_arithmetic);
+REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", HandleShiftRightArithmetic);
 
-static MPSGraphTensor* Handle_popcnt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandlePopcnt(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     if (!input)
-        return nullptr;
+        return ProcessResult::Error("popcnt: missing input tensor");
 
     if (op->getNumOperands() == 0) {
-        MPS_LOG_ERROR("popcnt requires one integer operand\n");
-        return nullptr;
+        return ProcessResult::Error("popcnt: requires one integer operand");
     }
     auto operandType = op->getOperand(0).getType();
     auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(operandType);
     if (!tensorType || !mlir::isa<mlir::IntegerType>(tensorType.getElementType())) {
-        MPS_LOG_ERROR("popcnt requires an integer operand\n");
-        return nullptr;
+        return ProcessResult::Error("popcnt: requires an integer operand");
     }
 
     MPSGraphTensor* count = [g bitwisePopulationCountWithTensor:input name:nil];
+    if (!count)
+        return ProcessResult::Error("popcnt: bitwisePopulationCount returned null");
 
     MPSDataType outType = GetResultMpsType(op);
-    if (outType == MPSDataTypeInvalid)
-        return count;
-    return [g castTensor:count toType:outType name:nil];
+    MPSGraphTensor* result = count;
+    if (outType != MPSDataTypeInvalid && count.dataType != outType) {
+        result = [g castTensor:count toType:outType name:nil];
+    }
+
+    return Result(values, op, result, "popcnt");
 }
-REGISTER_MPS_OP("stablehlo.popcnt", Handle_popcnt);
+REGISTER_MPS_OP("stablehlo.popcnt", HandlePopcnt);
 
 }  // namespace jax_mps

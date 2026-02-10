@@ -211,4 +211,8 @@ bool IsControlFlowOp(const std::string& op_name) {
 static bool _reg_stablehlo_while = OpRegistry::Register("stablehlo.while", nullptr);
 static bool _reg_stablehlo_case = OpRegistry::Register("stablehlo.case", nullptr);
 
+// Register stablehlo.custom_call so the parser accepts it
+// Actual dispatch happens in mps_executable.mm by looking up the target in CustomCallRegistry
+static bool _reg_stablehlo_custom_call = OpRegistry::Register("stablehlo.custom_call", nullptr);
+
 }  // namespace jax_mps

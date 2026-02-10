@@ -130,6 +130,7 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
     for (mlir::Operation& operation : block) {
         mlir::Operation* op = &operation;
         std::string op_name = op->getName().getStringRef().str();
+        MPS_LOG_DEBUG("Processing op: %s (results=%u)\n", op_name.c_str(), op->getNumResults());
 
         // Handle function and StableHLO region returns.
         if (mlir::isa<mlir::func::ReturnOp>(op) || mlir::isa<mlir::stablehlo::ReturnOp>(op)) {
@@ -161,30 +162,38 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
             continue;
         }
 
-        // Look up handler in registry
-        OpHandler handler = OpRegistry::Find(op_name);
+        // Look up handler in registry (handles custom_call via CustomCallRegistry)
+        OpHandler handler = nullptr;
+        std::string custom_call_target;
+        if (op_name == "stablehlo.custom_call") {
+            if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
+                custom_call_target = customCallOp.getCallTargetName().str();
+                handler = CustomCallRegistry::Find(custom_call_target);
+            }
+        }
         if (!handler) {
-            return ProcessResult::Error(UnsupportedOpsMessage({op_name}) +
+            handler = OpRegistry::Find(op_name);
+        }
+        if (!handler) {
+            // For custom_call, report the target name rather than the op name
+            std::string unsupported_name =
+                custom_call_target.empty()
+                    ? op_name
+                    : ("stablehlo.custom_call (target: " + custom_call_target + ")");
+            return ProcessResult::Error(UnsupportedOpsMessage({unsupported_name}) +
                                         "\n\n"
                                         "Supported operations: " +
                                         OpRegistry::ListRegistered());
         }
 
-        // Check for multi-result operations (not yet supported)
-        if (op->getNumResults() > 1) {
-            return ProcessResult::Error("Operation '" + op_name +
-                                        "' has multiple results which is not yet supported");
-        }
+        // Execute the handler - it sets outputs in values map and returns ProcessResult
+        ProcessResult opResult = handler(graph, op, values);
+        if (!opResult.ok())
+            return opResult;
 
-        // Execute the handler
-        MPSGraphTensor* out = handler(graph, op, values);
-        if (!out) {
-            return ProcessResult::Error("Operation '" + op_name + "' handler returned null");
-        }
-
-        // Map the result to the output tensor
-        if (op->getNumResults() > 0) {
-            values[op->getResult(0).getAsOpaquePointer()] = out;
+        // Collect auxiliary tensors from the handler (for MPS multi-output ops)
+        for (void* aux : opResult.auxiliary_tensors) {
+            result.auxiliary_tensors.push_back(aux);
         }
     }
 
@@ -255,8 +264,11 @@ bool MpsExecutable::BuildGraph() {
         }
 
         // Cache target tensors and return types
+        MPS_LOG_DEBUG("Collecting %zu return values\n", processResult.return_values.size());
         for (const auto& ret_value : processResult.return_values) {
             MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
+            MPS_LOG_DEBUG("Looking up return value at %p, found: %s\n",
+                          ret_value.getAsOpaquePointer(), ret_tensor ? "yes" : "no");
             if (!ret_tensor) {
                 error_ = "Return value not found in tensors";
                 return false;
@@ -264,6 +276,13 @@ bool MpsExecutable::BuildGraph() {
 
             cached_targets_.push_back((__bridge void*)ret_tensor);  // Graph owns the tensor
             cached_return_types_.push_back(ret_value.getType());
+        }
+
+        // Cache auxiliary tensors from multi-output operations
+        // These need to be computed by MPS but aren't part of the return values
+        MPS_LOG_DEBUG("Collecting %zu auxiliary tensors\n", processResult.auxiliary_tensors.size());
+        for (void* aux_tensor : processResult.auxiliary_tensors) {
+            cached_auxiliary_targets_.push_back(aux_tensor);
         }
 
         // Cache the graph
@@ -334,10 +353,20 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             feeds[placeholder] = tensor_data;
         }
 
-        // Build target tensors array from cache
+        // Build target tensors array from cache (includes both return values and auxiliary)
         NSMutableArray<MPSGraphTensor*>* target_tensors = [NSMutableArray array];
+        size_t num_return_targets = cached_targets_.size();
         for (void* p : cached_targets_) {
             [target_tensors addObject:(__bridge MPSGraphTensor*)p];
+        }
+        // Add auxiliary tensors - these are from multi-output ops where not all outputs
+        // are returned. MPS requires all outputs to be computed.
+        for (void* p : cached_auxiliary_targets_) {
+            MPSGraphTensor* aux = (__bridge MPSGraphTensor*)p;
+            // Only add if not already in targets (to avoid duplicates)
+            if (![target_tensors containsObject:aux]) {
+                [target_tensors addObject:aux];
+            }
         }
 
         // Handle identity functions (no operations)
@@ -379,19 +408,31 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         }
 
         // Execute the cached graph
+        MPS_LOG_DEBUG("Executing graph: %lu feeds, %lu targets\n", (unsigned long)feeds.count,
+                      (unsigned long)target_tensors.count);
+#if MPS_LOG_LEVEL >= 3
+        for (size_t i = 0; i < target_tensors.count; i++) {
+            MPSGraphTensor* t = target_tensors[i];
+            MPS_LOG_DEBUG("Target[%zu]: %p, shape=%s\n", i, (void*)t,
+                          [[t.shape description] UTF8String]);
+        }
+#endif
         NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
         @try {
+            MPS_LOG_DEBUG("Calling runWithMTLCommandQueue...\n");
             result_dict = [graph runWithMTLCommandQueue:commandQueue
                                                   feeds:feeds
                                           targetTensors:target_tensors
                                        targetOperations:nil];
+            MPS_LOG_DEBUG("Graph execution completed\n");
         } @catch (NSException* exception) {
             return ExecutionResult::Error("MPS graph execution failed: " +
                                           std::string([[exception reason] UTF8String]));
         }
 
-        // Process outputs using cached return types
-        for (size_t i = 0; i < target_tensors.count; i++) {
+        // Process outputs using cached return types (only process actual return values,
+        // not auxiliary targets)
+        for (size_t i = 0; i < num_return_targets; i++) {
             MPSGraphTensor* target = target_tensors[i];
             MPSGraphTensorData* result_data = result_dict[target];
             if (!result_data) {

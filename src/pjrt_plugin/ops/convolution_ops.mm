@@ -160,17 +160,16 @@ static MPSGraphTensor* convert2DOutputTo1D(MPSGraph* g, MPSGraphTensor* result, 
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
-static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleConvolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
     auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
     if (!convOp) {
-        MPS_LOG_ERROR("Expected ConvolutionOp\n");
-        return nullptr;
+        return ProcessResult::Error("convolution: expected ConvolutionOp");
     }
 
     MPSGraphTensor* input = GetInputTensor(values, op, 0);
     MPSGraphTensor* kernel = GetInputTensor(values, op, 1);
     if (!input || !kernel)
-        return nullptr;
+        return ProcessResult::Error("convolution: missing input tensor");
 
     // Get dimension numbers
     auto dimNumbers = convOp.getDimensionNumbers();
@@ -189,15 +188,12 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
     // Determine spatial rank and check batch group count
     size_t spatialRank = inputSpatialDims.size();
     if (convOp.getBatchGroupCount() != 1) {
-        MPS_LOG_ERROR("batch_group_count != 1 not yet supported\n");
-        return nullptr;
+        return ProcessResult::Error("convolution: batch_group_count != 1 not yet supported");
     }
 
     bool is1D = (spatialRank == 1);
     if (spatialRank > 2) {
-        MPS_LOG_ERROR("Only 1D/2D convolution is currently supported, got %zu spatial dims\n",
-                      spatialRank);
-        return nullptr;
+        return ProcessResult::Error("convolution: only 1D/2D convolution is currently supported");
     }
 
     // For 1D: save spatial dim before lifting (batch/feature dims don't change)
@@ -209,8 +205,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         kernel = lift1DTo2D(g, kernel, kernelOutputFeatureDim, kernelInputFeatureDim,
                             kernelSpatialDims[0]);
         if (!input || !kernel) {
-            MPS_LOG_ERROR("1D convolution expects rank-3 input and kernel\n");
-            return nullptr;
+            return ProcessResult::Error(
+                "convolution: 1D convolution expects rank-3 input and kernel");
         }
     }
 
@@ -256,8 +252,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         // Transposed convolution using DataGradient API
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
         if (!resultType) {
-            MPS_LOG_ERROR("Could not get result type for transposed convolution\n");
-            return nullptr;
+            return ProcessResult::Error(
+                "convolution: could not get result type for transposed convolution");
         }
 
         // Get output shape in NHWC format
@@ -332,8 +328,8 @@ static MPSGraphTensor* Handle_convolution(MPSGraph* g, mlir::Operation* op, Valu
         }
     }
 
-    return result;
+    return Result(values, op, result, "convolution");
 }
-REGISTER_MPS_OP("stablehlo.convolution", Handle_convolution);
+REGISTER_MPS_OP("stablehlo.convolution", HandleConvolution);
 
 }  // namespace jax_mps
