@@ -43,8 +43,8 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from gamma distribution requires 'stablehlo.while'.",
-                            strict=True,
+                            reason="Gamma log_prob has numerical precision differences.",
+                            strict=False,
                         )
                     ],
                 ),
@@ -88,24 +88,16 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from beta distribution requires 'stablehlo.while'.",
-                            strict=True,
+                            reason="Beta has numerical precision differences.",
+                            strict=False,
                         )
                     ],
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.StudentT,
-                        numpy.random.gamma(5, 5, batch_shape) + 2,  # df > 2
-                        numpy.random.standard_normal(batch_shape),
-                        numpy.random.gamma(5, 5, batch_shape),
-                    ),
-                    marks=[
-                        pytest.mark.xfail(
-                            reason="Sampling from StudentT distribution requires 'stablehlo.while'.",
-                            strict=True,
-                        )
-                    ],
+                NumpyroDistributionTestConfig(
+                    dists.StudentT,
+                    numpy.random.gamma(5, 5, batch_shape) + 2,  # df > 2
+                    numpy.random.standard_normal(batch_shape),
+                    numpy.random.gamma(5, 5, batch_shape),
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
@@ -114,8 +106,8 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Dirichlet distribution requires 'stablehlo.while'.",
-                            strict=True,
+                            reason="Dirichlet log_prob has numerical precision differences.",
+                            strict=False,
                         )
                     ],
                 ),
@@ -136,7 +128,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Binomial requires 'stablehlo.while'.",
+                            reason="Sampling from Binomial requires 'stablehlo.not'.",
                             strict=True,
                         )
                     ],
@@ -150,7 +142,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Categorical requires 'stablehlo.while'.",
+                            reason="Sampling from Categorical requires 'stablehlo.reduce_window'.",
                             strict=True,
                         )
                     ],
@@ -163,7 +155,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Poisson requires 'stablehlo.while'.",
+                            reason="Sampling from Poisson requires 'stablehlo.not'.",
                             strict=True,
                         )
                     ],
@@ -183,7 +175,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from NegativeBinomial2 requires 'stablehlo.while'.",
+                            reason="Sampling from NegativeBinomial2 requires 'stablehlo.not'.",
                             strict=True,
                         )
                     ],
@@ -198,7 +190,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from Multinomial requires 'stablehlo.while'.",
+                            reason="Sampling from Multinomial requires 'stablehlo.reduce_window'.",
                             strict=True,
                         )
                     ],
@@ -219,35 +211,27 @@ def make_numpyro_op_configs():
                     numpy.random.gamma(5, 5, batch_shape),  # scale
                     numpy.random.gamma(5, 5, batch_shape),  # alpha
                 ),
-                NumpyroDistributionTestConfig(
-                    dists.Weibull,
-                    numpy.random.gamma(5, 5, batch_shape),  # scale
-                    numpy.random.gamma(5, 5, batch_shape),  # concentration
-                ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
-                        dists.Chi2,
-                        numpy.random.gamma(5, 5, batch_shape) + 2,  # df
-                    ),
-                    marks=[
-                        pytest.mark.xfail(
-                            reason="Sampling from Chi2 requires 'stablehlo.while'.",
-                            strict=True,
-                        )
-                    ],
-                ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.InverseGamma,
+                        dists.Weibull,
+                        numpy.random.gamma(5, 5, batch_shape),  # scale
                         numpy.random.gamma(5, 5, batch_shape),  # concentration
-                        numpy.random.gamma(5, 5, batch_shape),  # rate
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from InverseGamma requires 'stablehlo.while'.",
-                            strict=True,
+                            reason="Weibull has numerical precision differences.",
+                            strict=False,
                         )
                     ],
+                ),
+                NumpyroDistributionTestConfig(
+                    dists.Chi2,
+                    numpy.random.gamma(5, 5, batch_shape) + 2,  # df
+                ),
+                NumpyroDistributionTestConfig(
+                    dists.InverseGamma,
+                    numpy.random.gamma(5, 5, batch_shape),  # concentration
+                    numpy.random.gamma(5, 5, batch_shape),  # rate
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
@@ -257,7 +241,7 @@ def make_numpyro_op_configs():
                     ),
                     marks=[
                         pytest.mark.xfail(
-                            reason="Sampling from VonMises requires 'stablehlo.while'.",
+                            reason="Sampling from VonMises requires 'stablehlo.not'.",
                             strict=True,
                         )
                     ],

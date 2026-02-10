@@ -30,11 +30,10 @@ namespace {
 const std::unordered_set<std::string>& getSupportedOps() {
     static std::unordered_set<std::string> supported = []() {
         auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Add control flow ops that don't need handlers
+        // Add control flow ops - func.return/func.call are handled directly,
+        // stablehlo.while/case are registered in OpRegistry by control_flow_ops.mm
         ops.insert("func.return");
         ops.insert("func.call");
-        ops.insert("stablehlo.while");
-        ops.insert("stablehlo.case");
         return ops;
     }();
     return supported;

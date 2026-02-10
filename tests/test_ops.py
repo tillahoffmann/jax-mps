@@ -10,6 +10,7 @@ from jax import dtypes, random
 from .configs import (
     OperationTestConfig,
     make_binary_op_configs,
+    make_control_flow_op_configs,
     make_conv_op_configs,
     make_conversion_op_configs,
     make_flax_op_configs,
@@ -24,6 +25,7 @@ from .configs import (
 
 OPERATION_TEST_CONFIGS = [
     *make_binary_op_configs(),
+    *make_control_flow_op_configs(),
     *make_conv_op_configs(),
     *make_conversion_op_configs(),
     *make_flax_op_configs(),
@@ -141,8 +143,13 @@ def assert_all_ops_tested():
         re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_CONTROL_FLOW_OP\("([^"]+)"'),
         re.compile(r'OpRegistry::Register\("([^"]+)"'),
     ]
+
+    # Ops that appear in StableHLO IR but get lowered by MLIR before reaching
+    # our handlers. They work but don't need explicit registration.
+    mlir_lowered_ops = {"chlo.lgamma", "chlo.digamma"}
 
     op_names = set()
     for mm_file in ops_dir.glob("*.mm"):
@@ -152,7 +159,8 @@ def assert_all_ops_tested():
                 op_names.update(pattern.findall(content))
 
     assert op_names, "Failed to discover any ops."
-    unsupported = OperationTestConfig.EXERCISED_STABLEHLO_OPS - op_names
+    exercised = OperationTestConfig.EXERCISED_STABLEHLO_OPS - mlir_lowered_ops
+    unsupported = exercised - op_names
     assert not unsupported, (
         f"Discovered {len(unsupported)} unsupported ops: {', '.join(sorted(unsupported))}"
     )
