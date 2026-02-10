@@ -1,6 +1,6 @@
 [project]
 name = "jax-mps"
-version = "0.9.4"
+version = "0.9.5"
 description = "JAX backend for Apple Metal Performance Shaders (MPS)"
 readme = "README.md"
 requires-python = ">=3.11"
