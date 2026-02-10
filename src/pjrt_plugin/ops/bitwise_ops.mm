@@ -1,4 +1,5 @@
-// Bitwise operations: and, or, xor, shift_left, shift_right_logical
+// Bitwise operations: and, or, xor, not, shift_left, shift_right_logical,
+// shift_right_arithmetic, popcnt
 
 #import "pjrt_plugin/ops/registry.h"
 

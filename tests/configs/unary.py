@@ -109,6 +109,17 @@ def make_unary_op_configs():
             differentiable_argnums=(),
         ),
         OperationTestConfig(
+            jnp.invert,
+            numpy.array([0, 1, -1, 127, -128], dtype=numpy.int32),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            jnp.invert,
+            numpy.array([0, 1, 127, 255, 0x80000000], dtype=numpy.uint32),
+            differentiable_argnums=(),
+            name="invert-uint32",
+        ),
+        OperationTestConfig(
             lax.population_count,
             numpy.asarray([0, 1, 3, 7, 15, 127, 128, 255], dtype=numpy.uint8),
             differentiable_argnums=(),
