@@ -34,12 +34,6 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-      - id: pytest
-        name: pytest
-        entry: bash -c 'CI=true uv run pytest -q'
-        language: system
-        pass_filenames: false
-        always_run: true
       - id: clang-tidy
         name: clang-tidy
         entry: |
@@ -47,8 +41,15 @@ repos:
             CLANG_TIDY=$(command -v clang-tidy || echo "$(brew --prefix llvm 2>/dev/null)/bin/clang-tidy")
             [ -x "$CLANG_TIDY" ] || { echo "clang-tidy not found. Install with: brew install llvm"; exit 127; }
             cmake -B build -S .
-            find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) "$CLANG_TIDY" -p build
+            export CTCACHE_DIR="${HOME}/.cache/clang-tidy-cache"
+            find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) uv run clang-tidy-cache "$CLANG_TIDY" -p build
           '
+        language: system
+        files: \.(cc|mm|h)$
+        pass_filenames: false
+      - id: pytest
+        name: pytest
+        entry: bash -c 'CI=true uv run pytest -q'
         language: system
         pass_filenames: false
         always_run: true

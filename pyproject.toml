@@ -48,8 +48,12 @@ build = ["cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
 environment = { CMAKE_PREFIX_PATH = "$HOME/.local/jax-mps-deps" }
 before-all = "./scripts/setup_deps.sh"
 
+[tool.uv.sources]
+ctcache = { git = "https://github.com/matus-chochlik/ctcache.git" }
+
 [dependency-groups]
 dev = [
+    "ctcache",
     "flax>=0.10.7",
     "numpyro>=0.20.0",
     "pre-commit>=4.5.1",
