@@ -68,8 +68,9 @@ jobs:
       - name: Install or link llvm and clang-format
         run: |
           if [ "${{ steps.cache-llvm.outputs.cache-hit }}" = "true" ]; then
-            brew link llvm --overwrite || true
-            brew link clang-format --overwrite || true
+            # Recreate opt symlinks to cached Cellar directories
+            ln -sfn /opt/homebrew/Cellar/llvm/* /opt/homebrew/opt/llvm
+            ln -sfn /opt/homebrew/Cellar/clang-format/* /opt/homebrew/opt/clang-format
           else
             brew install llvm clang-format
           fi
