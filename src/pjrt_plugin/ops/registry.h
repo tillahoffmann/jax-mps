@@ -24,6 +24,12 @@ using ValueMap = std::unordered_map<void*, MPSGraphTensor*>;
 // Handler signature: takes MLIR operation directly
 using OpHandler = MPSGraphTensor* (*)(MPSGraph*, mlir::Operation*, ValueMap&);
 
+// Forward declaration for ProcessResult (defined in control_flow_ops.h)
+struct ProcessResult;
+
+// Handler for multi-result operations that return ProcessResult
+using MultiResultOpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+
 // Global op registry - ops register themselves at static init time
 class OpRegistry {
 public:
@@ -68,6 +74,36 @@ private:
     }
 };
 
+// Registry for multi-result operations (return ProcessResult instead of MPSGraphTensor*)
+class MultiResultOpRegistry {
+public:
+    static bool Register(const char* name, MultiResultOpHandler handler) {
+        GetMutableHandlers()[name] = handler;
+        return true;
+    }
+
+    static MultiResultOpHandler Find(const std::string& name) {
+        auto& handlers = GetMutableHandlers();
+        auto it = handlers.find(name);
+        return it != handlers.end() ? it->second : nullptr;
+    }
+
+    // Returns set of all registered multi-result operation names
+    static std::unordered_set<std::string> GetRegisteredOps() {
+        std::unordered_set<std::string> ops;
+        for (const auto& pair : GetMutableHandlers()) {
+            ops.insert(pair.first);
+        }
+        return ops;
+    }
+
+private:
+    static std::unordered_map<std::string, MultiResultOpHandler>& GetMutableHandlers() {
+        static std::unordered_map<std::string, MultiResultOpHandler> handlers;
+        return handlers;
+    }
+};
+
 // Global custom-call-target registry - custom call targets register themselves at static init time
 class CustomCallRegistry {
 public:
@@ -85,6 +121,27 @@ public:
 private:
     static std::unordered_map<std::string, OpHandler>& GetMutableHandlers() {
         static std::unordered_map<std::string, OpHandler> handlers;
+        return handlers;
+    }
+};
+
+// Registry for multi-result custom call targets
+class MultiResultCustomCallRegistry {
+public:
+    static bool Register(const char* target, MultiResultOpHandler handler) {
+        GetMutableHandlers()[target] = handler;
+        return true;
+    }
+
+    static MultiResultOpHandler Find(const std::string& target) {
+        auto& handlers = GetMutableHandlers();
+        auto it = handlers.find(target);
+        return it != handlers.end() ? it->second : nullptr;
+    }
+
+private:
+    static std::unordered_map<std::string, MultiResultOpHandler>& GetMutableHandlers() {
+        static std::unordered_map<std::string, MultiResultOpHandler> handlers;
         return handlers;
     }
 };
@@ -185,10 +242,21 @@ inline MPSGraphTensor* EnsureInt32(MPSGraph* g, MPSGraphTensor* tensor) {
     }                                                                                 \
     REGISTER_MPS_OP(mlir_op_name, Handle_mlir_##reg_suffix)
 
+// Macro for registering multi-result ops (handlers that return ProcessResult)
+#define REGISTER_MULTI_RESULT_OP(mlir_op_name, handler_fn) \
+    static bool _mr_reg_##handler_fn =                     \
+        ::jax_mps::MultiResultOpRegistry::Register(mlir_op_name, handler_fn)
+
 // Macro for registering custom call targets
 #define REGISTER_CUSTOM_CALL_TARGET(target_name, handler_fn) \
     static bool _cc_reg_##handler_fn =                       \
         ::jax_mps::CustomCallRegistry::Register(target_name, handler_fn)
+
+// Macro for registering multi-result custom call targets
+// Use unique_suffix to allow registering the same handler for multiple targets
+#define REGISTER_MULTI_RESULT_CUSTOM_CALL(target_name, handler_fn, unique_suffix) \
+    static bool _mrcc_reg_##unique_suffix =                                       \
+        ::jax_mps::MultiResultCustomCallRegistry::Register(target_name, handler_fn)
 
 // Convenience macro for simple unary custom call targets
 #define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)          \

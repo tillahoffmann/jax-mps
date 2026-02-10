@@ -491,6 +491,31 @@ static MPSGraphTensor* Handle_gather(MPSGraph* g, mlir::Operation* op, ValueMap&
 }
 REGISTER_MPS_OP("stablehlo.gather", Handle_gather);
 
+// Helper to determine scatter mode from the update computation region
+static MPSGraphScatterMode GetScatterMode(mlir::stablehlo::ScatterOp scatterOp) {
+    MPSGraphScatterMode mode = MPSGraphScatterModeSet;
+    auto& updateRegion = scatterOp.getUpdateComputation();
+    if (!updateRegion.empty()) {
+        auto& block = updateRegion.front();
+        for (auto& innerOp : block) {
+            if (mlir::isa<mlir::stablehlo::AddOp>(innerOp)) {
+                return MPSGraphScatterModeAdd;
+            } else if (mlir::isa<mlir::stablehlo::SubtractOp>(innerOp)) {
+                return MPSGraphScatterModeSub;
+            } else if (mlir::isa<mlir::stablehlo::MulOp>(innerOp)) {
+                return MPSGraphScatterModeMul;
+            } else if (mlir::isa<mlir::stablehlo::DivOp>(innerOp)) {
+                return MPSGraphScatterModeDiv;
+            } else if (mlir::isa<mlir::stablehlo::MaxOp>(innerOp)) {
+                return MPSGraphScatterModeMax;
+            } else if (mlir::isa<mlir::stablehlo::MinOp>(innerOp)) {
+                return MPSGraphScatterModeMin;
+            }
+        }
+    }
+    return mode;
+}
+
 // Scatter - update tensor at specified indices
 // This handles the common pattern used by gather gradients
 static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
@@ -511,10 +536,47 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
     auto updateWindowDims = dimNumbers.getUpdateWindowDims();
     auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
     auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
+    auto inputBatchingDims = dimNumbers.getInputBatchingDims();
+    auto scatterIndicesBatchingDims = dimNumbers.getScatterIndicesBatchingDims();
     int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
 
     NSArray<NSNumber*>* indicesShape = scatterIndices.shape;
     NSUInteger indicesRank = indicesShape.count;
+
+    // Handle batched scatter pattern used by sort gradients:
+    // Pattern: scatter with batching dimensions where each batch element scatters independently
+    // Example: input [5,7], indices [5,7,1], updates [5,7]
+    //   - input_batching_dims = [0], scatter_indices_batching_dims = [0]
+    //   - For each batch i, scatter updates[i,:] into input[i,:] at indices[i,:,0]
+    if (!inputBatchingDims.empty() && !scatterIndicesBatchingDims.empty() &&
+        inputBatchingDims.size() == scatterIndicesBatchingDims.size() &&
+        scatterDimsToOperandDims.size() == 1 && insertedWindowDims.size() == 1 &&
+        indexVectorDim == (int64_t)indicesRank - 1 &&
+        [indicesShape[indicesRank - 1] integerValue] == 1) {
+        int64_t scatterAxis = scatterDimsToOperandDims[0];
+
+        // Squeeze the index vector dimension from indices: [batch..., N, 1] -> [batch..., N]
+        NSMutableArray<NSNumber*>* squeezedShape = [NSMutableArray array];
+        for (NSUInteger i = 0; i < indicesRank - 1; i++) {
+            [squeezedShape addObject:indicesShape[i]];
+        }
+        MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
+                                                 withShape:squeezedShape
+                                                      name:nil];
+        squeezedIndices = EnsureInt32(g, squeezedIndices);
+
+        MPSGraphScatterMode mode = GetScatterMode(scatterOp);
+
+        // Use scatterAlongAxis which handles batched scatter correctly:
+        // For each position in updates, it scatters to the position given by indices at that
+        // position
+        return [g scatterAlongAxis:static_cast<NSInteger>(scatterAxis)
+                    withDataTensor:input
+                     updatesTensor:updates
+                     indicesTensor:squeezedIndices
+                              mode:mode
+                              name:nil];
+    }
 
     // Handle common embedding gradient pattern (reverse of gather):
     // input: [num_embeddings, embedding_dim] - zeros initially
@@ -526,7 +588,8 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
     // - index_vector_dim is the last dimension of indices
     // - indices has size 1 in that dimension
     // - we're scattering along a single dimension
-    if (indexVectorDim == (int64_t)indicesRank - 1 &&
+    // - no batching dimensions
+    if (inputBatchingDims.empty() && indexVectorDim == (int64_t)indicesRank - 1 &&
         [indicesShape[indicesRank - 1] integerValue] == 1 && scatterDimsToOperandDims.size() == 1 &&
         insertedWindowDims.size() == 1 && insertedWindowDims[0] == scatterDimsToOperandDims[0]) {
         int64_t scatterAxis = scatterDimsToOperandDims[0];
@@ -544,39 +607,9 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
         MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
                                                  withShape:squeezedShape
                                                       name:nil];
-
-        // Cast indices to int32 if needed
         squeezedIndices = EnsureInt32(g, squeezedIndices);
 
-        // Determine the scatter mode based on the update computation.
-        // Default to Set (plain assignment); arithmetic ops override below.
-        MPSGraphScatterMode mode = MPSGraphScatterModeSet;
-
-        auto& updateRegion = scatterOp.getUpdateComputation();
-        if (!updateRegion.empty()) {
-            auto& block = updateRegion.front();
-            for (auto& innerOp : block) {
-                if (mlir::isa<mlir::stablehlo::AddOp>(innerOp)) {
-                    mode = MPSGraphScatterModeAdd;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::SubtractOp>(innerOp)) {
-                    mode = MPSGraphScatterModeSub;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::MulOp>(innerOp)) {
-                    mode = MPSGraphScatterModeMul;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::DivOp>(innerOp)) {
-                    mode = MPSGraphScatterModeDiv;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::MaxOp>(innerOp)) {
-                    mode = MPSGraphScatterModeMax;
-                    break;
-                } else if (mlir::isa<mlir::stablehlo::MinOp>(innerOp)) {
-                    mode = MPSGraphScatterModeMin;
-                    break;
-                }
-            }
-        }
+        MPSGraphScatterMode mode = GetScatterMode(scatterOp);
 
         // Ensure updates is at least rank 1 (MPS doesn't support scalar updates)
         if (updates.shape.count == 0)
@@ -593,9 +626,10 @@ static MPSGraphTensor* Handle_scatter(MPSGraph* g, mlir::Operation* op, ValueMap
 
     MPS_LOG_ERROR("Unsupported scatter pattern - update_window_dims size: %lu, "
                   "inserted_window_dims size: %lu, scatter_dims_to_operand_dims size: %lu, "
-                  "index_vector_dim: %lld\n",
+                  "index_vector_dim: %lld, input_batching_dims size: %lu\n",
                   (unsigned long)updateWindowDims.size(), (unsigned long)insertedWindowDims.size(),
-                  (unsigned long)scatterDimsToOperandDims.size(), indexVectorDim);
+                  (unsigned long)scatterDimsToOperandDims.size(), indexVectorDim,
+                  (unsigned long)inputBatchingDims.size());
     return nullptr;
 }
 REGISTER_MPS_OP("stablehlo.scatter", Handle_scatter);

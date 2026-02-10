@@ -131,6 +131,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/convolution_ops.mm
     src/pjrt_plugin/ops/reduction_ops.mm
     src/pjrt_plugin/ops/control_flow_ops.mm
+    src/pjrt_plugin/ops/sort_ops.mm
     ${PROTO_SRCS}
 )
 

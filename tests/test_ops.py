@@ -20,6 +20,7 @@ from .configs import (
     make_reduction_op_configs,
     make_shape_op_configs,
     make_slice_op_configs,
+    make_sort_op_configs,
     make_unary_op_configs,
 )
 
@@ -35,6 +36,7 @@ OPERATION_TEST_CONFIGS = [
     *make_reduction_op_configs(),
     *make_shape_op_configs(),
     *make_slice_op_configs(),
+    *make_sort_op_configs(),
     *make_unary_op_configs(),
 ]
 

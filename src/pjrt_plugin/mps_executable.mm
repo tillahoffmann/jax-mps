@@ -12,6 +12,7 @@
 #import "pjrt_plugin/mps_device.h"
 #import "pjrt_plugin/ops/control_flow_ops.h"
 #import "pjrt_plugin/ops/registry.h"
+#import "pjrt_plugin/ops/sort_ops.h"
 #import "pjrt_plugin/stablehlo_parser.h"
 
 namespace jax_mps {
@@ -67,322 +68,6 @@ static NSArray<NSNumber*>* GetShapeFromType(mlir::Type type) {
 // Forward declaration for recursive processing
 static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
                                        mlir::ModuleOp module, int depth);
-
-enum class ArgReduceKind { kUnknown, kMax, kMin };
-
-static bool IsBlockArg(mlir::Value value, mlir::Block& block, unsigned index) {
-    auto arg = mlir::dyn_cast<mlir::BlockArgument>(value);
-    return arg && arg.getOwner() == &block && arg.getArgNumber() == index;
-}
-
-static ArgReduceKind detectArgReduceKind(mlir::stablehlo::ReduceOp reduceOp) {
-    if (reduceOp.getBody().empty()) {
-        return ArgReduceKind::kUnknown;
-    }
-    mlir::Block& body = reduceOp.getBody().front();
-    if (body.getNumArguments() < 4) {
-        return ArgReduceKind::kUnknown;
-    }
-
-    for (mlir::Operation& nestedOp : body) {
-        auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(&nestedOp);
-        if (!compareOp) {
-            continue;
-        }
-
-        bool forwardValueCompare =
-            IsBlockArg(compareOp.getLhs(), body, 0) && IsBlockArg(compareOp.getRhs(), body, 2);
-        bool reversedValueCompare =
-            IsBlockArg(compareOp.getLhs(), body, 2) && IsBlockArg(compareOp.getRhs(), body, 0);
-        if (!forwardValueCompare && !reversedValueCompare) {
-            continue;
-        }
-
-        auto dir = compareOp.getComparisonDirection();
-        bool lhsWins = false;
-        if (dir == mlir::stablehlo::ComparisonDirection::GT ||
-            dir == mlir::stablehlo::ComparisonDirection::GE) {
-            lhsWins = true;
-        } else if (dir == mlir::stablehlo::ComparisonDirection::LT ||
-                   dir == mlir::stablehlo::ComparisonDirection::LE) {
-            lhsWins = false;
-        } else {
-            continue;
-        }
-
-        // If the compare operands are swapped, the max/min interpretation flips.
-        if (reversedValueCompare) {
-            lhsWins = !lhsWins;
-        }
-        return lhsWins ? ArgReduceKind::kMax : ArgReduceKind::kMin;
-    }
-    return ArgReduceKind::kUnknown;
-}
-
-static ProcessResult processMultiResultReduceOp(MPSGraph* graph, mlir::Operation* op,
-                                                ValueMap& values) {
-    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
-    if (!reduceOp) {
-        return ProcessResult::Error("Expected stablehlo.reduce");
-    }
-    if (op->getNumResults() != 2 || op->getNumOperands() < 2) {
-        return ProcessResult::Error("Unsupported multi-result reduce shape");
-    }
-
-    MPSGraphTensor* valueInput = GetInputTensor(values, op, 0);
-    if (!valueInput) {
-        return ProcessResult::Error("reduce value input tensor not found");
-    }
-
-    auto dimensions = reduceOp.getDimensions();
-    if (dimensions.size() != 1) {
-        return ProcessResult::Error("Only single-axis multi-result reduce is supported");
-    }
-    NSInteger axis = (NSInteger)dimensions[0];
-
-    ArgReduceKind kind = detectArgReduceKind(reduceOp);
-    if (kind == ArgReduceKind::kUnknown) {
-        return ProcessResult::Error("Unsupported multi-result reduce body");
-    }
-
-    MPSGraphTensor* valueOut = nullptr;
-    MPSGraphTensor* indexOut = nullptr;
-    if (kind == ArgReduceKind::kMax) {
-        valueOut = [graph reductionMaximumWithTensor:valueInput axis:axis name:nil];
-        indexOut = [graph reductionArgMaximumWithTensor:valueInput axis:axis name:nil];
-    } else {
-        valueOut = [graph reductionMinimumWithTensor:valueInput axis:axis name:nil];
-        indexOut = [graph reductionArgMinimumWithTensor:valueInput axis:axis name:nil];
-    }
-    if (!valueOut || !indexOut) {
-        return ProcessResult::Error("Failed to lower multi-result reduce");
-    }
-
-    MPSDataType valueType = GetResultMpsType(op, 0);
-    if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
-        valueOut = [graph castTensor:valueOut toType:valueType name:nil];
-    }
-    MPSDataType indexType = GetResultMpsType(op, 1);
-    if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
-        indexOut = [graph castTensor:indexOut toType:indexType name:nil];
-    }
-
-    NSArray<NSNumber*>* valueShape = GetOutputShape(op, 0);
-    if (valueShape && valueOut) {
-        valueOut = [graph reshapeTensor:valueOut withShape:valueShape name:nil];
-    }
-    NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
-    if (indexShape && indexOut) {
-        indexOut = [graph reshapeTensor:indexOut withShape:indexShape name:nil];
-    }
-
-    values[op->getResult(0).getAsOpaquePointer()] = valueOut;
-    values[op->getResult(1).getAsOpaquePointer()] = indexOut;
-    return ProcessResult{};
-}
-
-static ProcessResult processSortOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
-    auto sortOp = mlir::dyn_cast<mlir::stablehlo::SortOp>(op);
-    if (!sortOp) {
-        return ProcessResult::Error("Expected stablehlo.sort");
-    }
-
-    auto dimAttr = op->getAttrOfType<mlir::IntegerAttr>("dimension");
-    if (!dimAttr) {
-        return ProcessResult::Error("stablehlo.sort missing dimension attribute");
-    }
-    NSInteger axis = (NSInteger)dimAttr.getInt();
-
-    bool descending = false;
-    if (!sortOp.getComparator().empty()) {
-        for (mlir::Operation& nestedOp : sortOp.getComparator().front()) {
-            auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(&nestedOp);
-            if (!compareOp) {
-                continue;
-            }
-            auto direction = compareOp.getComparisonDirection();
-            descending = direction == mlir::stablehlo::ComparisonDirection::GT ||
-                         direction == mlir::stablehlo::ComparisonDirection::GE;
-            break;
-        }
-    }
-
-    if (op->getNumOperands() == 1 && op->getNumResults() == 1) {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
-        if (!input) {
-            return ProcessResult::Error("stablehlo.sort input tensor not found");
-        }
-        MPSGraphTensor* sorted = [graph sortWithTensor:input
-                                                  axis:axis
-                                            descending:descending
-                                                  name:nil];
-        if (!sorted) {
-            return ProcessResult::Error("stablehlo.sort lowering failed");
-        }
-        values[op->getResult(0).getAsOpaquePointer()] = sorted;
-        return ProcessResult{};
-    }
-
-    if (op->getNumOperands() >= 2 && op->getNumOperands() == op->getNumResults()) {
-        // Tuple sort lowering used by lexsort-like patterns:
-        // sort first N-1 tensors as lexicographic keys, apply permutation to all tensors.
-        // We build permutation by stable-sorting from least-significant key to most-significant.
-        MPSGraphTensor* base = GetInputTensor(values, op, 0);
-        if (!base) {
-            return ProcessResult::Error("stablehlo.sort key tensor not found");
-        }
-
-        MPSGraphTensor* perm = [graph coordinateAlongAxis:axis withShape:base.shape name:nil];
-        perm = EnsureInt32(graph, perm);
-
-        for (NSInteger keyIdx = (NSInteger)op->getNumOperands() - 2; keyIdx >= 0; --keyIdx) {
-            MPSGraphTensor* keyTensor = GetInputTensor(values, op, (unsigned)keyIdx);
-            if (!keyTensor) {
-                return ProcessResult::Error("stablehlo.sort key tensor missing");
-            }
-            MPSGraphTensor* keyAtPerm = [graph gatherAlongAxis:axis
-                                             withUpdatesTensor:keyTensor
-                                                 indicesTensor:perm
-                                                          name:nil];
-            MPSGraphTensor* localOrder = [graph argSortWithTensor:keyAtPerm
-                                                             axis:axis
-                                                       descending:descending
-                                                             name:nil];
-            if (!localOrder) {
-                return ProcessResult::Error("stablehlo.sort argSort lowering failed");
-            }
-            localOrder = EnsureInt32(graph, localOrder);
-            perm = [graph gatherAlongAxis:axis
-                        withUpdatesTensor:perm
-                            indicesTensor:localOrder
-                                     name:nil];
-        }
-
-        for (unsigned i = 0; i < op->getNumResults(); ++i) {
-            MPSGraphTensor* operandTensor = GetInputTensor(values, op, i);
-            if (!operandTensor) {
-                return ProcessResult::Error("stablehlo.sort operand tensor missing");
-            }
-            MPSGraphTensor* sorted = [graph gatherAlongAxis:axis
-                                          withUpdatesTensor:operandTensor
-                                              indicesTensor:perm
-                                                       name:nil];
-            if (!sorted) {
-                return ProcessResult::Error("stablehlo.sort gather lowering failed");
-            }
-            values[op->getResult(i).getAsOpaquePointer()] = sorted;
-        }
-        return ProcessResult{};
-    }
-
-    return ProcessResult::Error("Unsupported stablehlo.sort operand/result shape");
-}
-
-static int64_t inferTopKFromShapes(NSArray<NSNumber*>* inputShape,
-                                   NSArray<NSNumber*>* outputShape) {
-    if (!inputShape || !outputShape || inputShape.count != outputShape.count ||
-        outputShape.count == 0) {
-        return -1;
-    }
-    for (NSUInteger i = 0; i < outputShape.count; ++i) {
-        int64_t inDim = [inputShape[i] longLongValue];
-        int64_t outDim = [outputShape[i] longLongValue];
-        if (inDim != outDim) {
-            return outDim;
-        }
-    }
-    return [outputShape.lastObject longLongValue];
-}
-
-static NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape,
-                                         NSArray<NSNumber*>* outputShape) {
-    if (!inputShape || !outputShape || inputShape.count != outputShape.count ||
-        inputShape.count == 0) {
-        return -1;
-    }
-    for (NSUInteger i = 0; i < outputShape.count; ++i) {
-        int64_t inDim = [inputShape[i] longLongValue];
-        int64_t outDim = [outputShape[i] longLongValue];
-        if (inDim != outDim) {
-            return (NSInteger)i;
-        }
-    }
-    return (NSInteger)inputShape.count - 1;
-}
-
-static bool isTopKCustomCallTarget(const std::string& target) {
-    return target == "stablehlo.dynamic_top_k" || target == "mhlo.topk" || target == "mhlo.top_k";
-}
-
-static ProcessResult processTopKOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
-    if (op->getNumOperands() < 1 || op->getNumResults() != 2) {
-        return ProcessResult::Error("Unsupported top_k operand/result shape");
-    }
-
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    if (!input) {
-        return ProcessResult::Error("top_k input tensor not found");
-    }
-
-    int64_t k = -1;
-    if (auto kAttr = op->getAttrOfType<mlir::IntegerAttr>("k")) {
-        k = kAttr.getInt();
-    }
-
-    NSInteger axis = -1;
-    if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis")) {
-        axis = (NSInteger)axisAttr.getInt();
-    }
-
-    NSArray<NSNumber*>* valueShape = GetOutputShape(op, 0);
-    if (k < 0) {
-        k = inferTopKFromShapes(input.shape, valueShape);
-    }
-    if (axis < 0) {
-        axis = inferTopKAxisFromShapes(input.shape, valueShape);
-    }
-
-    if (k <= 0) {
-        return ProcessResult::Error("Failed to infer top_k parameter k");
-    }
-    if (axis < 0 || !input.shape || axis >= (NSInteger)input.shape.count) {
-        return ProcessResult::Error("Failed to infer top_k axis");
-    }
-
-    NSArray<MPSGraphTensor*>* topk = nil;
-    if (axis == (NSInteger)input.shape.count - 1) {
-        topk = [graph topKWithSourceTensor:input k:(NSUInteger)k name:nil];
-    } else {
-        topk = [graph topKWithSourceTensor:input axis:axis k:(NSUInteger)k name:nil];
-    }
-    if (!topk || topk.count != 2) {
-        return ProcessResult::Error("top_k lowering failed");
-    }
-
-    MPSGraphTensor* valueOut = topk[0];
-    MPSGraphTensor* indexOut = topk[1];
-
-    MPSDataType valueType = GetResultMpsType(op, 0);
-    if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
-        valueOut = [graph castTensor:valueOut toType:valueType name:nil];
-    }
-    MPSDataType indexType = GetResultMpsType(op, 1);
-    if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
-        indexOut = [graph castTensor:indexOut toType:indexType name:nil];
-    }
-
-    if (valueShape) {
-        valueOut = [graph reshapeTensor:valueOut withShape:valueShape name:nil];
-    }
-    NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
-    if (indexShape) {
-        indexOut = [graph reshapeTensor:indexOut withShape:indexShape name:nil];
-    }
-
-    values[op->getResult(0).getAsOpaquePointer()] = valueOut;
-    values[op->getResult(1).getAsOpaquePointer()] = indexOut;
-    return ProcessResult{};
-}
 
 // Process a func.call operation by looking up the callee and processing its body
 static ProcessResult processCallOp(MPSGraph* graph, mlir::func::CallOp callOp, ValueMap& values,
@@ -446,6 +131,7 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
     for (mlir::Operation& operation : block) {
         mlir::Operation* op = &operation;
         std::string op_name = op->getName().getStringRef().str();
+        MPS_LOG_DEBUG("Processing op: %s (results=%u)\n", op_name.c_str(), op->getNumResults());
 
         // Handle function and StableHLO region returns.
         if (mlir::isa<mlir::func::ReturnOp>(op) || mlir::isa<mlir::stablehlo::ReturnOp>(op)) {
@@ -477,37 +163,44 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
             continue;
         }
 
+        // Handle multi-result reduce (argmax/argmin) specially
         if (op_name == "stablehlo.reduce" && op->getNumResults() > 1) {
-            ProcessResult multiReduceResult = processMultiResultReduceOp(graph, op, values);
+            ProcessResult multiReduceResult = HandleMultiResultReduceOp(graph, op, values);
             if (!multiReduceResult.ok())
                 return multiReduceResult;
             continue;
         }
-        if (op_name == "stablehlo.sort") {
-            ProcessResult sortResult = processSortOp(graph, op, values);
-            if (!sortResult.ok())
-                return sortResult;
+
+        // Check for multi-result op handlers first
+        if (MultiResultOpHandler mrHandler = MultiResultOpRegistry::Find(op_name)) {
+            ProcessResult mrResult = mrHandler(graph, op, values);
+            if (!mrResult.ok())
+                return mrResult;
+            // Collect auxiliary tensors from the handler
+            for (void* aux : mrResult.auxiliary_tensors) {
+                result.auxiliary_tensors.push_back(aux);
+            }
             continue;
         }
-        if (op_name == "chlo.top_k") {
-            ProcessResult topKResult = processTopKOp(graph, op, values);
-            if (!topKResult.ok())
-                return topKResult;
-            continue;
-        }
-        if (op_name == "stablehlo.custom_call" && op->getNumResults() == 2) {
+
+        // Check for multi-result custom call handlers
+        if (op_name == "stablehlo.custom_call") {
             if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
                 std::string target = customCallOp.getCallTargetName().str();
-                if (isTopKCustomCallTarget(target)) {
-                    ProcessResult topKResult = processTopKOp(graph, op, values);
-                    if (!topKResult.ok())
-                        return topKResult;
+                if (MultiResultOpHandler mrHandler = MultiResultCustomCallRegistry::Find(target)) {
+                    ProcessResult mrResult = mrHandler(graph, op, values);
+                    if (!mrResult.ok())
+                        return mrResult;
+                    // Collect auxiliary tensors from the handler
+                    for (void* aux : mrResult.auxiliary_tensors) {
+                        result.auxiliary_tensors.push_back(aux);
+                    }
                     continue;
                 }
             }
         }
 
-        // Look up handler in registry
+        // Look up single-result handler in registry
         OpHandler handler = OpRegistry::Find(op_name);
         if (!handler) {
             return ProcessResult::Error(UnsupportedOpsMessage({op_name}) +
@@ -609,8 +302,11 @@ bool MpsExecutable::BuildGraph() {
         }
 
         // Cache target tensors and return types
+        MPS_LOG_DEBUG("Collecting %zu return values\n", processResult.return_values.size());
         for (const auto& ret_value : processResult.return_values) {
             MPSGraphTensor* ret_tensor = values[ret_value.getAsOpaquePointer()];
+            MPS_LOG_DEBUG("Looking up return value at %p, found: %s\n",
+                          ret_value.getAsOpaquePointer(), ret_tensor ? "yes" : "no");
             if (!ret_tensor) {
                 error_ = "Return value not found in tensors";
                 return false;
@@ -618,6 +314,13 @@ bool MpsExecutable::BuildGraph() {
 
             cached_targets_.push_back((__bridge void*)ret_tensor);  // Graph owns the tensor
             cached_return_types_.push_back(ret_value.getType());
+        }
+
+        // Cache auxiliary tensors from multi-output operations
+        // These need to be computed by MPS but aren't part of the return values
+        MPS_LOG_DEBUG("Collecting %zu auxiliary tensors\n", processResult.auxiliary_tensors.size());
+        for (void* aux_tensor : processResult.auxiliary_tensors) {
+            cached_auxiliary_targets_.push_back(aux_tensor);
         }
 
         // Cache the graph
@@ -688,10 +391,20 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             feeds[placeholder] = tensor_data;
         }
 
-        // Build target tensors array from cache
+        // Build target tensors array from cache (includes both return values and auxiliary)
         NSMutableArray<MPSGraphTensor*>* target_tensors = [NSMutableArray array];
+        size_t num_return_targets = cached_targets_.size();
         for (void* p : cached_targets_) {
             [target_tensors addObject:(__bridge MPSGraphTensor*)p];
+        }
+        // Add auxiliary tensors - these are from multi-output ops where not all outputs
+        // are returned. MPS requires all outputs to be computed.
+        for (void* p : cached_auxiliary_targets_) {
+            MPSGraphTensor* aux = (__bridge MPSGraphTensor*)p;
+            // Only add if not already in targets (to avoid duplicates)
+            if (![target_tensors containsObject:aux]) {
+                [target_tensors addObject:aux];
+            }
         }
 
         // Handle identity functions (no operations)
@@ -733,19 +446,31 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         }
 
         // Execute the cached graph
+        MPS_LOG_DEBUG("Executing graph: %lu feeds, %lu targets\n", (unsigned long)feeds.count,
+                      (unsigned long)target_tensors.count);
+#if MPS_LOG_LEVEL >= 3
+        for (size_t i = 0; i < target_tensors.count; i++) {
+            MPSGraphTensor* t = target_tensors[i];
+            MPS_LOG_DEBUG("Target[%zu]: %p, shape=%s\n", i, (void*)t,
+                          [[t.shape description] UTF8String]);
+        }
+#endif
         NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* result_dict = nil;
         @try {
+            MPS_LOG_DEBUG("Calling runWithMTLCommandQueue...\n");
             result_dict = [graph runWithMTLCommandQueue:commandQueue
                                                   feeds:feeds
                                           targetTensors:target_tensors
                                        targetOperations:nil];
+            MPS_LOG_DEBUG("Graph execution completed\n");
         } @catch (NSException* exception) {
             return ExecutionResult::Error("MPS graph execution failed: " +
                                           std::string([[exception reason] UTF8String]));
         }
 
-        // Process outputs using cached return types
-        for (size_t i = 0; i < target_tensors.count; i++) {
+        // Process outputs using cached return types (only process actual return values,
+        // not auxiliary targets)
+        for (size_t i = 0; i < num_return_targets; i++) {
             MPSGraphTensor* target = target_tensors[i];
             MPSGraphTensorData* result_data = result_dict[target];
             if (!result_data) {

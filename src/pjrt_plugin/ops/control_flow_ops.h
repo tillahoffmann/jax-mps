@@ -18,6 +18,9 @@ namespace jax_mps {
 struct ProcessResult {
     std::string error;
     std::vector<mlir::Value> return_values;
+    // Auxiliary tensors from multi-output ops that need to be computed
+    // but aren't part of the return values (to satisfy MPS graph execution)
+    std::vector<void*> auxiliary_tensors;  // MPSGraphTensor*
 
     bool ok() const {
         return error.empty();

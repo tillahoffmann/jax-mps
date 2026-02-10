@@ -9,6 +9,7 @@ from .random import make_random_op_configs
 from .reduction import make_reduction_op_configs
 from .shape import make_shape_op_configs
 from .slice import make_slice_op_configs
+from .sort import make_sort_op_configs
 from .unary import make_unary_op_configs
 from .util import OperationTestConfig
 
@@ -25,5 +26,6 @@ __all__ = [
     "make_reduction_op_configs",
     "make_shape_op_configs",
     "make_slice_op_configs",
+    "make_sort_op_configs",
     "make_unary_op_configs",
 ]
