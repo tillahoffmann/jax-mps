@@ -140,13 +140,11 @@ jobs:
           name: wheel-py${{ matrix.python }}
           path: dist/*.whl
 
-  publish-dev:
-    name: Publish dev release
+  build-dev:
+    name: Build dev wheel
     needs: [lint-cpp, build-and-test]
     runs-on: macos-14
     if: always() && !failure() && !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    permissions:
-      id-token: write  # Required for PyPI trusted publishing
 
     steps:
       - uses: actions/checkout@v4
@@ -173,6 +171,26 @@ jobs:
           uv build --wheel
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
+      - name: Upload dev wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-dev
+          path: dist/*.whl
+
+  publish-dev:
+    name: Publish dev release
+    needs: build-dev
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+
+    steps:
+      - name: Download dev wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-dev
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
