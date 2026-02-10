@@ -76,10 +76,8 @@ mlir::func::FuncOp findEntryFunction(mlir::ModuleOp module) {
     mlir::func::FuncOp entry = nullptr;
 
     module.walk([&](mlir::func::FuncOp funcOp) {
-        if (funcOp.getName() == "main") {
-            entry = funcOp;
-        } else if (!entry) {
-            // Fall back to first function if no "main"
+        // Prefer "main", otherwise fall back to first function
+        if (funcOp.getName() == "main" || !entry) {
             entry = funcOp;
         }
     });

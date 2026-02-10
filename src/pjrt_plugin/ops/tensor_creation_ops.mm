@@ -51,12 +51,11 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
                 double imagPart = complexVal.imag();
                 if (shape.count == 0) {
                     return [g constantWithRealPart:realPart imaginaryPart:imagPart dataType:dtype];
-                } else {
-                    return [g constantWithRealPart:realPart
-                                     imaginaryPart:imagPart
-                                             shape:shape
-                                          dataType:dtype];
                 }
+                return [g constantWithRealPart:realPart
+                                 imaginaryPart:imagPart
+                                         shape:shape
+                                      dataType:dtype];
             }
 
             if (elemType.isF32()) {
@@ -82,10 +81,9 @@ static MPSGraphTensor* Handle_constant(MPSGraph* g, mlir::Operation* op, ValueMa
             if (shape.count == 0) {
                 // True scalar
                 return [g constantWithScalar:scalarValue dataType:dtype];
-            } else {
-                // Splat to shape
-                return [g constantWithScalar:scalarValue shape:shape dataType:dtype];
             }
+            // Splat to shape
+            return [g constantWithScalar:scalarValue shape:shape dataType:dtype];
         } else {
             // Non-splat dense constant - use raw data
             auto rawData = denseAttr.getRawData();
@@ -114,7 +112,7 @@ static MPSGraphTensor* Handle_iota(MPSGraph* g, mlir::Operation* op, ValueMap& v
     }
 
     NSArray<NSNumber*>* shape = GetOutputShape(op);
-    int64_t iotaDim = iotaOp.getIotaDimension();
+    int64_t iotaDim = static_cast<int64_t>(iotaOp.getIotaDimension());
 
     // Create a coordinate tensor along the iota dimension
     MPSGraphTensor* result = [g coordinateAlongAxis:(NSInteger)iotaDim withShape:shape name:nil];

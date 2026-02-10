@@ -29,9 +29,9 @@ MPSDataType PjrtDtypeToMps(int dtype) {
         case PJRT_Buffer_Type_PRED:
             return MPSDataTypeBool;
         case PJRT_Buffer_Type_C64:
-            return MPSDataTypeComplexFloat32;
         case PJRT_Buffer_Type_C128:
-            return MPSDataTypeComplexFloat32;  // MPS has no complex float64
+            // MPS has no complex float64, so both C64 and C128 use ComplexFloat32
+            return MPSDataTypeComplexFloat32;
         default:
             return MPSDataTypeInvalid;
     }

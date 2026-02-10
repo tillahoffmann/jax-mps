@@ -142,7 +142,7 @@ PJRT_Error* MPS_Buffer_DecreaseExternalReferenceCount(
 
 PJRT_Error* MPS_Buffer_OpaqueDeviceMemoryDataPointer(
     PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* args) {
-    args->device_memory_ptr = 0;
+    args->device_memory_ptr = nullptr;
     return nullptr;
 }
 

@@ -9,42 +9,81 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-deps:
-    name: Build MLIR & StableHLO
-    runs-on: macos-14  # Apple Silicon runner
+  check-cache:
+    name: Check MLIR cache
+    runs-on: macos-14
+    outputs:
+      cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache MLIR/StableHLO
-        id: cache-deps
-        uses: actions/cache@v4
+      - name: Check MLIR/StableHLO cache
+        id: cache-check
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          lookup-only: true
+
+  build-deps:
+    name: Build MLIR & StableHLO
+    needs: check-cache
+    if: needs.check-cache.outputs.cache-hit != 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install build tools
-        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: brew install cmake ninja
 
       - name: Build dependencies
-        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: ./scripts/setup_deps.sh --prefix "${{ github.workspace }}/.jax-mps-deps"
         env:
           JOBS: 4
 
-      - name: Verify deps installation
+      - name: Save cache
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+
+  lint-cpp:
+    name: Lint C++
+    needs: [check-cache, build-deps]
+    if: always() && !failure() && !cancelled()
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore deps from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Install llvm and clang-format
+        uses: tecolicom/actions-use-homebrew-tools@v1
+        with:
+          tools: llvm clang-format
+
+      - name: cmake configure
         run: |
-          echo "Checking MLIR installation ..."
-          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/cmake/mlir/ | head -5
-          echo "Checking StableHLO installation ..."
-          ls -la ${{ github.workspace }}/.jax-mps-deps/include/stablehlo/dialect/ | head -5
-          echo "Checking protobuf installation ..."
-          ls -la ${{ github.workspace }}/.jax-mps-deps/lib/libprotobuf.a
-          ${{ github.workspace }}/.jax-mps-deps/bin/protoc --version
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.jax-mps-deps"
+
+      - name: clang-format
+        run: find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
+
+      - name: clang-tidy
+        run: |
+          export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+          find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) clang-tidy -p build
 
   build-and-test:
     name: Build and test (Python ${{ matrix.python }})
-    needs: build-deps
+    needs: [check-cache, build-deps]
+    if: always() && !failure() && !cancelled()
     runs-on: macos-14
     strategy:
       matrix:
@@ -75,11 +114,6 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
-      - name: clang-format
-        run: |
-          brew install clang-format
-          find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
-
       - name: ruff format
         run: uv run ruff format --check src tests
 
@@ -108,7 +142,7 @@ jobs:
 
   release:
     name: Release
-    needs: build-and-test
+    needs: [lint-cpp, build-and-test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:

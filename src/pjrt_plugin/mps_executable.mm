@@ -33,7 +33,7 @@ MpsExecutable::MpsExecutable(MpsClient* client, mps::ParsedModule module)
     name_ = entry_func_.getName().str();
 
     // Set the number of outputs based on result types
-    num_outputs_ = entry_func_.getNumResults();
+    num_outputs_ = static_cast<int>(entry_func_.getNumResults());
 
     valid_ = true;
 }

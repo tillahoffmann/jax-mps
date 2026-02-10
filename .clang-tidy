@@ -1,0 +1,45 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  -clang-analyzer-osx.cocoa.RetainCount,
+  -clang-analyzer-nullability.NullablePassedToNonnull,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-unused-parameters,
+  -misc-use-anonymous-namespace,
+  -misc-use-internal-linkage,
+  -modernize-use-auto,
+  -modernize-use-default-member-init,
+  -modernize-use-nodiscard,
+  -modernize-use-trailing-return-type,
+  -modernize-use-using,
+  -performance-unnecessary-value-param,
+  -readability-braces-around-statements,
+  -readability-else-after-return,
+  -readability-math-missing-parentheses,
+  -readability-simplify-boolean-expr,
+  -modernize-avoid-c-arrays,
+  -modernize-return-braced-init-list,
+  -performance-enum-size,
+  -readability-convert-member-functions-to-static,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-identifier-naming,
+  -readability-implicit-bool-conversion,
+  -readability-magic-numbers,
+  -readability-suspicious-call-argument,
+
+WarningsAsErrors: '*'
+
+# Only show warnings from our own headers, not third-party or system headers
+HeaderFilterRegex: '.*/src/pjrt_plugin/.*'
+SystemHeaders: false
