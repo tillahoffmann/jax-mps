@@ -9,6 +9,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      wheel: ${{ steps.filter.outputs.wheel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            wheel:
+              - 'src/**'
+              - 'pyproject.toml'
+              - 'CMakeLists.txt'
+              - 'scripts/setup_deps.sh'
+
   setup-deps:
     name: Setup dependencies
     runs-on: macos-14
@@ -141,9 +158,9 @@ jobs:
 
   build-dev:
     name: Build dev wheel
-    needs: setup-deps
+    needs: [setup-deps, changes]
     runs-on: macos-14
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.wheel == 'true'
     steps:
       - uses: actions/checkout@v4
 

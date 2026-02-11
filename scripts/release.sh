@@ -21,6 +21,18 @@ if [[ "$BRANCH" != "main" ]]; then
     exit 1
 fi
 
+# Check we're in sync with remote
+echo "Fetching from origin..."
+git fetch origin main
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/main)
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+    echo "Error: local main is not in sync with origin/main"
+    echo "  Local:  ${LOCAL}"
+    echo "  Remote: ${REMOTE}"
+    exit 1
+fi
+
 # Check tag doesn't already exist
 if git rev-parse "$TAG" >/dev/null 2>&1; then
     echo "Error: tag ${TAG} already exists"
