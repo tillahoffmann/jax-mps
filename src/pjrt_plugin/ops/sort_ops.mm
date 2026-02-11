@@ -191,32 +191,44 @@ static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& 
     MPSGraphTensor* indexOut = topk[1];
     MPS_LOG_DEBUG("HandleTopK: valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
 
+    MPS_LOG_DEBUG("HandleTopK: checking for casts/reshapes\n");
     MPSDataType valueType = GetResultMpsType(op, 0);
     if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
+        MPS_LOG_DEBUG("HandleTopK: casting valueOut from %d to %d\n", (int)valueOut.dataType,
+                      (int)valueType);
         valueOut = [graph castTensor:valueOut toType:valueType name:nil];
+        MPS_LOG_DEBUG("HandleTopK: valueOut after cast=%p\n", (void*)valueOut);
     }
     MPSDataType indexType = GetResultMpsType(op, 1);
     if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
+        MPS_LOG_DEBUG("HandleTopK: casting indexOut from %d to %d\n", (int)indexOut.dataType,
+                      (int)indexType);
         indexOut = [graph castTensor:indexOut toType:indexType name:nil];
+        MPS_LOG_DEBUG("HandleTopK: indexOut after cast=%p\n", (void*)indexOut);
     }
 
-    if (valueShape) {
+    // Only reshape if the shapes actually differ
+    if (valueShape && ![valueShape isEqualToArray:valueOut.shape]) {
+        MPS_LOG_DEBUG("HandleTopK: reshaping valueOut from %s to %s\n",
+                      [[valueOut.shape description] UTF8String],
+                      [[valueShape description] UTF8String]);
         valueOut = [graph reshapeTensor:valueOut withShape:valueShape name:nil];
+        MPS_LOG_DEBUG("HandleTopK: valueOut after reshape=%p\n", (void*)valueOut);
     }
     NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
-    if (indexShape) {
+    if (indexShape && ![indexShape isEqualToArray:indexOut.shape]) {
+        MPS_LOG_DEBUG("HandleTopK: reshaping indexOut from %s to %s\n",
+                      [[indexOut.shape description] UTF8String],
+                      [[indexShape description] UTF8String]);
         indexOut = [graph reshapeTensor:indexOut withShape:indexShape name:nil];
+        MPS_LOG_DEBUG("HandleTopK: indexOut after reshape=%p\n", (void*)indexOut);
     }
 
+    MPS_LOG_DEBUG("HandleTopK: final valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
     MPS_LOG_DEBUG("HandleTopK: storing results at %p and %p\n",
                   op->getResult(0).getAsOpaquePointer(), op->getResult(1).getAsOpaquePointer());
     values[op->getResult(0).getAsOpaquePointer()] = valueOut;
     values[op->getResult(1).getAsOpaquePointer()] = indexOut;
-
-    // Add both outputs as auxiliary tensors - MPS requires all outputs from
-    // multi-output ops to be computed even if only some are used
-    result.auxiliary_tensors.push_back((__bridge void*)valueOut);
-    result.auxiliary_tensors.push_back((__bridge void*)indexOut);
 
     MPS_LOG_DEBUG("HandleTopK: done\n");
     return result;

@@ -132,6 +132,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/reduction_ops.mm
     src/pjrt_plugin/ops/control_flow_ops.mm
     src/pjrt_plugin/ops/sort_ops.mm
+    src/pjrt_plugin/ops/linalg_ops.mm
     ${PROTO_SRCS}
 )
 
@@ -146,6 +147,11 @@ target_include_directories(pjrt_plugin_mps PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}  # For generated proto headers
     ${Protobuf_INCLUDE_DIRS}
 )
+
+# Debug logging level (0=error, 1=warn, 2=info, 3=debug)
+if(DEFINED ENV{MPS_LOG_LEVEL})
+    target_compile_definitions(pjrt_plugin_mps PRIVATE MPS_LOG_LEVEL=$ENV{MPS_LOG_LEVEL})
+endif()
 
 # Core MLIR libraries (order matters for static linking)
 set(MLIR_LIBS
