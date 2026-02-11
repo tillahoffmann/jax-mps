@@ -127,6 +127,25 @@ static size_t ByteSizeFromType(mlir::Type type) {
     return total;
 }
 
+// Find the handler for an operation, checking CustomCallRegistry for custom_call ops.
+// If out_custom_call_target is provided, it will be set to the target name for custom_call ops.
+static const OpHandler* FindHandler(mlir::Operation* op,
+                                    std::string* out_custom_call_target = nullptr) {
+    std::string op_name = op->getName().getStringRef().str();
+    if (op_name == "stablehlo.custom_call") {
+        if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
+            std::string target = customCallOp.getCallTargetName().str();
+            if (out_custom_call_target) {
+                *out_custom_call_target = target;
+            }
+            if (const OpHandler* h = CustomCallRegistry::Find(target)) {
+                return h;
+            }
+        }
+    }
+    return OpRegistry::Find(op_name);
+}
+
 // Forward declaration for recursive processing
 static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
                                        mlir::ModuleOp module, int depth);
@@ -226,17 +245,8 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
         }
 
         // Look up handler in registry (handles custom_call via CustomCallRegistry)
-        const OpHandler* handler = nullptr;
         std::string custom_call_target;
-        if (op_name == "stablehlo.custom_call") {
-            if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
-                custom_call_target = customCallOp.getCallTargetName().str();
-                handler = CustomCallRegistry::Find(custom_call_target);
-            }
-        }
-        if (!handler) {
-            handler = OpRegistry::Find(op_name);
-        }
+        const OpHandler* handler = FindHandler(op, &custom_call_target);
         if (!handler) {
             // For custom_call, report the target name rather than the op name
             std::string unsupported_name =
@@ -661,18 +671,8 @@ bool MpsExecutable::BuildExecutionPlan() {
                         }
 
                         // Look up handler (handles custom_call via CustomCallRegistry)
-                        const OpHandler* handler = nullptr;
                         std::string custom_call_target;
-                        if (op_name == "stablehlo.custom_call") {
-                            if (auto customCallOp =
-                                    mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
-                                custom_call_target = customCallOp.getCallTargetName().str();
-                                handler = CustomCallRegistry::Find(custom_call_target);
-                            }
-                        }
-                        if (!handler) {
-                            handler = OpRegistry::Find(op_name);
-                        }
+                        const OpHandler* handler = FindHandler(op, &custom_call_target);
                         if (!handler) {
                             std::string unsupported_name =
                                 custom_call_target.empty()
