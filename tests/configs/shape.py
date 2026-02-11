@@ -1,11 +1,51 @@
 from jax import numpy as jnp
 
-from .util import OperationTestConfig
+from .util import OperationTestConfig, complex_standard_normal
 
 
 def make_shape_op_configs():
+    # Flip and transpose ops for both real and complex inputs
+    for complex in [False, True]:
+        with OperationTestConfig.module_name(
+            "shape-complex" if complex else "shape-real"
+        ):
+            yield from [
+                OperationTestConfig(
+                    jnp.flip,
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (17,), complex
+                    ),
+                ),
+                OperationTestConfig(
+                    jnp.fliplr,
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (17, 13), complex
+                    ),
+                ),
+                OperationTestConfig(
+                    jnp.flipud,
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (17, 13), complex
+                    ),
+                ),
+                OperationTestConfig(
+                    jnp.transpose,
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (17, 8, 9), complex
+                    ),
+                ),
+                OperationTestConfig(
+                    jnp.transpose,
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (17, 8, 9), complex
+                    ),
+                    (1, 0, 2),
+                    static_argnums=(1,),
+                ),
+            ]
+
     with OperationTestConfig.module_name("shape"):
-        return [
+        yield from [
             OperationTestConfig(
                 lambda x, y: jnp.concatenate([x, y], axis=0),
                 lambda rng: rng.normal(size=(3, 4)),
