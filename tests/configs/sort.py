@@ -19,7 +19,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x),
-                numpy.random.standard_normal((17,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((17,)).astype(numpy.float32),
                 name="jnp.sort.1d",
             )
         )
@@ -28,21 +28,21 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=0),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 name="jnp.sort.2d.axis0",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=1),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 name="jnp.sort.2d.axis1",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=-1),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 name="jnp.sort.2d.axis_neg1",
             )
         )
@@ -51,21 +51,21 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=0),
-                numpy.random.standard_normal((3, 5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 5, 7)).astype(numpy.float32),
                 name="jnp.sort.3d.axis0",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=1),
-                numpy.random.standard_normal((3, 5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 5, 7)).astype(numpy.float32),
                 name="jnp.sort.3d.axis1",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=2),
-                numpy.random.standard_normal((3, 5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 5, 7)).astype(numpy.float32),
                 name="jnp.sort.3d.axis2",
             )
         )
@@ -74,7 +74,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.sort(x, axis=-1, descending=True),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 name="jnp.sort.descending",
             )
         )
@@ -88,8 +88,8 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda keys, vals: lax.sort_key_val(keys, vals, dimension=0),
-                numpy.random.standard_normal((6, 4)).astype(numpy.float32),
-                numpy.random.standard_normal((6, 4)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 4)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 4)).astype(numpy.float32),
                 name="lax.sort_key_val.2d.axis0",
             )
         )
@@ -98,8 +98,8 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda keys, vals: lax.sort_key_val(keys, vals, dimension=1),
-                numpy.random.standard_normal((4, 6)).astype(numpy.float32),
-                numpy.random.standard_normal((4, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 6)).astype(numpy.float32),
                 name="lax.sort_key_val.2d.axis1",
             )
         )
@@ -108,16 +108,16 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda keys, vals: lax.sort_key_val(keys, vals, dimension=0),
-                numpy.random.standard_normal((4, 3, 5)).astype(numpy.float32),
-                numpy.random.standard_normal((4, 3, 5)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 3, 5)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 3, 5)).astype(numpy.float32),
                 name="lax.sort_key_val.3d.axis0",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda keys, vals: lax.sort_key_val(keys, vals, dimension=2),
-                numpy.random.standard_normal((3, 4, 5)).astype(numpy.float32),
-                numpy.random.standard_normal((3, 4, 5)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 4, 5)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 4, 5)).astype(numpy.float32),
                 name="lax.sort_key_val.3d.axis2",
             )
         )
@@ -128,8 +128,8 @@ def make_sort_op_configs():
                 lambda keys, vals: lax.sort_key_val(
                     keys, vals, dimension=1, is_stable=True
                 ),
-                numpy.random.standard_normal((4, 6)).astype(numpy.float32),
-                numpy.arange(24).reshape(4, 6).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 6)).astype(numpy.float32),
+                lambda rng: numpy.arange(24).reshape(4, 6).astype(numpy.float32),
                 name="lax.sort_key_val.stable",
             )
         )
@@ -143,7 +143,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 3),
-                numpy.random.standard_normal((10,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((10,)).astype(numpy.float32),
                 name="lax.top_k.1d",
             )
         )
@@ -152,21 +152,21 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 1),
-                numpy.random.standard_normal((5, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 8)).astype(numpy.float32),
                 name="lax.top_k.2d.k1",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 3),
-                numpy.random.standard_normal((5, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 8)).astype(numpy.float32),
                 name="lax.top_k.2d.k3",
             )
         )
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 5),
-                numpy.random.standard_normal((4, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 7)).astype(numpy.float32),
                 name="lax.top_k.2d.k5",
             )
         )
@@ -175,7 +175,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 2),
-                numpy.random.standard_normal((3, 4, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 4, 8)).astype(numpy.float32),
                 name="lax.top_k.3d",
             )
         )
@@ -184,7 +184,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 3),
-                numpy.random.standard_normal((2, 3, 4, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((2, 3, 4, 6)).astype(numpy.float32),
                 name="lax.top_k.4d",
             )
         )
@@ -193,7 +193,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(jnp.swapaxes(x, 0, 2), 2),
-                numpy.random.standard_normal((3, 4, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 4, 6)).astype(numpy.float32),
                 name="lax.top_k.transposed",
             )
         )
@@ -202,7 +202,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 5),
-                numpy.random.standard_normal((3, 5)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((3, 5)).astype(numpy.float32),
                 name="lax.top_k.k_equals_size",
             )
         )
@@ -215,7 +215,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x),
-                numpy.random.standard_normal((15,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((15,)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.1d",
             )
@@ -225,7 +225,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=0),
-                numpy.random.standard_normal((6, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 8)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.2d.axis0",
             )
@@ -233,7 +233,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=1),
-                numpy.random.standard_normal((6, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 8)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.2d.axis1",
             )
@@ -241,7 +241,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=-1),
-                numpy.random.standard_normal((6, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 8)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.2d.axis_neg1",
             )
@@ -251,7 +251,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=0),
-                numpy.random.standard_normal((4, 5, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 5, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.3d.axis0",
             )
@@ -259,7 +259,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=1),
-                numpy.random.standard_normal((4, 5, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 5, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.3d.axis1",
             )
@@ -267,7 +267,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=2),
-                numpy.random.standard_normal((4, 5, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 5, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.3d.axis2",
             )
@@ -277,7 +277,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmax(x, axis=1, keepdims=True),
-                numpy.random.standard_normal((4, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmax.keepdims",
             )
@@ -291,7 +291,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x),
-                numpy.random.standard_normal((15,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((15,)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.1d",
             )
@@ -301,7 +301,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x, axis=0),
-                numpy.random.standard_normal((6, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 8)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.2d.axis0",
             )
@@ -309,7 +309,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x, axis=1),
-                numpy.random.standard_normal((6, 8)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((6, 8)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.2d.axis1",
             )
@@ -319,7 +319,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x, axis=0),
-                numpy.random.standard_normal((4, 5, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 5, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.3d.axis0",
             )
@@ -327,7 +327,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x, axis=2),
-                numpy.random.standard_normal((4, 5, 6)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((4, 5, 6)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.3d.axis2",
             )
@@ -337,7 +337,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argmin(x, axis=0, keepdims=True),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argmin.keepdims",
             )
@@ -351,7 +351,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argsort(x),
-                numpy.random.standard_normal((12,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((12,)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argsort.1d",
             )
@@ -361,7 +361,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argsort(x, axis=0),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argsort.2d.axis0",
             )
@@ -369,7 +369,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argsort(x, axis=1),
-                numpy.random.standard_normal((5, 7)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((5, 7)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argsort.2d.axis1",
             )
@@ -379,7 +379,7 @@ def make_sort_op_configs():
         configs.append(
             OperationTestConfig(
                 lambda x: jnp.argsort(x, descending=True),
-                numpy.random.standard_normal((10,)).astype(numpy.float32),
+                lambda rng: rng.standard_normal((10,)).astype(numpy.float32),
                 differentiable_argnums=(),
                 name="jnp.argsort.descending",
             )

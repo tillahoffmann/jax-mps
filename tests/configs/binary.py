@@ -13,78 +13,134 @@ def make_binary_op_configs():
             yield from [
                 OperationTestConfig(
                     jnp.add,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 1), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 1), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.subtract,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 1), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 1), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.multiply,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 1), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 1), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.divide,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 1), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 1), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.dot,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((4, 5), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (4, 5), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.less,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.less_equal,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.equal,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.greater_equal,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.greater,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.broadcast_arrays,
-                    complex_standard_normal((3, 1), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 1), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.minimum,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.maximum,
-                    complex_standard_normal((3, 4), complex),
-                    complex_standard_normal((3, 4), complex),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (3, 4), complex
+                    ),
                 ),
                 OperationTestConfig(
                     jnp.power,
-                    complex_standard_normal((5,), complex),
-                    numpy.random.gamma(5, size=(7, 1)),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (5,), complex
+                    ),
+                    lambda rng: rng.gamma(5, size=(7, 1)),
                 ),
                 OperationTestConfig(
                     jnp.power,
-                    numpy.random.gamma(5, size=(7, 1)),
-                    complex_standard_normal((5,), complex),
+                    lambda rng: rng.gamma(5, size=(7, 1)),
+                    lambda rng, complex=complex: complex_standard_normal(
+                        rng, (5,), complex
+                    ),
                 ),
             ]
 
@@ -93,8 +149,8 @@ def make_binary_op_configs():
         yield from [
             OperationTestConfig(
                 lax.rem,
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.gamma(5, size=(3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.gamma(5, size=(3, 4)),
             ),
             OperationTestConfig(
                 jnp.nextafter,
@@ -104,32 +160,32 @@ def make_binary_op_configs():
             ),
             OperationTestConfig(
                 jnp.clip,
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
             ),
             OperationTestConfig(
                 jnp.clip,
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
                 None,
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
             ),
             OperationTestConfig(
                 jnp.clip,
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
                 None,
             ),
             OperationTestConfig(
                 lax.clamp,
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
             ),
             OperationTestConfig(
                 jnp.arctan2,
-                numpy.random.standard_normal((3, 4)),
-                numpy.random.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
+                lambda rng: rng.standard_normal((3, 4)),
             ),
             OperationTestConfig(
                 jnp.bitwise_and,
