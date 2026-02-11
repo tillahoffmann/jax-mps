@@ -31,25 +31,6 @@ def make_unary_op_configs():
                     ),
                 ),
                 OperationTestConfig(
-                    jnp.flip,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
-                    ),
-                ),
-                # FIXME: Flip ops should probably be in './shape.py'.
-                OperationTestConfig(
-                    jnp.fliplr,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 13), complex
-                    ),
-                ),
-                OperationTestConfig(
-                    jnp.flipud,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 13), complex
-                    ),
-                ),
-                OperationTestConfig(
                     jnp.negative,
                     lambda rng, complex=complex: complex_standard_normal(
                         rng, (17,), complex
@@ -84,21 +65,6 @@ def make_unary_op_configs():
                     lambda rng, complex=complex: complex_standard_normal(
                         rng, (17,), complex
                     ),
-                ),
-                # FIXME: Transpose ops should probably live in './shape.py'.
-                OperationTestConfig(
-                    jnp.transpose,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 8, 9), complex
-                    ),
-                ),
-                OperationTestConfig(
-                    jnp.transpose,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 8, 9), complex
-                    ),
-                    (1, 0, 2),
-                    static_argnums=(1,),
                 ),
                 OperationTestConfig(
                     jnp.real,
