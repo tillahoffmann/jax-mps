@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,7 @@ private:
     mlir::func::FuncOp entry_func_;
 
     // Cached execution plan (built once, reused for all executions)
+    std::mutex plan_mutex_;
     bool plan_built_ = false;
     std::unique_ptr<ExecutionPlan> plan_;
 };

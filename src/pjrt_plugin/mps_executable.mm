@@ -267,6 +267,9 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
 
 bool MpsExecutable::BuildExecutionPlan() {
     MPS_LOG_DEBUG("BuildExecutionPlan: start, plan_built_=%d\n", plan_built_);
+
+    // Thread-safe lazy initialization of the execution plan
+    std::scoped_lock lock(plan_mutex_);
     if (plan_built_)
         return true;
 
