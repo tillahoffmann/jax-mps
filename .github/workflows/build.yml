@@ -181,9 +181,8 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: |
-          uv venv
+          uv sync --all-groups --no-install-project
           uv pip install dist/*.whl
-          uv pip install pytest
 
       # MPS is not available on the runner yet.
       # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
