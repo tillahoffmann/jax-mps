@@ -19,7 +19,7 @@ uv pip install -e .
 pre-commit install
 ```
 
-Pre-commit hooks run clang-format, ruff, pyright, a rebuild, and the full test suite on every commit. MPS is not available in GitHub Actions, so the pre-commit hooks are the primary line of defence — please do not skip them.
+Pre-commit hooks run clang-format, ruff, pyright, a rebuild, and the full test suite on every commit. MPS is not available in GitHub Actions, so the pre-commit hooks are the primary line of defence — please do not skip them. This may seem pedantic (apologies), but agents need strong guardrails in the form of validation so they don't ... go off the rails.
 
 ## Adding a new operation
 
