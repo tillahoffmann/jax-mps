@@ -22,13 +22,10 @@ namespace jax_mps {
 // Maps mlir::Value (via opaque pointer) to MPSGraphTensor*
 using ValueMap = std::unordered_map<void*, MPSGraphTensor*>;
 
-// Result type for op handlers - can be an error or success with optional auxiliary tensors
+// Result type for op handlers - can be an error or success
 struct ProcessResult {
     std::string error;
     std::vector<mlir::Value> return_values;
-    // Auxiliary tensors from multi-output ops that need to be computed
-    // but aren't part of the return values (to satisfy MPS graph execution)
-    std::vector<void*> auxiliary_tensors;  // MPSGraphTensor*
 
     bool ok() const {
         return error.empty();
@@ -40,8 +37,62 @@ struct ProcessResult {
     }
 };
 
-// Unified handler signature: all handlers return ProcessResult and set outputs in values map
-using OpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+// ---------------------------------------------------------------------------
+// Handler signatures
+// ---------------------------------------------------------------------------
+
+// Graph handler: operates on MPSGraph tensors, builds computation graph
+using GraphOpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+
+// Native handler: operates directly on Metal buffers via command buffer encoding
+// Returns the output buffer (single-output ops only for now)
+using NativeOpHandler = id<MTLBuffer> (*)(id<MTLDevice>, id<MTLCommandBuffer>, mlir::Operation*,
+                                          const std::vector<id<MTLBuffer>>&);
+
+// ---------------------------------------------------------------------------
+// Tagged handler: unified representation for both execution models
+// ---------------------------------------------------------------------------
+
+struct OpHandler {
+    enum class Kind {
+        GRAPH,   // Normal graph-based ops using MPSGraph
+        NATIVE,  // Native MPS kernel ops (e.g., Cholesky)
+        SPECIAL  // Ops handled specially (control flow, custom_call)
+    } kind;
+
+    GraphOpHandler graph_handler = nullptr;
+    NativeOpHandler native_handler = nullptr;
+
+    static OpHandler Graph(GraphOpHandler h) {
+        OpHandler handler;
+        handler.kind = Kind::GRAPH;
+        handler.graph_handler = h;
+        return handler;
+    }
+
+    static OpHandler Native(NativeOpHandler h) {
+        OpHandler handler;
+        handler.kind = Kind::NATIVE;
+        handler.native_handler = h;
+        return handler;
+    }
+
+    static OpHandler Special() {
+        OpHandler handler;
+        handler.kind = Kind::SPECIAL;
+        return handler;
+    }
+
+    bool is_native() const {
+        return kind == Kind::NATIVE;
+    }
+    bool is_graph() const {
+        return kind == Kind::GRAPH;
+    }
+    bool is_special() const {
+        return kind == Kind::SPECIAL;
+    }
+};
 
 // Global op registry - ops register themselves at static init time
 // NOTE: Do not create additional registries. Use this single registry for all ops.
@@ -52,10 +103,11 @@ public:
         return true;
     }
 
-    static OpHandler Find(const std::string& name) {
+    // Returns pointer to handler if found, nullptr otherwise
+    static const OpHandler* Find(const std::string& name) {
         auto& handlers = GetMutableHandlers();
         auto it = handlers.find(name);
-        return it != handlers.end() ? it->second : nullptr;
+        return it != handlers.end() ? &it->second : nullptr;
     }
 
     // Returns comma-separated list of all registered operation names
@@ -97,10 +149,11 @@ public:
         return true;
     }
 
-    static OpHandler Find(const std::string& target) {
+    // Returns pointer to handler if found, nullptr otherwise
+    static const OpHandler* Find(const std::string& target) {
         auto& handlers = GetMutableHandlers();
         auto it = handlers.find(target);
-        return it != handlers.end() ? it->second : nullptr;
+        return it != handlers.end() ? &it->second : nullptr;
     }
 
 private:
@@ -189,10 +242,25 @@ inline ProcessResult Result(ValueMap& values, mlir::Operation* op, MPSGraphTenso
     return ProcessResult{};
 }
 
-// Macro for registering ops - use in .mm files
+// ---------------------------------------------------------------------------
+// Registration macros
+// ---------------------------------------------------------------------------
+
+// Macro for registering graph ops - use in .mm files
 // Use the full MLIR op name (e.g., "stablehlo.add")
 #define REGISTER_MPS_OP(mlir_op_name, handler_fn) \
-    static bool _reg_##handler_fn = ::jax_mps::OpRegistry::Register(mlir_op_name, handler_fn)
+    static bool _reg_##handler_fn =               \
+        ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Graph(handler_fn))
+
+// Macro for registering native ops (ops that use Metal buffers directly)
+#define REGISTER_NATIVE_MPS_OP(mlir_op_name, handler_fn) \
+    static bool _reg_##handler_fn =                      \
+        ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Native(handler_fn))
+
+// Macro for registering special ops (handled specially in mps_executable.mm)
+#define REGISTER_SPECIAL_MPS_OP(mlir_op_name, unique_suffix) \
+    static bool _reg_special_##unique_suffix =               \
+        ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Special())
 
 // Convenience macro for simple binary ops
 #define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                             \
@@ -219,11 +287,11 @@ inline ProcessResult Result(ValueMap& values, mlir::Operation* op, MPSGraphTenso
     }                                                                                        \
     REGISTER_MPS_OP(mlir_op_name, HandleMlir##reg_suffix)
 
-// Macro for registering custom call targets
+// Macro for registering custom call targets (graph-based)
 // Use unique_suffix to allow registering the same handler for multiple targets
-#define REGISTER_CUSTOM_CALL(target_name, handler_fn, unique_suffix) \
-    static bool _cc_reg_##unique_suffix =                            \
-        ::jax_mps::CustomCallRegistry::Register(target_name, handler_fn)
+#define REGISTER_CUSTOM_CALL(target_name, handler_fn, unique_suffix)               \
+    static bool _cc_reg_##unique_suffix = ::jax_mps::CustomCallRegistry::Register( \
+        target_name, ::jax_mps::OpHandler::Graph(handler_fn))
 
 // Convenience macro for simple unary custom call targets
 #define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)                 \

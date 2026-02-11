@@ -14,6 +14,7 @@ from .configs import (
     make_conv_op_configs,
     make_conversion_op_configs,
     make_flax_op_configs,
+    make_linalg_op_configs,
     make_misc_op_configs,
     make_numpyro_op_configs,
     make_random_op_configs,
@@ -30,6 +31,7 @@ OPERATION_TEST_CONFIGS = [
     *make_conv_op_configs(),
     *make_conversion_op_configs(),
     *make_flax_op_configs(),
+    *make_linalg_op_configs(),
     *make_misc_op_configs(),
     *make_numpyro_op_configs(),
     *make_random_op_configs(),
@@ -142,6 +144,8 @@ def assert_all_ops_tested():
     # Patterns matching op registration calls
     patterns = [
         re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_NATIVE_MPS_OP\("([^"]+)"'),
+        re.compile(r'REGISTER_SPECIAL_MPS_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),

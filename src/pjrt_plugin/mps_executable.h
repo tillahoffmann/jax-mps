@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -34,9 +35,14 @@ struct ExecutionResult {
     }
 };
 
+// Execution plan for interleaving MPSGraph segments with native MPS ops.
+// Defined fully in mps_executable.mm (uses ObjC types internally).
+struct ExecutionPlan;
+
 // Compiled executable for Metal
-// Owns the MLIR context and module, executing operations directly from MLIR
-// Caches the compiled MPSGraph for efficient repeated execution
+// Owns the MLIR context and module, executing operations directly from MLIR.
+// Caches an execution plan that may contain both MPSGraph segments and native
+// MPS kernel operations (e.g., MPSMatrixDecompositionCholesky).
 class MpsExecutable {
 public:
     // Takes ownership of the ParsedModule
@@ -66,8 +72,8 @@ public:
     }
 
 private:
-    // Build and cache the MPSGraph (called on first execution)
-    bool BuildGraph();
+    // Build and cache the execution plan (called on first execution)
+    bool BuildExecutionPlan();
 
     MpsClient* client_;
     std::string name_;
@@ -80,14 +86,10 @@ private:
     mlir::OwningOpRef<mlir::ModuleOp> module_;
     mlir::func::FuncOp entry_func_;
 
-    // Cached MPSGraph state (built once, reused for all executions)
-    bool graph_built_ = false;
-    void* cached_graph_ = nullptr;            // MPSGraph* (prevent ObjC in header)
-    std::vector<void*> cached_placeholders_;  // MPSGraphTensor* for inputs
-    std::vector<void*> cached_targets_;       // MPSGraphTensor* for outputs
-    std::vector<void*>
-        cached_auxiliary_targets_;  // MPSGraphTensor* for multi-output op unused results
-    std::vector<mlir::Type> cached_return_types_;  // Output types for dtype conversion
+    // Cached execution plan (built once, reused for all executions)
+    std::mutex plan_mutex_;
+    bool plan_built_ = false;
+    std::unique_ptr<ExecutionPlan> plan_;
 };
 
 }  // namespace jax_mps
