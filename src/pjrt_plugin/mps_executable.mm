@@ -807,6 +807,8 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 int dtype = MlirTypeToPjrtDtype(tensorType.getElementType());
                 result.buffers.push_back(
                     std::make_unique<MpsBuffer>(device, (__bridge void*)dst, dtype, dims));
+                // MpsBuffer retains, release our +1 from newBufferWithBytes
+                CFRelease((__bridge CFTypeRef)dst);
             }
             return result;
         }
@@ -1027,11 +1029,14 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 if (!copy) {
                     return ExecutionResult::Error("Failed to allocate output buffer copy");
                 }
-                buf = copy;
+                result.buffers.push_back(
+                    std::make_unique<MpsBuffer>(device, (__bridge void*)copy, dtype, dims));
+                // MpsBuffer retains, release our +1 from newBufferWithBytes
+                CFRelease((__bridge CFTypeRef)copy);
+            } else {
+                result.buffers.push_back(
+                    std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
             }
-
-            result.buffers.push_back(
-                std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
         }
 
         return result;

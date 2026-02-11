@@ -211,8 +211,11 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
         return nullptr;
     }
 
-    return std::make_unique<MpsBuffer>(device ? device : devices_[0].get(), (__bridge void*)buffer,
-                                       dtype, dims);
+    // MpsBuffer constructor retains the buffer, so release our +1 from newBuffer...
+    auto result = std::make_unique<MpsBuffer>(device ? device : devices_[0].get(),
+                                              (__bridge void*)buffer, dtype, dims);
+    CFRelease((__bridge CFTypeRef)buffer);
+    return result;
 }
 
 std::unique_ptr<MpsExecutable> MpsClient::CompileStableHLO(mps::ParsedModule module,
