@@ -9,51 +9,82 @@ on:
   workflow_dispatch:
 
 jobs:
-  check-cache:
-    name: Check MLIR cache
+  setup-deps:
+    name: Setup dependencies
     runs-on: macos-14
-    outputs:
-      cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check MLIR/StableHLO cache
-        id: cache-check
+      - name: Restore deps from cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          lookup-only: true
-
-  build-deps:
-    name: Build MLIR & StableHLO
-    needs: check-cache
-    if: needs.check-cache.outputs.cache-hit != 'true'
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
 
       - name: Install build tools
+        if: steps.cache.outputs.cache-hit != 'true'
         run: brew install cmake ninja
 
       - name: Build dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
         run: ./scripts/setup_deps.sh --prefix "${{ github.workspace }}/.jax-mps-deps"
         env:
           JOBS: 4
 
       - name: Save cache
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
 
-  lint-cpp:
-    name: Lint C++
-    needs: [check-cache, build-deps]
-    if: always() && !failure() && !cancelled()
+  build:
+    name: Build wheel
+    needs: setup-deps
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore deps from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.jax-mps-deps
+          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --all-groups
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
+      - name: Build wheel
+        run: uv build --wheel
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
+
+  lint:
+    name: Lint
+    needs: setup-deps
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
 
       - name: Restore deps from cache
         uses: actions/cache/restore@v4
@@ -80,36 +111,7 @@ jobs:
           export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
           find src -type f \( -name "*.cc" -o -name "*.mm" \) ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) clang-tidy -p build
 
-  build-and-test:
-    name: Build and test (Python ${{ matrix.python }})
-    needs: [check-cache, build-deps]
-    if: always() && !failure() && !cancelled()
-    runs-on: macos-14
-    strategy:
-      matrix:
-        python: ["3.13"]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Restore deps from cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          fail-on-cache-miss: true
-
-      - name: Verify deps
-        run: |
-          echo "Checking protoc ..."
-          ${{ github.workspace }}/.jax-mps-deps/bin/protoc --version
-
-      - name: Install project and dev dependencies
+      - name: Install project dependencies
         run: uv sync --all-groups
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
@@ -123,29 +125,11 @@ jobs:
       - name: pyright
         run: uv run pyright
 
-      - name: Build wheel
-        run: uv build --wheel
-        env:
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
-
-      # MPS is not available on the runner yet.
-      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
-      - name: Run pytest
-        if: false
-        run: uv run pytest tests/ -v
-
-      - name: Upload wheel
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheel-py${{ matrix.python }}
-          path: dist/*.whl
-
   build-dev:
     name: Build dev wheel
-    needs: [lint-cpp, build-and-test]
+    needs: setup-deps
     runs-on: macos-14
-    if: always() && !failure() && !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -163,7 +147,6 @@ jobs:
 
       - name: Build dev wheel
         run: |
-          # Extract base version and append dev suffix
           BASE_VERSION=$(grep '^version' pyproject.toml | cut -d'"' -f2)
           DEV_VERSION="${BASE_VERSION}.dev${{ github.run_number }}"
           echo "Building version: $DEV_VERSION"
@@ -178,45 +161,72 @@ jobs:
           name: wheel-dev
           path: dist/*.whl
 
-  publish-dev:
-    name: Publish dev release
-    needs: build-dev
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # Required for PyPI trusted publishing
-
+  test:
+    name: Test
+    needs: build
+    runs-on: macos-14
     steps:
-      - name: Download dev wheel
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Download wheel
         uses: actions/download-artifact@v4
         with:
-          name: wheel-dev
+          name: wheel
           path: dist/
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Install wheel and test dependencies
+        run: |
+          uv sync --all-groups --no-install-project
+          uv pip install dist/*.whl
+
+      # MPS is not available on the runner yet.
+      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
+      - name: Run pytest
+        if: false
+        run: uv run pytest tests/ -v
 
   release:
     name: Release
-    needs: [lint-cpp, build-and-test]
+    needs: [test, lint]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
-      id-token: write  # Required for PyPI trusted publishing
-      contents: write  # Required for GitHub release creation
-
+      id-token: write
+      contents: write
     steps:
-      - name: Download all wheels
+      - name: Download wheel
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-*
+          name: wheel
           path: dist/
-          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*.whl
           generate_release_notes: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-dev:
+    name: Publish dev release
+    needs: [test, lint, build-dev]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dev wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-dev
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
