@@ -1,4 +1,3 @@
-import numpy
 from jax import lax
 from jax import numpy as jnp
 
@@ -14,12 +13,12 @@ def make_conversion_op_configs():
             ),
             OperationTestConfig(
                 lambda x: x.astype(jnp.float16),
-                numpy.random.normal(size=(4, 5)),
+                lambda rng: rng.normal(size=(4, 5)),
                 differentiable_argnums=(),
             ),
             OperationTestConfig(
                 lambda x: lax.bitcast_convert_type(x, jnp.int32),
-                numpy.random.normal(size=(4, 5)),
+                lambda rng: rng.normal(size=(4, 5)),
                 differentiable_argnums=(),
             ),
         ]

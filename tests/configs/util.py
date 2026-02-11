@@ -4,11 +4,17 @@ from typing import Any, Callable, ClassVar, Sequence
 
 import jax
 import numpy
+import pytest
 from jax import numpy as jnp
 
 CPU_DEVICE = jax.devices("cpu")[0]
 MPS_DEVICE = jax.devices("mps")[0]
 STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
+
+
+def xfail_match(pattern: str) -> pytest.MarkDecorator:
+    """Create a strict xfail marker that validates the error message pattern."""
+    return pytest.mark.xfail(reason=pattern, match=pattern, strict=True)  # pyright: ignore[reportCallIssue]
 
 
 def get_device_placement(value):
@@ -21,6 +27,16 @@ def get_device_placement(value):
         device = leaf.device
     assert device is not None, "Failed to infer device placement."
     return device
+
+
+def complex_standard_normal(
+    rng: numpy.random.Generator, shape: tuple[int, ...], complex: bool
+) -> numpy.ndarray:
+    """Generate random normal data, optionally complex-valued."""
+    if complex:
+        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    else:
+        return rng.standard_normal(shape)
 
 
 class OperationTestConfig:
@@ -65,15 +81,20 @@ class OperationTestConfig:
         static_argnums: Sequence[int] | None = None,
         grad_transform: Callable | None = None,
         name: str | None = None,
+        seed: int = 42,
         **kwargs: Any,
     ) -> None:
         self.func = func
         self.differentiable_argnums = differentiable_argnums
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
-        self.args = [arg if callable(arg) else lambda arg=arg: arg for arg in args]
+        self.seed = seed
+        # Wrap non-callables in lambdas that accept (and ignore) rng
+        self.args = [
+            arg if callable(arg) else (lambda rng, arg=arg: arg) for arg in args
+        ]
         self.kwargs = {
-            key: arg if callable(arg) else lambda arg=arg: arg
+            key: arg if callable(arg) else (lambda rng, arg=arg: arg)
             for key, arg in kwargs.items()
         }
 
@@ -83,19 +104,19 @@ class OperationTestConfig:
             name = f"{self.ACTIVE_MODULE_NAME}.{name}"
         self.name = name
 
-    def get_args(self):
-        """Get positional arguments."""
+    def get_args(self, rng: numpy.random.Generator):
+        """Get positional arguments, using rng for any random generation."""
         args = []
         for arg_func in self.args:
-            arg = arg_func()
+            arg = arg_func(rng)
             if isinstance(arg, numpy.ndarray):
                 arg = jnp.asarray(arg)
             args.append(arg)
         return args
 
-    def get_kwargs(self):
-        """Get keyword arguments."""
-        return {key: arg() for key, arg in self.kwargs.items()}
+    def get_kwargs(self, rng: numpy.random.Generator):
+        """Get keyword arguments, using rng for any random generation."""
+        return {key: arg_func(rng) for key, arg_func in self.kwargs.items()}
 
     def get_differentiable_argnums(self) -> tuple[int, ...]:
         """Get a tuple of integers indicating which arguments can be differentiated with
@@ -103,8 +124,9 @@ class OperationTestConfig:
         if self.differentiable_argnums is not None:
             return tuple(self.differentiable_argnums)
 
+        rng = numpy.random.default_rng(self.seed)
         differentiable_argnums: list[int] = []
-        for argnum, arg in enumerate(self.get_args()):
+        for argnum, arg in enumerate(self.get_args(rng)):
             if isinstance(arg, float):
                 differentiable_argnums.append(argnum)
             elif isinstance(arg, jnp.ndarray):
@@ -114,8 +136,9 @@ class OperationTestConfig:
 
     def evaluate_value(self, jit: bool):
         """Evaluate the output of the operation."""
-        args = self.get_args()
-        kwargs = self.get_kwargs()
+        rng = numpy.random.default_rng(self.seed)
+        args = self.get_args(rng)
+        kwargs = self.get_kwargs(rng)
         lowered = None
         func = self.func
         if jit:
@@ -132,8 +155,9 @@ class OperationTestConfig:
     def evaluate_grad(self, argnum: int, jit: bool) -> tuple[jnp.ndarray]:
         """Evaluate the gradient of the operation. If the operation returns a tuple of
         values, gradients are evaluated for each element."""
-        args = self.get_args()
-        kwargs = self.get_kwargs()
+        rng = numpy.random.default_rng(self.seed)
+        args = self.get_args(rng)
+        kwargs = self.get_kwargs(rng)
 
         func = self.func
         result = func(*args, **kwargs)
@@ -180,12 +204,3 @@ class OperationTestConfig:
                     STABLEHLO_OP_RE.findall(stablehlo_text)
                 )
         return tuple(grad_vals)
-
-
-def complex_standard_normal(shape: tuple[int, ...], complex: bool) -> numpy.ndarray:
-    if complex:
-        return numpy.random.standard_normal(shape) + 1j * numpy.random.standard_normal(
-            shape
-        )
-    else:
-        return numpy.random.standard_normal(shape)

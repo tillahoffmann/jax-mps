@@ -1,4 +1,3 @@
-import numpy
 from jax import numpy as jnp
 
 from .util import OperationTestConfig, complex_standard_normal
@@ -13,12 +12,16 @@ def make_reduction_op_configs():
                 yield from [
                     OperationTestConfig(
                         reduction,
-                        complex_standard_normal((4, 5), complex),
+                        lambda rng, complex=complex: complex_standard_normal(
+                            rng, (4, 5), complex
+                        ),
                     ),
                     # Explicit argument because capture doesn't work.
                     OperationTestConfig(
                         lambda x, reduction=reduction: reduction(x, axis=1),
-                        complex_standard_normal((4, 5), complex),
+                        lambda rng, complex=complex: complex_standard_normal(
+                            rng, (4, 5), complex
+                        ),
                     ),
                 ]
 
@@ -26,12 +29,12 @@ def make_reduction_op_configs():
             yield from [
                 OperationTestConfig(
                     lambda x: jnp.max(x, axis=0),
-                    numpy.random.standard_normal((4, 5)),
+                    lambda rng: rng.standard_normal((4, 5)),
                     differentiable_argnums=(),
                 ),
                 OperationTestConfig(
                     lambda x: jnp.min(x, axis=-1),
-                    numpy.random.standard_normal((4, 5)),
+                    lambda rng: rng.standard_normal((4, 5)),
                     differentiable_argnums=(),
                 ),
             ]
