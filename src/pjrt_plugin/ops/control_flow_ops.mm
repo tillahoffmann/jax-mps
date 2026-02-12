@@ -1,6 +1,6 @@
-#import "pjrt_plugin/ops/control_flow_ops.h"
+// Control flow operations: while, case
 
-#include "stablehlo/dialect/StablehloOps.h"
+#import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
 
@@ -22,7 +22,8 @@ MPSGraphTensor* EvaluateWhileCond(MPSGraph* graph, mlir::Block& condBlock, const
     ValueMap condValues = values;
     BindBlockArguments(condBlock, inputTensors, condValues);
 
-    ProcessResult condResult = processBlock(graph, condBlock, condValues, module, depth + 1);
+    HandlerContext condCtx(graph, nullptr, condValues, module, depth + 1, processBlock);
+    ProcessResult condResult = processBlock(condCtx, condBlock);
     if (!condResult.ok() || condResult.return_values.empty()) {
         *blockError = condResult.ok() ? "while cond returned no predicate" : condResult.error;
         [resultTensors addObjectsFromArray:inputTensors];
@@ -47,7 +48,8 @@ NSArray<MPSGraphTensor*>* EvaluateWhileBody(MPSGraph* graph, mlir::Block& bodyBl
     ValueMap bodyValues = values;
     BindBlockArguments(bodyBlock, bodyArgs, bodyValues);
 
-    ProcessResult bodyResult = processBlock(graph, bodyBlock, bodyValues, module, depth + 1);
+    HandlerContext bodyCtx(graph, nullptr, bodyValues, module, depth + 1, processBlock);
+    ProcessResult bodyResult = processBlock(bodyCtx, bodyBlock);
     if (!bodyResult.ok()) {
         *blockError = bodyResult.error;
         return bodyArgs;
@@ -67,20 +69,19 @@ NSArray<MPSGraphTensor*>* EvaluateWhileBody(MPSGraph* graph, mlir::Block& bodyBl
 
 }  // namespace
 
-ProcessResult HandleWhileOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values,
-                            mlir::ModuleOp module, int depth, BlockProcessor processBlock) {
-    auto whileOp = mlir::dyn_cast<mlir::stablehlo::WhileOp>(op);
+static ProcessResult HandleWhileOp(HandlerContext& ctx) {
+    auto whileOp = mlir::dyn_cast<mlir::stablehlo::WhileOp>(ctx.op);
     if (!whileOp) {
         return ProcessResult::Error("Expected stablehlo.while operation");
     }
 
-    if (depth > 100) {
+    if (ctx.depth > 100) {
         return ProcessResult::Error("Maximum call depth exceeded - possible recursive while");
     }
 
     NSMutableArray<MPSGraphTensor*>* initialInputs = [NSMutableArray array];
     for (mlir::Value operand : whileOp->getOperands()) {
-        MPSGraphTensor* t = GetTensor(values, operand);
+        MPSGraphTensor* t = GetTensor(ctx.values, operand);
         if (!t)
             return ProcessResult::Error("While operand tensor not found");
         [initialInputs addObject:t];
@@ -91,6 +92,13 @@ ProcessResult HandleWhileOp(MPSGraph* graph, mlir::Operation* op, ValueMap& valu
     }
     mlir::Block& condBlock = whileOp.getCond().front();
     mlir::Block& bodyBlock = whileOp.getBody().front();
+
+    // Capture context for use in blocks
+    MPSGraph* graph = ctx.graph;
+    ValueMap& values = ctx.values;
+    mlir::ModuleOp module = ctx.module;
+    int depth = ctx.depth;
+    BlockProcessor processBlock = ctx.processBlock;
 
     __block std::string blockError;
 
@@ -115,35 +123,34 @@ ProcessResult HandleWhileOp(MPSGraph* graph, mlir::Operation* op, ValueMap& valu
     }
 
     for (NSUInteger i = 0; i < outputs.count; ++i) {
-        values[whileOp->getResult(i).getAsOpaquePointer()] = outputs[i];
+        ctx.values[whileOp->getResult(i).getAsOpaquePointer()] = outputs[i];
     }
     return ProcessResult{};
 }
 
-ProcessResult HandleCaseOp(MPSGraph* graph, mlir::Operation* op, ValueMap& values,
-                           mlir::ModuleOp module, int depth, BlockProcessor processBlock) {
-    if (depth > 100) {
+static ProcessResult HandleCaseOp(HandlerContext& ctx) {
+    if (ctx.depth > 100) {
         return ProcessResult::Error("Maximum call depth exceeded - possible recursive case");
     }
-    if (op->getNumOperands() < 1) {
+    if (ctx.op->getNumOperands() < 1) {
         return ProcessResult::Error("stablehlo.case requires selector operand");
     }
-    if (op->getNumRegions() < 1) {
+    if (ctx.op->getNumRegions() < 1) {
         return ProcessResult::Error("stablehlo.case requires at least one branch region");
     }
 
-    MPSGraphTensor* selector = GetTensor(values, op->getOperand(0));
+    MPSGraphTensor* selector = GetTensor(ctx.values, ctx.op->getOperand(0));
     if (!selector) {
         return ProcessResult::Error("stablehlo.case selector tensor not found");
     }
 
-    const size_t numResults = op->getNumResults();
-    const size_t numBranches = op->getNumRegions();
-    const size_t numBranchOperands = op->getNumOperands() - 1;
+    const size_t numResults = ctx.op->getNumResults();
+    const size_t numBranches = ctx.op->getNumRegions();
+    const size_t numBranchOperands = ctx.op->getNumOperands() - 1;
 
     std::vector<std::vector<MPSGraphTensor*>> branchOutputs(numBranches);
     for (size_t b = 0; b < numBranches; ++b) {
-        mlir::Region& region = op->getRegion((unsigned)b);
+        mlir::Region& region = ctx.op->getRegion((unsigned)b);
         if (region.empty()) {
             return ProcessResult::Error("stablehlo.case branch region is empty");
         }
@@ -154,17 +161,19 @@ ProcessResult HandleCaseOp(MPSGraph* graph, mlir::Operation* op, ValueMap& value
                 "stablehlo.case branch expects more operands than provided");
         }
 
-        ValueMap branchValues = values;
+        ValueMap branchValues = ctx.values;
         for (size_t i = 0; i < block.getNumArguments(); ++i) {
-            mlir::Value branchOperand = op->getOperand(1 + i);
-            MPSGraphTensor* argTensor = GetTensor(values, branchOperand);
+            mlir::Value branchOperand = ctx.op->getOperand(1 + i);
+            MPSGraphTensor* argTensor = GetTensor(ctx.values, branchOperand);
             if (!argTensor) {
                 return ProcessResult::Error("stablehlo.case branch operand tensor not found");
             }
             branchValues[block.getArgument((unsigned)i).getAsOpaquePointer()] = argTensor;
         }
 
-        ProcessResult branchResult = processBlock(graph, block, branchValues, module, depth + 1);
+        HandlerContext branchCtx(ctx.graph, nullptr, branchValues, ctx.module, ctx.depth + 1,
+                                 ctx.processBlock);
+        ProcessResult branchResult = ctx.processBlock(branchCtx, block);
         if (!branchResult.ok()) {
             return branchResult;
         }
@@ -185,31 +194,25 @@ ProcessResult HandleCaseOp(MPSGraph* graph, mlir::Operation* op, ValueMap& value
     for (size_t r = 0; r < numResults; ++r) {
         MPSGraphTensor* selected = branchOutputs[numBranches - 1][r];
         for (size_t i = numBranches - 1; i > 0; --i) {
-            MPSGraphTensor* branchIndex = [graph constantWithScalar:static_cast<double>(i - 1)
-                                                           dataType:selector.dataType];
-            MPSGraphTensor* pred = [graph equalWithPrimaryTensor:selector
-                                                 secondaryTensor:branchIndex
-                                                            name:nil];
-            selected = [graph selectWithPredicateTensor:pred
-                                    truePredicateTensor:branchOutputs[i - 1][r]
-                                   falsePredicateTensor:selected
-                                                   name:nil];
+            MPSGraphTensor* branchIndex = [ctx.graph constantWithScalar:static_cast<double>(i - 1)
+                                                               dataType:selector.dataType];
+            MPSGraphTensor* pred = [ctx.graph equalWithPrimaryTensor:selector
+                                                     secondaryTensor:branchIndex
+                                                                name:nil];
+            selected = [ctx.graph selectWithPredicateTensor:pred
+                                        truePredicateTensor:branchOutputs[i - 1][r]
+                                       falsePredicateTensor:selected
+                                                       name:nil];
         }
-        values[op->getResult((unsigned)r).getAsOpaquePointer()] = selected;
+        ctx.values[ctx.op->getResult((unsigned)r).getAsOpaquePointer()] = selected;
     }
 
     return ProcessResult{};
 }
 
-bool IsControlFlowOp(const std::string& op_name) {
-    return op_name == "stablehlo.while" || op_name == "stablehlo.case";
-}
-
-// Register control flow ops as special ops in OpRegistry
-// This allows getSupportedOps() to find them without needing a separate registry
-// The actual dispatch happens in mps_executable.mm via HandleWhileOp/HandleCaseOp
-REGISTER_SPECIAL_MPS_OP("stablehlo.while", stablehlo_while);
-REGISTER_SPECIAL_MPS_OP("stablehlo.case", stablehlo_case);
+// Register control flow ops as regular GRAPH ops
+REGISTER_MPS_OP("stablehlo.while", HandleWhileOp);
+REGISTER_MPS_OP("stablehlo.case", HandleCaseOp);
 
 // Register stablehlo.custom_call so the parser accepts it
 // Actual dispatch happens in mps_executable.mm by looking up the target in CustomCallRegistry

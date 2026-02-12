@@ -13,7 +13,6 @@
 #import "pjrt_plugin/mps_buffer.h"
 #import "pjrt_plugin/mps_client.h"
 #import "pjrt_plugin/mps_device.h"
-#import "pjrt_plugin/ops/control_flow_ops.h"
 #import "pjrt_plugin/ops/registry.h"
 #import "pjrt_plugin/stablehlo_parser.h"
 
@@ -147,18 +146,21 @@ static const OpHandler* FindHandler(mlir::Operation* op,
 }
 
 // Forward declaration for recursive processing
-static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
-                                       mlir::ModuleOp module, int depth);
+static ProcessResult processOperations(HandlerContext& ctx, mlir::Block& block);
+
+// Adapter function for BlockProcessor signature
+static ProcessResult processOperationsAdapter(HandlerContext& ctx, mlir::Block& block) {
+    return processOperations(ctx, block);
+}
 
 // Process a func.call operation by looking up the callee and processing its body
-static ProcessResult processCallOp(MPSGraph* graph, mlir::func::CallOp callOp, ValueMap& values,
-                                   mlir::ModuleOp module, int depth) {
-    if (depth > 100) {
+static ProcessResult processCallOp(HandlerContext& ctx, mlir::func::CallOp callOp) {
+    if (ctx.depth > 100) {
         return ProcessResult::Error("Maximum call depth exceeded - possible recursive function");
     }
 
     // Look up the callee function
-    auto callee = module.lookupSymbol<mlir::func::FuncOp>(callOp.getCallee());
+    auto callee = ctx.module.lookupSymbol<mlir::func::FuncOp>(callOp.getCallee());
     if (!callee) {
         return ProcessResult::Error("Could not find callee function: " + callOp.getCallee().str());
     }
@@ -175,17 +177,19 @@ static ProcessResult processCallOp(MPSGraph* graph, mlir::func::CallOp callOp, V
         mlir::BlockArgument funcArg = calleeBlock.getArgument(i);
 
         // Get the tensor for the call argument
-        MPSGraphTensor* argTensor = GetTensor(values, callArg);
+        MPSGraphTensor* argTensor = GetTensor(ctx.values, callArg);
         if (!argTensor) {
             return ProcessResult::Error("Call argument " + std::to_string(i) + " not found");
         }
 
         // Map the function argument to the same tensor
-        values[funcArg.getAsOpaquePointer()] = argTensor;
+        ctx.values[funcArg.getAsOpaquePointer()] = argTensor;
     }
 
     // Process the callee function's body
-    ProcessResult calleeResult = processOperations(graph, calleeBlock, values, module, depth + 1);
+    HandlerContext calleeCtx(ctx.graph, nullptr, ctx.values, ctx.module, ctx.depth + 1,
+                             processOperationsAdapter);
+    ProcessResult calleeResult = processOperations(calleeCtx, calleeBlock);
     if (!calleeResult.ok()) {
         return calleeResult;
     }
@@ -193,20 +197,19 @@ static ProcessResult processCallOp(MPSGraph* graph, mlir::func::CallOp callOp, V
     // Map return values back to call results
     for (size_t i = 0; i < callOp.getNumResults() && i < calleeResult.return_values.size(); i++) {
         mlir::Value returnValue = calleeResult.return_values[i];
-        MPSGraphTensor* returnTensor = GetTensor(values, returnValue);
+        MPSGraphTensor* returnTensor = GetTensor(ctx.values, returnValue);
         if (!returnTensor) {
             return ProcessResult::Error("Return value " + std::to_string(i) +
                                         " not found in callee");
         }
-        values[callOp.getResult(i).getAsOpaquePointer()] = returnTensor;
+        ctx.values[callOp.getResult(i).getAsOpaquePointer()] = returnTensor;
     }
 
     return ProcessResult{};
 }
 
 // Process operations in a block, handling func.call recursively
-static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, ValueMap& values,
-                                       mlir::ModuleOp module, int depth) {
+static ProcessResult processOperations(HandlerContext& ctx, mlir::Block& block) {
     ProcessResult result;
 
     for (mlir::Operation& operation : block) {
@@ -224,23 +227,10 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
 
         // Handle func.call - process the callee function recursively
         if (auto callOp = mlir::dyn_cast<mlir::func::CallOp>(op)) {
-            ProcessResult callResult = processCallOp(graph, callOp, values, module, depth);
+            ProcessResult callResult = processCallOp(ctx, callOp);
             if (!callResult.ok()) {
                 return callResult;
             }
-            continue;
-        }
-
-        // Check for control flow ops (stablehlo.while, stablehlo.case)
-        if (IsControlFlowOp(op_name)) {
-            ProcessResult cfResult;
-            if (op_name == "stablehlo.while") {
-                cfResult = HandleWhileOp(graph, op, values, module, depth, processOperations);
-            } else {
-                cfResult = HandleCaseOp(graph, op, values, module, depth, processOperations);
-            }
-            if (!cfResult.ok())
-                return cfResult;
             continue;
         }
 
@@ -266,8 +256,10 @@ static ProcessResult processOperations(MPSGraph* graph, mlir::Block& block, Valu
                                         "this should have been handled by segmented execution");
         }
 
-        // Execute the graph handler - it sets outputs in values map and returns ProcessResult
-        ProcessResult opResult = handler->graph_handler(graph, op, values);
+        // Create op context and call handler
+        HandlerContext opCtx(ctx.graph, op, ctx.values, ctx.module, ctx.depth,
+                             processOperationsAdapter);
+        ProcessResult opResult = handler->graph_handler(opCtx);
         if (!opResult.ok())
             return opResult;
     }
@@ -644,27 +636,11 @@ bool MpsExecutable::BuildExecutionPlan() {
                                       op_name.c_str());
 
                         if (auto callOp = mlir::dyn_cast<mlir::func::CallOp>(op)) {
-                            ProcessResult callResult =
-                                processCallOp(graph, callOp, values, *module_, 0);
+                            HandlerContext callCtx(graph, op, values, *module_, 0,
+                                                   processOperationsAdapter);
+                            ProcessResult callResult = processCallOp(callCtx, callOp);
                             if (!callResult.ok()) {
                                 error_ = callResult.error;
-                                return false;
-                            }
-                            continue;
-                        }
-
-                        // Handle control flow ops
-                        if (IsControlFlowOp(op_name)) {
-                            ProcessResult cfResult;
-                            if (op_name == "stablehlo.while") {
-                                cfResult = HandleWhileOp(graph, op, values, *module_, 0,
-                                                         processOperations);
-                            } else {
-                                cfResult =
-                                    HandleCaseOp(graph, op, values, *module_, 0, processOperations);
-                            }
-                            if (!cfResult.ok()) {
-                                error_ = cfResult.error;
                                 return false;
                             }
                             continue;
@@ -684,7 +660,10 @@ bool MpsExecutable::BuildExecutionPlan() {
                             return false;
                         }
 
-                        ProcessResult opResult = handler->graph_handler(graph, op, values);
+                        // Create op context and call handler
+                        HandlerContext opCtx(graph, op, values, *module_, 0,
+                                             processOperationsAdapter);
+                        ProcessResult opResult = handler->graph_handler(opCtx);
                         if (!opResult.ok()) {
                             error_ = opResult.error;
                             return false;

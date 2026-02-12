@@ -5,24 +5,24 @@
 
 namespace jax_mps {
 
-static ProcessResult HandleBroadcast(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+static ProcessResult HandleBroadcast(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("broadcast: missing input tensor");
-    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
-    MPSGraphTensor* result = [g broadcastTensor:input toShape:outputShape name:nil];
-    return Result(values, op, result, "broadcast");
+    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
+    MPSGraphTensor* result = [ctx.graph broadcastTensor:input toShape:outputShape name:nil];
+    return Result(ctx, result, "broadcast");
 }
 REGISTER_MPS_OP("stablehlo.broadcast", HandleBroadcast);
 
 // broadcast_in_dim needs special handling for dimension mapping
-static ProcessResult HandleBroadcastInDim(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto broadcastOp = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(op);
+static ProcessResult HandleBroadcastInDim(HandlerContext& ctx) {
+    auto broadcastOp = mlir::dyn_cast<mlir::stablehlo::BroadcastInDimOp>(ctx.op);
     if (!broadcastOp) {
         return ProcessResult::Error("broadcast_in_dim: expected BroadcastInDimOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input) {
         return ProcessResult::Error("broadcast_in_dim: input tensor not found");
     }
@@ -30,7 +30,7 @@ static ProcessResult HandleBroadcastInDim(MPSGraph* g, mlir::Operation* op, Valu
     NSArray<NSNumber*>* inputShape = input.shape;
     NSUInteger inputRank = inputShape.count;
 
-    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
+    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
     NSUInteger outputRank = outputShape.count;
 
     auto broadcastDims = broadcastOp.getBroadcastDimensions();
@@ -39,7 +39,7 @@ static ProcessResult HandleBroadcastInDim(MPSGraph* g, mlir::Operation* op, Valu
 
     // If broadcast_dims is empty or ranks match, just broadcast directly
     if (broadcastDims.empty() || inputRank == outputRank) {
-        result = [g broadcastTensor:input toShape:outputShape name:nil];
+        result = [ctx.graph broadcastTensor:input toShape:outputShape name:nil];
     } else {
         // Build intermediate shape: start with all 1s, then fill in from broadcast_dims
         NSMutableArray<NSNumber*>* intermediateShape =
@@ -57,33 +57,35 @@ static ProcessResult HandleBroadcastInDim(MPSGraph* g, mlir::Operation* op, Valu
         }
 
         // Reshape input to intermediate shape (same rank as output)
-        MPSGraphTensor* reshaped = [g reshapeTensor:input withShape:intermediateShape name:nil];
+        MPSGraphTensor* reshaped = [ctx.graph reshapeTensor:input
+                                                  withShape:intermediateShape
+                                                       name:nil];
 
         // Now broadcast to final output shape
-        result = [g broadcastTensor:reshaped toShape:outputShape name:nil];
+        result = [ctx.graph broadcastTensor:reshaped toShape:outputShape name:nil];
     }
 
-    return Result(values, op, result, "broadcast_in_dim");
+    return Result(ctx, result, "broadcast_in_dim");
 }
 REGISTER_MPS_OP("stablehlo.broadcast_in_dim", HandleBroadcastInDim);
 
-static ProcessResult HandleReshape(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+static ProcessResult HandleReshape(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("reshape: missing input tensor");
-    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
-    MPSGraphTensor* result = [g reshapeTensor:input withShape:outputShape name:nil];
-    return Result(values, op, result, "reshape");
+    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
+    MPSGraphTensor* result = [ctx.graph reshapeTensor:input withShape:outputShape name:nil];
+    return Result(ctx, result, "reshape");
 }
 REGISTER_MPS_OP("stablehlo.reshape", HandleReshape);
 
-static ProcessResult HandleTranspose(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op);
+static ProcessResult HandleTranspose(HandlerContext& ctx) {
+    auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(ctx.op);
     if (!transposeOp) {
         return ProcessResult::Error("transpose: expected TransposeOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("transpose: missing input tensor");
 
@@ -93,33 +95,33 @@ static ProcessResult HandleTranspose(MPSGraph* g, mlir::Operation* op, ValueMap&
         [perm addObject:@(d)];
     }
 
-    MPSGraphTensor* result = [g transposeTensor:input permutation:perm name:nil];
-    return Result(values, op, result, "transpose");
+    MPSGraphTensor* result = [ctx.graph transposeTensor:input permutation:perm name:nil];
+    return Result(ctx, result, "transpose");
 }
 REGISTER_MPS_OP("stablehlo.transpose", HandleTranspose);
 
-static ProcessResult HandleConvert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+static ProcessResult HandleConvert(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("convert: missing input tensor");
 
-    MPSDataType dtype = GetResultMpsType(op);
+    MPSDataType dtype = GetResultMpsType(ctx.op);
     if (dtype == MPSDataTypeInvalid) {
         return ProcessResult::Error("convert: invalid dtype for convert operation");
     }
-    MPSGraphTensor* result = [g castTensor:input toType:dtype name:nil];
-    return Result(values, op, result, "convert");
+    MPSGraphTensor* result = [ctx.graph castTensor:input toType:dtype name:nil];
+    return Result(ctx, result, "convert");
 }
 REGISTER_MPS_OP("stablehlo.convert", HandleConvert);
 
 // Slice - extract a portion of a tensor (static indices)
-static ProcessResult HandleSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op);
+static ProcessResult HandleSlice(HandlerContext& ctx) {
+    auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(ctx.op);
     if (!sliceOp) {
         return ProcessResult::Error("slice: expected SliceOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("slice: missing input tensor");
 
@@ -137,19 +139,23 @@ static ProcessResult HandleSlice(MPSGraph* g, mlir::Operation* op, ValueMap& val
         [strides addObject:@(s)];
     }
 
-    MPSGraphTensor* result = [g sliceTensor:input starts:starts ends:ends strides:strides name:nil];
-    return Result(values, op, result, "slice");
+    MPSGraphTensor* result = [ctx.graph sliceTensor:input
+                                             starts:starts
+                                               ends:ends
+                                            strides:strides
+                                               name:nil];
+    return Result(ctx, result, "slice");
 }
 REGISTER_MPS_OP("stablehlo.slice", HandleSlice);
 
 // Dynamic slice - extract a portion using runtime indices
-static ProcessResult HandleDynamicSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto dynSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op);
+static ProcessResult HandleDynamicSlice(HandlerContext& ctx) {
+    auto dynSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(ctx.op);
     if (!dynSliceOp) {
         return ProcessResult::Error("dynamic_slice: expected DynamicSliceOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("dynamic_slice: missing input tensor");
 
@@ -167,48 +173,48 @@ static ProcessResult HandleDynamicSlice(MPSGraph* g, mlir::Operation* op, ValueM
     NSMutableArray<MPSGraphTensor*>* indexTensors = [NSMutableArray array];
     for (NSUInteger dim = 0; dim < rank; dim++) {
         // Get the start index tensor for this dimension (scalar tensor)
-        MPSGraphTensor* startIdx = GetInputTensor(values, op, dim + 1);
+        MPSGraphTensor* startIdx = GetInputTensor(ctx, dim + 1);
         if (!startIdx) {
             return ProcessResult::Error("dynamic_slice: missing start index for dimension");
         }
 
         // Create coordinate tensor for this dimension (0, 1, 2, ..., slice_size-1)
-        MPSGraphTensor* coords = [g coordinateAlongAxis:(NSInteger)dim
-                                              withShape:outputShape
-                                                   name:nil];
+        MPSGraphTensor* coords = [ctx.graph coordinateAlongAxis:(NSInteger)dim
+                                                      withShape:outputShape
+                                                           name:nil];
 
         // Cast coordinates to match start index type for addition
-        coords = [g castTensor:coords toType:startIdx.dataType name:nil];
+        coords = [ctx.graph castTensor:coords toType:startIdx.dataType name:nil];
 
         // Add start index to coordinates (broadcasts the scalar start index)
-        MPSGraphTensor* adjustedCoords = [g additionWithPrimaryTensor:coords
-                                                      secondaryTensor:startIdx
-                                                                 name:nil];
+        MPSGraphTensor* adjustedCoords = [ctx.graph additionWithPrimaryTensor:coords
+                                                              secondaryTensor:startIdx
+                                                                         name:nil];
 
         [indexTensors addObject:adjustedCoords];
     }
 
     // Stack the coordinate tensors along a new last axis to form indices tensor
     // Shape: [slice_size_0, slice_size_1, ..., rank]
-    MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
+    MPSGraphTensor* indices = [ctx.graph stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
     // Use gatherND to gather the slice from the input tensor
     // batchDimensions: 0 means no batch dimensions
-    MPSGraphTensor* result = [g gatherNDWithUpdatesTensor:input
-                                            indicesTensor:indices
-                                          batchDimensions:0
-                                                     name:nil];
-    return Result(values, op, result, "dynamic_slice");
+    MPSGraphTensor* result = [ctx.graph gatherNDWithUpdatesTensor:input
+                                                    indicesTensor:indices
+                                                  batchDimensions:0
+                                                             name:nil];
+    return Result(ctx, result, "dynamic_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", HandleDynamicSlice);
 
 // Bitcast convert - reinterpret bits as a different type
-static ProcessResult HandleBitcastConvert(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+static ProcessResult HandleBitcastConvert(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("bitcast_convert: missing input tensor");
 
-    MPSDataType dtype = GetResultMpsType(op);
+    MPSDataType dtype = GetResultMpsType(ctx.op);
     if (dtype == MPSDataTypeInvalid) {
         return ProcessResult::Error("bitcast_convert: invalid dtype");
     }
@@ -220,32 +226,32 @@ static ProcessResult HandleBitcastConvert(MPSGraph* g, mlir::Operation* op, Valu
 
     if (isScalar) {
         // Reshape scalar to [1]
-        input = [g reshapeTensor:input withShape:@[@1] name:nil];
+        input = [ctx.graph reshapeTensor:input withShape:@[@1] name:nil];
     }
 
     // Use reinterpretCast which preserves bit patterns
-    MPSGraphTensor* result = [g reinterpretCastTensor:input toType:dtype name:nil];
+    MPSGraphTensor* result = [ctx.graph reinterpretCastTensor:input toType:dtype name:nil];
 
     if (isScalar) {
         // Reshape back to scalar
-        result = [g reshapeTensor:result withShape:@[] name:nil];
+        result = [ctx.graph reshapeTensor:result withShape:@[] name:nil];
     }
 
-    return Result(values, op, result, "bitcast_convert");
+    return Result(ctx, result, "bitcast_convert");
 }
 REGISTER_MPS_OP("stablehlo.bitcast_convert", HandleBitcastConvert);
 
 // Concatenate - joins tensors along a dimension
-static ProcessResult HandleConcatenate(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op);
+static ProcessResult HandleConcatenate(HandlerContext& ctx) {
+    auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(ctx.op);
     if (!concatOp) {
         return ProcessResult::Error("concatenate: expected ConcatenateOp");
     }
 
     // Gather all input tensors
     NSMutableArray<MPSGraphTensor*>* input_tensors = [NSMutableArray array];
-    for (mlir::Value operand : op->getOperands()) {
-        MPSGraphTensor* tensor = GetTensor(values, operand);
+    for (mlir::Value operand : ctx.op->getOperands()) {
+        MPSGraphTensor* tensor = GetTensor(ctx.values, operand);
         if (tensor) {
             [input_tensors addObject:tensor];
         }
@@ -258,30 +264,30 @@ static ProcessResult HandleConcatenate(MPSGraph* g, mlir::Operation* op, ValueMa
     // Get the concatenate dimension from the op
     NSInteger dimension = static_cast<NSInteger>(concatOp.getDimension());
 
-    MPSGraphTensor* result = [g concatTensors:input_tensors dimension:dimension name:nil];
-    return Result(values, op, result, "concatenate");
+    MPSGraphTensor* result = [ctx.graph concatTensors:input_tensors dimension:dimension name:nil];
+    return Result(ctx, result, "concatenate");
 }
 REGISTER_MPS_OP("stablehlo.concatenate", HandleConcatenate);
 
 // Sharding is a marker used by JAX for partitioning - just pass through the input
-static ProcessResult HandleSharding(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+static ProcessResult HandleSharding(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("sharding: missing input tensor");
-    SetOutputTensor(values, op, input);
+    SetOutputTensor(ctx.values, ctx.op, input);
     return ProcessResult{};
 }
 REGISTER_CUSTOM_CALL("Sharding", HandleSharding, sharding);
 
 // Pad - add padding around tensor
-static ProcessResult HandlePad(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(op);
+static ProcessResult HandlePad(HandlerContext& ctx) {
+    auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(ctx.op);
     if (!padOp) {
         return ProcessResult::Error("pad: expected PadOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPSGraphTensor* paddingValue = GetInputTensor(values, op, 1);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
+    MPSGraphTensor* paddingValue = GetInputTensor(ctx, 1);
     if (!input || !paddingValue)
         return ProcessResult::Error("pad: missing input tensor");
 
@@ -302,8 +308,8 @@ static ProcessResult HandlePad(MPSGraph* g, mlir::Operation* op, ValueMap& value
     }
 
     // Get output shape and create a tensor filled with padding value
-    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
-    MPSGraphTensor* padded = [g broadcastTensor:paddingValue toShape:outputShape name:nil];
+    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
+    MPSGraphTensor* padded = [ctx.graph broadcastTensor:paddingValue toShape:outputShape name:nil];
 
     // Calculate starts and ends for sliceUpdate (where to place the input)
     NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
@@ -320,25 +326,25 @@ static ProcessResult HandlePad(MPSGraph* g, mlir::Operation* op, ValueMap& value
     }
 
     // Use sliceUpdateDataTensor to insert input into the padded tensor
-    MPSGraphTensor* result = [g sliceUpdateDataTensor:padded
-                                         updateTensor:input
-                                               starts:starts
-                                                 ends:ends
-                                              strides:strides
-                                                 name:nil];
-    return Result(values, op, result, "pad");
+    MPSGraphTensor* result = [ctx.graph sliceUpdateDataTensor:padded
+                                                 updateTensor:input
+                                                       starts:starts
+                                                         ends:ends
+                                                      strides:strides
+                                                         name:nil];
+    return Result(ctx, result, "pad");
 }
 REGISTER_MPS_OP("stablehlo.pad", HandlePad);
 
 // Dynamic update slice - update a portion of a tensor with new values
-static ProcessResult HandleDynamicUpdateSlice(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto updateSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op);
+static ProcessResult HandleDynamicUpdateSlice(HandlerContext& ctx) {
+    auto updateSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(ctx.op);
     if (!updateSliceOp) {
         return ProcessResult::Error("dynamic_update_slice: expected DynamicUpdateSliceOp");
     }
 
-    MPSGraphTensor* operand = GetInputTensor(values, op, 0);
-    MPSGraphTensor* update = GetInputTensor(values, op, 1);
+    MPSGraphTensor* operand = GetInputTensor(ctx, 0);
+    MPSGraphTensor* update = GetInputTensor(ctx, 1);
     if (!operand || !update)
         return ProcessResult::Error("dynamic_update_slice: missing input tensor");
 
@@ -348,7 +354,7 @@ static ProcessResult HandleDynamicUpdateSlice(MPSGraph* g, mlir::Operation* op, 
     // Get start indices (operands 2 through N)
     NSMutableArray<MPSGraphTensor*>* startIndices = [NSMutableArray array];
     for (NSUInteger i = 0; i < rank; i++) {
-        MPSGraphTensor* startIdx = GetInputTensor(values, op, i + 2);
+        MPSGraphTensor* startIdx = GetInputTensor(ctx, i + 2);
         if (!startIdx) {
             return ProcessResult::Error("dynamic_update_slice: missing start index");
         }
@@ -365,48 +371,48 @@ static ProcessResult HandleDynamicUpdateSlice(MPSGraph* g, mlir::Operation* op, 
         MPSGraphTensor* startIdx = startIndices[dim];
 
         // Create coordinate tensor for this dimension (0, 1, 2, ..., update_size-1)
-        MPSGraphTensor* coords = [g coordinateAlongAxis:(NSInteger)dim
-                                              withShape:updateShape
-                                                   name:nil];
+        MPSGraphTensor* coords = [ctx.graph coordinateAlongAxis:(NSInteger)dim
+                                                      withShape:updateShape
+                                                           name:nil];
 
         // Cast coordinates to match start index type
-        coords = [g castTensor:coords toType:startIdx.dataType name:nil];
+        coords = [ctx.graph castTensor:coords toType:startIdx.dataType name:nil];
 
         // Add start index to coordinates
-        MPSGraphTensor* adjustedCoords = [g additionWithPrimaryTensor:coords
-                                                      secondaryTensor:startIdx
-                                                                 name:nil];
+        MPSGraphTensor* adjustedCoords = [ctx.graph additionWithPrimaryTensor:coords
+                                                              secondaryTensor:startIdx
+                                                                         name:nil];
 
         [indexTensors addObject:adjustedCoords];
     }
 
     // Stack the coordinate tensors along a new last axis to form indices tensor
-    MPSGraphTensor* indices = [g stackTensors:indexTensors axis:(NSInteger)rank name:nil];
+    MPSGraphTensor* indices = [ctx.graph stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
     // Cast indices to int32 if needed
-    indices = EnsureInt32(g, indices);
+    indices = EnsureInt32(ctx.graph, indices);
 
     // Use scatterND to update the operand at the specified indices
-    MPSGraphTensor* result = [g scatterNDWithDataTensor:operand
-                                          updatesTensor:update
-                                          indicesTensor:indices
-                                        batchDimensions:0
-                                                   mode:MPSGraphScatterModeSet
-                                                   name:nil];
-    return Result(values, op, result, "dynamic_update_slice");
+    MPSGraphTensor* result = [ctx.graph scatterNDWithDataTensor:operand
+                                                  updatesTensor:update
+                                                  indicesTensor:indices
+                                                batchDimensions:0
+                                                           mode:MPSGraphScatterModeSet
+                                                           name:nil];
+    return Result(ctx, result, "dynamic_update_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_update_slice", HandleDynamicUpdateSlice);
 
 // Gather - generalized indexing operation
 // Handles embedding lookups and other gather patterns
-static ProcessResult HandleGather(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto gatherOp = mlir::dyn_cast<mlir::stablehlo::GatherOp>(op);
+static ProcessResult HandleGather(HandlerContext& ctx) {
+    auto gatherOp = mlir::dyn_cast<mlir::stablehlo::GatherOp>(ctx.op);
     if (!gatherOp) {
         return ProcessResult::Error("gather: expected GatherOp");
     }
 
-    MPSGraphTensor* operand = GetInputTensor(values, op, 0);
-    MPSGraphTensor* startIndices = GetInputTensor(values, op, 1);
+    MPSGraphTensor* operand = GetInputTensor(ctx, 0);
+    MPSGraphTensor* startIndices = GetInputTensor(ctx, 1);
     if (!operand || !startIndices)
         return ProcessResult::Error("gather: missing input tensor");
 
@@ -439,24 +445,24 @@ static ProcessResult HandleGather(MPSGraph* g, mlir::Operation* op, ValueMap& va
             [squeezedShape addObject:indicesShape[i]];
         }
 
-        MPSGraphTensor* squeezedIndices = [g reshapeTensor:startIndices
-                                                 withShape:squeezedShape
-                                                      name:nil];
+        MPSGraphTensor* squeezedIndices = [ctx.graph reshapeTensor:startIndices
+                                                         withShape:squeezedShape
+                                                              name:nil];
 
         // Cast indices to int32 if needed (MPS gather requires int32)
-        squeezedIndices = EnsureInt32(g, squeezedIndices);
+        squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
         // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
         // This gathers slices from operand along the specified axis using indices
         // Result shape: indices.shape + operand.shape[axis+1:]
         // For embedding [100, 5] with indices [3]: result is [3, 5]
-        MPSGraphTensor* result = [g gatherWithUpdatesTensor:operand
-                                              indicesTensor:squeezedIndices
-                                                       axis:(NSUInteger)gatherAxis
-                                            batchDimensions:0
-                                                       name:nil];
+        MPSGraphTensor* result = [ctx.graph gatherWithUpdatesTensor:operand
+                                                      indicesTensor:squeezedIndices
+                                                               axis:(NSUInteger)gatherAxis
+                                                    batchDimensions:0
+                                                               name:nil];
 
-        return Result(values, op, result, "gather");
+        return Result(ctx, result, "gather");
     }
 
     // For now, log unsupported patterns
@@ -491,16 +497,16 @@ static MPSGraphScatterMode GetScatterMode(mlir::stablehlo::ScatterOp scatterOp) 
 
 // Scatter - update tensor at specified indices
 // This handles the common pattern used by gather gradients
-static ProcessResult HandleScatter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
+static ProcessResult HandleScatter(HandlerContext& ctx) {
+    auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(ctx.op);
     if (!scatterOp) {
         return ProcessResult::Error("scatter: expected ScatterOp");
     }
 
     // Get inputs (may be variadic, but we handle single input case)
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPSGraphTensor* scatterIndices = GetInputTensor(values, op, 1);
-    MPSGraphTensor* updates = GetInputTensor(values, op, 2);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
+    MPSGraphTensor* scatterIndices = GetInputTensor(ctx, 1);
+    MPSGraphTensor* updates = GetInputTensor(ctx, 2);
     if (!input || !scatterIndices || !updates)
         return ProcessResult::Error("scatter: missing input tensor");
 
@@ -531,23 +537,23 @@ static ProcessResult HandleScatter(MPSGraph* g, mlir::Operation* op, ValueMap& v
         for (NSUInteger i = 0; i < indicesRank - 1; i++) {
             [squeezedShape addObject:indicesShape[i]];
         }
-        MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
-                                                 withShape:squeezedShape
-                                                      name:nil];
-        squeezedIndices = EnsureInt32(g, squeezedIndices);
+        MPSGraphTensor* squeezedIndices = [ctx.graph reshapeTensor:scatterIndices
+                                                         withShape:squeezedShape
+                                                              name:nil];
+        squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
         MPSGraphScatterMode mode = GetScatterMode(scatterOp);
 
         // Use scatterAlongAxis which handles batched scatter correctly:
         // For each position in updates, it scatters to the position given by indices at that
         // position
-        MPSGraphTensor* result = [g scatterAlongAxis:static_cast<NSInteger>(scatterAxis)
-                                      withDataTensor:input
-                                       updatesTensor:updates
-                                       indicesTensor:squeezedIndices
-                                                mode:mode
-                                                name:nil];
-        return Result(values, op, result, "scatter");
+        MPSGraphTensor* result = [ctx.graph scatterAlongAxis:static_cast<NSInteger>(scatterAxis)
+                                              withDataTensor:input
+                                               updatesTensor:updates
+                                               indicesTensor:squeezedIndices
+                                                        mode:mode
+                                                        name:nil];
+        return Result(ctx, result, "scatter");
     }
 
     // Handle common embedding gradient pattern (reverse of gather):
@@ -576,25 +582,26 @@ static ProcessResult HandleScatter(MPSGraph* g, mlir::Operation* op, ValueMap& v
         if (squeezedShape.count == 0)
             [squeezedShape addObject:@1];
 
-        MPSGraphTensor* squeezedIndices = [g reshapeTensor:scatterIndices
-                                                 withShape:squeezedShape
-                                                      name:nil];
-        squeezedIndices = EnsureInt32(g, squeezedIndices);
+        MPSGraphTensor* squeezedIndices = [ctx.graph reshapeTensor:scatterIndices
+                                                         withShape:squeezedShape
+                                                              name:nil];
+        squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
         MPSGraphScatterMode mode = GetScatterMode(scatterOp);
 
         // Ensure updates is at least rank 1 (MPS doesn't support scalar updates)
         if (updates.shape.count == 0)
-            updates = [g reshapeTensor:updates withShape:@[@1] name:nil];
+            updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
 
         // Use scatterWithDataTensor to scatter updates into input
-        MPSGraphTensor* result = [g scatterWithDataTensor:input
-                                            updatesTensor:updates
-                                            indicesTensor:squeezedIndices
-                                                     axis:static_cast<NSInteger>(scatterAxis)
-                                                     mode:mode
-                                                     name:nil];
-        return Result(values, op, result, "scatter");
+        MPSGraphTensor* result =
+            [ctx.graph scatterWithDataTensor:input
+                               updatesTensor:updates
+                               indicesTensor:squeezedIndices
+                                        axis:static_cast<NSInteger>(scatterAxis)
+                                        mode:mode
+                                        name:nil];
+        return Result(ctx, result, "scatter");
     }
 
     return ProcessResult::Error("scatter: unsupported scatter pattern");
@@ -602,13 +609,13 @@ static ProcessResult HandleScatter(MPSGraph* g, mlir::Operation* op, ValueMap& v
 REGISTER_MPS_OP("stablehlo.scatter", HandleScatter);
 
 // Reverse - reverse elements along specified dimensions
-static ProcessResult HandleReverse(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(op);
+static ProcessResult HandleReverse(HandlerContext& ctx) {
+    auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(ctx.op);
     if (!reverseOp) {
         return ProcessResult::Error("reverse: expected ReverseOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("reverse: missing input tensor");
 
@@ -618,8 +625,8 @@ static ProcessResult HandleReverse(MPSGraph* g, mlir::Operation* op, ValueMap& v
         [axes addObject:@(dim)];
     }
 
-    MPSGraphTensor* result = [g reverseTensor:input axes:axes name:nil];
-    return Result(values, op, result, "reverse");
+    MPSGraphTensor* result = [ctx.graph reverseTensor:input axes:axes name:nil];
+    return Result(ctx, result, "reverse");
 }
 REGISTER_MPS_OP("stablehlo.reverse", HandleReverse);
 

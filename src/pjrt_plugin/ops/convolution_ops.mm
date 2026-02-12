@@ -160,16 +160,19 @@ static MPSGraphTensor* convert2DOutputTo1D(MPSGraph* g, MPSGraphTensor* result, 
 // Handle stablehlo.convolution
 // StableHLO convolution is highly general - supports arbitrary dimension layouts,
 // dilations, padding, grouped convolutions, etc.
-static ProcessResult HandleConvolution(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
+static ProcessResult HandleConvolution(HandlerContext& ctx) {
+    auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(ctx.op);
     if (!convOp) {
         return ProcessResult::Error("convolution: expected ConvolutionOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
-    MPSGraphTensor* kernel = GetInputTensor(values, op, 1);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
+    MPSGraphTensor* kernel = GetInputTensor(ctx, 1);
     if (!input || !kernel)
         return ProcessResult::Error("convolution: missing input tensor");
+
+    MPSGraph* g = ctx.graph;
+    mlir::Operation* op = ctx.op;
 
     // Get dimension numbers
     auto dimNumbers = convOp.getDimensionNumbers();
@@ -328,7 +331,7 @@ static ProcessResult HandleConvolution(MPSGraph* g, mlir::Operation* op, ValueMa
         }
     }
 
-    return Result(values, op, result, "convolution");
+    return Result(ctx, result, "convolution");
 }
 REGISTER_MPS_OP("stablehlo.convolution", HandleConvolution);
 

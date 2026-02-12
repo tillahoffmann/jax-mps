@@ -5,18 +5,18 @@
 namespace jax_mps {
 
 // Constant creation - creates a constant tensor from MLIR constant op
-static ProcessResult HandleConstant(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(op);
+static ProcessResult HandleConstant(HandlerContext& ctx) {
+    auto constantOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(ctx.op);
     if (!constantOp) {
         return ProcessResult::Error("constant: expected ConstantOp");
     }
 
-    MPSDataType dtype = GetResultMpsType(op);
+    MPSDataType dtype = GetResultMpsType(ctx.op);
     if (dtype == MPSDataTypeInvalid) {
         return ProcessResult::Error("constant: invalid dtype");
     }
 
-    NSArray<NSNumber*>* shape = GetOutputShape(op);
+    NSArray<NSNumber*>* shape = GetOutputShape(ctx.op);
     auto value = constantOp.getValue();
 
     // Check for empty tensor (any dimension is 0)
@@ -33,8 +33,8 @@ static ProcessResult HandleConstant(MPSGraph* g, mlir::Operation* op, ValueMap& 
         // Create a minimal tensor with shape [1] and a dummy value
         // This is safe because operations that use this tensor will detect
         // empty dimensions from the MLIR types and not actually use the tensor values
-        MPSGraphTensor* result = [g constantWithScalar:0 shape:@[@1] dataType:dtype];
-        SetOutputTensor(values, op, result);
+        MPSGraphTensor* result = [ctx.graph constantWithScalar:0 shape:@[@1] dataType:dtype];
+        SetOutputTensor(ctx.values, ctx.op, result);
         return ProcessResult{};
     }
 
@@ -51,16 +51,16 @@ static ProcessResult HandleConstant(MPSGraph* g, mlir::Operation* op, ValueMap& 
                 double realPart = complexVal.real();
                 double imagPart = complexVal.imag();
                 if (shape.count == 0) {
-                    result = [g constantWithRealPart:realPart
-                                       imaginaryPart:imagPart
-                                            dataType:dtype];
+                    result = [ctx.graph constantWithRealPart:realPart
+                                               imaginaryPart:imagPart
+                                                    dataType:dtype];
                 } else {
-                    result = [g constantWithRealPart:realPart
-                                       imaginaryPart:imagPart
-                                               shape:shape
-                                            dataType:dtype];
+                    result = [ctx.graph constantWithRealPart:realPart
+                                               imaginaryPart:imagPart
+                                                       shape:shape
+                                                    dataType:dtype];
                 }
-                return Result(values, op, result, "constant");
+                return Result(ctx, result, "constant");
             }
 
             if (elemType.isF32()) {
@@ -85,49 +85,51 @@ static ProcessResult HandleConstant(MPSGraph* g, mlir::Operation* op, ValueMap& 
 
             if (shape.count == 0) {
                 // True scalar
-                result = [g constantWithScalar:scalarValue dataType:dtype];
+                result = [ctx.graph constantWithScalar:scalarValue dataType:dtype];
             } else {
                 // Splat to shape
-                result = [g constantWithScalar:scalarValue shape:shape dataType:dtype];
+                result = [ctx.graph constantWithScalar:scalarValue shape:shape dataType:dtype];
             }
         } else {
             // Non-splat dense constant - use raw data
             auto rawData = denseAttr.getRawData();
             NSData* data = [NSData dataWithBytes:rawData.data() length:rawData.size()];
-            result = [g constantWithData:data shape:shape dataType:dtype];
+            result = [ctx.graph constantWithData:data shape:shape dataType:dtype];
         }
     }
 
     if (!result)
         return ProcessResult::Error("constant: unsupported value type");
-    return Result(values, op, result, "constant");
+    return Result(ctx, result, "constant");
 }
 REGISTER_MPS_OP("stablehlo.constant", HandleConstant);
 
 // Iota - create an array of indices
-static ProcessResult HandleIota(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(op);
+static ProcessResult HandleIota(HandlerContext& ctx) {
+    auto iotaOp = mlir::dyn_cast<mlir::stablehlo::IotaOp>(ctx.op);
     if (!iotaOp) {
         return ProcessResult::Error("iota: expected IotaOp");
     }
 
-    MPSDataType dtype = GetResultMpsType(op);
+    MPSDataType dtype = GetResultMpsType(ctx.op);
     if (dtype == MPSDataTypeInvalid) {
         return ProcessResult::Error("iota: invalid dtype");
     }
 
-    NSArray<NSNumber*>* shape = GetOutputShape(op);
+    NSArray<NSNumber*>* shape = GetOutputShape(ctx.op);
     int64_t iotaDim = static_cast<int64_t>(iotaOp.getIotaDimension());
 
     // Create a coordinate tensor along the iota dimension
-    MPSGraphTensor* result = [g coordinateAlongAxis:(NSInteger)iotaDim withShape:shape name:nil];
+    MPSGraphTensor* result = [ctx.graph coordinateAlongAxis:(NSInteger)iotaDim
+                                                  withShape:shape
+                                                       name:nil];
 
     // Cast to the target type if needed
     if (result.dataType != dtype) {
-        result = [g castTensor:result toType:dtype name:nil];
+        result = [ctx.graph castTensor:result toType:dtype name:nil];
     }
 
-    return Result(values, op, result, "iota");
+    return Result(ctx, result, "iota");
 }
 REGISTER_MPS_OP("stablehlo.iota", HandleIota);
 
