@@ -2,6 +2,22 @@
 
 JAX PJRT plugin for Apple Metal Performance Shaders. Review PRs against these requirements.
 
+## Review Philosophy
+
+Prioritize high-impact feedback. Focus review effort on:
+
+- Bugs, correctness issues, and security vulnerabilities
+- Architectural violations (see guidelines below)
+- Missing tests for new functionality
+- Performance problems with measurable impact
+
+Avoid commenting on:
+
+- Speculative future scenarios that aren't part of the current change
+- Availability of standard Unix tools (bc, awk, grep) in developer scripts
+- Constants whose meaning is clear from context
+- Alternative implementations when the current code is correct and readable
+
 ## Architecture
 
 - Reject ops that modify core files. New ops must be self-contained in `src/pjrt_plugin/ops/`.
