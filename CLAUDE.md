@@ -5,6 +5,7 @@
 - You MUST use `uv run ...` to execute commands.
 - You MUST check the comprehensive list of MPS Graph operations in `mps_ops/` before implementing a custom operation.
 - You may NEVER use `--no-verify` for git commits.
+- You may NEVER push to `main` unless explicitly requested.
 - You may NEVER delete operations or tests without my explicit approval.
 - For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See `tests/configs/unary.py` for an example and `tests/configs/util.py` for the signature of `OperationTestConfig`.
 - You may NEVER claim that a failed test is "a known limitation" or "unrelated to our changes" without providing proof. CI is always green.
