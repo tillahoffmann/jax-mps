@@ -25,6 +25,25 @@ from .configs import (
     make_unary_op_configs,
 )
 
+# Test mode configuration via environment variable:
+# - "compare" (default): Run on both CPU and MPS, compare results
+# - "mps": Run only on MPS
+# - "cpu": Run only on CPU
+TEST_MODE = os.environ.get("JAX_TEST_MODE", "compare").lower()
+if TEST_MODE not in ("compare", "mps", "cpu"):
+    raise ValueError(
+        f"Invalid JAX_TEST_MODE: {TEST_MODE}. Must be 'compare', 'mps', or 'cpu'."
+    )
+
+
+def get_test_platforms() -> list[str]:
+    """Return the platforms to test based on JAX_TEST_MODE environment variable."""
+    if TEST_MODE == "compare":
+        return ["cpu", "mps"]
+    else:
+        return [TEST_MODE]
+
+
 OPERATION_TEST_CONFIGS = [
     *make_binary_op_configs(),
     *make_control_flow_op_configs(),
@@ -72,8 +91,9 @@ def assert_allclose_with_path(path, actual, desired):
 
 
 def test_op_value(op_config: OperationTestConfig, jit: bool) -> None:
+    platforms = get_test_platforms()
     results = []
-    for platform in ["cpu", "mps"]:
+    for platform in platforms:
         device = jax.devices(platform)[0]
         with jax.default_device(device):
             result = op_config.evaluate_value(jit)
@@ -86,7 +106,8 @@ def test_op_value(op_config: OperationTestConfig, jit: bool) -> None:
             )
             results.append(result)
 
-    jax.tree.map_with_path(assert_allclose_with_path, *results)
+    if len(results) == 2:
+        jax.tree.map_with_path(assert_allclose_with_path, *results)
 
 
 def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
@@ -94,9 +115,10 @@ def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
     if not argnums:
         pytest.skip(f"No differentiable arguments for operation '{op_config.func}'.")
 
+    platforms = get_test_platforms()
     for argnum in argnums:
         results = []
-        for platform in ["cpu", "mps"]:
+        for platform in platforms:
             device = jax.devices(platform)[0]
             with jax.default_device(device):
                 result = op_config.evaluate_grad(argnum, jit)
@@ -109,11 +131,14 @@ def test_op_grad(op_config: OperationTestConfig, jit: bool) -> None:
                 )
                 results.append(result)
 
-        jax.tree.map_with_path(assert_allclose_with_path, *results)
+        if len(results) == 2:
+            jax.tree.map_with_path(assert_allclose_with_path, *results)
 
 
 def test_unsupported_op_error_message(jit: bool) -> None:
     """Check that unsupported-op errors link to the issue template and CONTRIBUTING.md."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
     device = jax.devices("mps")[0]
     with jax.default_device(device):
         try:
@@ -136,6 +161,11 @@ def assert_all_ops_tested():
     yield
 
     if "CI" not in os.environ:
+        return
+
+    # Skip op coverage check in CPU-only mode since EXERCISED_STABLEHLO_OPS is only
+    # populated when running on MPS.
+    if TEST_MODE == "cpu":
         return
 
     ops_dir = Path(__file__).parent.parent / "src/pjrt_plugin/ops"
