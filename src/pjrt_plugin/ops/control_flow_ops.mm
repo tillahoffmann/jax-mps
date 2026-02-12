@@ -210,12 +210,31 @@ static ProcessResult HandleCaseOp(HandlerContext& ctx) {
     return ProcessResult{};
 }
 
+static ProcessResult HandleCustomCall(HandlerContext& ctx) {
+    auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(ctx.op);
+    if (!customCallOp) {
+        return ProcessResult::Error("custom_call: expected CustomCallOp");
+    }
+
+    std::string target = customCallOp.getCallTargetName().str();
+
+    const OpHandler* handler = CustomCallRegistry::Find(target);
+    if (!handler) {
+        return ProcessResult::Error(
+            "Unsupported custom call target: " + target +
+            "\n"
+            "See CONTRIBUTING.md for how to add support for new operations.");
+    }
+
+    // Delegate to the target-specific handler
+    return handler->graph_handler(ctx);
+}
+
 // Register control flow ops as regular GRAPH ops
 REGISTER_MPS_OP("stablehlo.while", HandleWhileOp);
 REGISTER_MPS_OP("stablehlo.case", HandleCaseOp);
 
-// Register stablehlo.custom_call so the parser accepts it
-// Actual dispatch happens in mps_executable.mm by looking up the target in CustomCallRegistry
-REGISTER_SPECIAL_MPS_OP("stablehlo.custom_call", stablehlo_custom_call);
+// Register custom_call as a regular GRAPH op - it dispatches to CustomCallRegistry internally
+REGISTER_MPS_OP("stablehlo.custom_call", HandleCustomCall);
 
 }  // namespace jax_mps

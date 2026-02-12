@@ -126,22 +126,9 @@ static size_t ByteSizeFromType(mlir::Type type) {
     return total;
 }
 
-// Find the handler for an operation, checking CustomCallRegistry for custom_call ops.
-// If out_custom_call_target is provided, it will be set to the target name for custom_call ops.
-static const OpHandler* FindHandler(mlir::Operation* op,
-                                    std::string* out_custom_call_target = nullptr) {
+// Find the handler for an operation
+static const OpHandler* FindHandler(mlir::Operation* op) {
     std::string op_name = op->getName().getStringRef().str();
-    if (op_name == "stablehlo.custom_call") {
-        if (auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
-            std::string target = customCallOp.getCallTargetName().str();
-            if (out_custom_call_target) {
-                *out_custom_call_target = target;
-            }
-            if (const OpHandler* h = CustomCallRegistry::Find(target)) {
-                return h;
-            }
-        }
-    }
     return OpRegistry::Find(op_name);
 }
 
@@ -234,16 +221,10 @@ static ProcessResult processOperations(HandlerContext& ctx, mlir::Block& block) 
             continue;
         }
 
-        // Look up handler in registry (handles custom_call via CustomCallRegistry)
-        std::string custom_call_target;
-        const OpHandler* handler = FindHandler(op, &custom_call_target);
+        // Look up handler in registry
+        const OpHandler* handler = FindHandler(op);
         if (!handler) {
-            // For custom_call, report the target name rather than the op name
-            std::string unsupported_name =
-                custom_call_target.empty()
-                    ? op_name
-                    : ("stablehlo.custom_call (target: " + custom_call_target + ")");
-            return ProcessResult::Error(UnsupportedOpsMessage({unsupported_name}) +
+            return ProcessResult::Error(UnsupportedOpsMessage({op_name}) +
                                         "\n\n"
                                         "Supported operations: " +
                                         OpRegistry::ListRegistered());
@@ -646,16 +627,10 @@ bool MpsExecutable::BuildExecutionPlan() {
                             continue;
                         }
 
-                        // Look up handler (handles custom_call via CustomCallRegistry)
-                        std::string custom_call_target;
-                        const OpHandler* handler = FindHandler(op, &custom_call_target);
+                        // Look up handler
+                        const OpHandler* handler = FindHandler(op);
                         if (!handler) {
-                            std::string unsupported_name =
-                                custom_call_target.empty()
-                                    ? op_name
-                                    : ("stablehlo.custom_call (target: " + custom_call_target +
-                                       ")");
-                            error_ = UnsupportedOpsMessage({unsupported_name}) +
+                            error_ = UnsupportedOpsMessage({op_name}) +
                                      "\n\nSupported operations: " + OpRegistry::ListRegistered();
                             return false;
                         }
