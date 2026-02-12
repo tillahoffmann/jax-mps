@@ -3,7 +3,7 @@
 # Usage: ./memory_monitor.sh <output_file> <command...>
 # Example: ./memory_monitor.sh /tmp/mem.csv uv run pytest tests/test_ops.py -v
 
-set -e
+set -euo pipefail
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <output_file> <command...>"
@@ -28,7 +28,12 @@ cmd_pid=$!
 while kill -0 $cmd_pid 2>/dev/null; do
     # Get RSS of the process and all its children
     mem=$(ps -o rss= -p $cmd_pid 2>/dev/null || echo 0)
-    children_mem=$(pgrep -P $cmd_pid 2>/dev/null | xargs -I{} ps -o rss= -p {} 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+    children_pids=$(pgrep -P $cmd_pid 2>/dev/null || true)
+    if [ -n "$children_pids" ]; then
+        children_mem=$(echo "$children_pids" | xargs ps -o rss= -p 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+    else
+        children_mem=0
+    fi
     total_mem=$((mem + children_mem))
 
     if [ "$total_mem" -gt 0 ]; then
