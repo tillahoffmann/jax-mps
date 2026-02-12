@@ -145,7 +145,6 @@ def assert_all_ops_tested():
     patterns = [
         re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
         re.compile(r'REGISTER_NATIVE_MPS_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_SPECIAL_MPS_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),

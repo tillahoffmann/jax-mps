@@ -83,9 +83,8 @@ using NativeOpHandler = id<MTLBuffer> (*)(id<MTLDevice>, id<MTLCommandBuffer>, m
 
 struct OpHandler {
     enum class Kind {
-        GRAPH,   // Normal graph-based ops using MPSGraph
-        NATIVE,  // Native MPS kernel ops (e.g., Cholesky)
-        SPECIAL  // Ops handled specially (control flow, custom_call)
+        GRAPH,  // Normal graph-based ops using MPSGraph
+        NATIVE  // Native MPS kernel ops (e.g., Cholesky)
     } kind;
 
     GraphOpHandler graph_handler = nullptr;
@@ -105,20 +104,11 @@ struct OpHandler {
         return handler;
     }
 
-    static OpHandler Special() {
-        OpHandler handler;
-        handler.kind = Kind::SPECIAL;
-        return handler;
-    }
-
     bool is_native() const {
         return kind == Kind::NATIVE;
     }
     bool is_graph() const {
         return kind == Kind::GRAPH;
-    }
-    bool is_special() const {
-        return kind == Kind::SPECIAL;
     }
 };
 
@@ -298,11 +288,6 @@ inline ProcessResult Result(HandlerContext& ctx, MPSGraphTensor* result, const c
 #define REGISTER_NATIVE_MPS_OP(mlir_op_name, handler_fn) \
     static bool _reg_##handler_fn =                      \
         ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Native(handler_fn))
-
-// Macro for registering special ops (handled specially in mps_executable.mm)
-#define REGISTER_SPECIAL_MPS_OP(mlir_op_name, unique_suffix) \
-    static bool _reg_special_##unique_suffix =               \
-        ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Special())
 
 // Convenience macro for simple binary ops
 #define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                        \
