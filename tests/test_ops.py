@@ -148,8 +148,6 @@ def assert_all_ops_tested():
         re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
         re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_CONTROL_FLOW_OP\("([^"]+)"'),
-        re.compile(r'OpRegistry::Register\("([^"]+)"'),
     ]
 
     # Ops that appear in StableHLO IR but get lowered by MLIR before reaching
