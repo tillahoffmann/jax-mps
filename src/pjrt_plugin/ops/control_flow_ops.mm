@@ -1,5 +1,6 @@
 // Control flow operations: while, case
 
+#import "pjrt_plugin/issue_url.h"
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
@@ -220,10 +221,8 @@ static ProcessResult HandleCustomCall(HandlerContext& ctx) {
 
     const OpHandler* handler = CustomCallRegistry::Find(target);
     if (!handler) {
-        return ProcessResult::Error(
-            "Unsupported custom call target: " + target +
-            "\n"
-            "See CONTRIBUTING.md for how to add support for new operations.");
+        std::string op_name = "stablehlo.custom_call(" + target + ")";
+        return ProcessResult::Error(UnsupportedOpsMessage({op_name}));
     }
 
     // Delegate to the target-specific handler
