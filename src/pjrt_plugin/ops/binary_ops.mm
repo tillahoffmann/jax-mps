@@ -16,28 +16,28 @@ REGISTER_MLIR_BINARY_OP("stablehlo.power", power, power);
 REGISTER_MLIR_BINARY_OP("stablehlo.atan2", atan2, atan2);
 
 // Matrix multiplication (dot)
-static ProcessResult HandleDot(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
+static ProcessResult HandleDot(HandlerContext& ctx) {
+    MPSGraphTensor* lhs = GetInputTensor(ctx, 0);
+    MPSGraphTensor* rhs = GetInputTensor(ctx, 1);
     if (!lhs || !rhs)
         return ProcessResult::Error("dot: missing input tensor");
-    MPSGraphTensor* result = [g matrixMultiplicationWithPrimaryTensor:lhs
-                                                      secondaryTensor:rhs
-                                                                 name:nil];
-    return Result(values, op, result, "dot");
+    MPSGraphTensor* result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs
+                                                              secondaryTensor:rhs
+                                                                         name:nil];
+    return Result(ctx, result, "dot");
 }
 REGISTER_MPS_OP("stablehlo.dot", HandleDot);
 
 // Generalized matrix multiplication (dot_general)
 // Handles contracting dimensions and batch dimensions
-static ProcessResult HandleDotGeneral(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
+static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
+    auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(ctx.op);
     if (!dotOp) {
         return ProcessResult::Error("dot_general: expected DotGeneralOp");
     }
 
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
+    MPSGraphTensor* lhs = GetInputTensor(ctx, 0);
+    MPSGraphTensor* rhs = GetInputTensor(ctx, 1);
     if (!lhs || !rhs)
         return ProcessResult::Error("dot_general: missing input tensor");
 
@@ -63,23 +63,31 @@ static ProcessResult HandleDotGeneral(MPSGraph* g, mlir::Operation* op, ValueMap
 
         // Standard matmul: LHS contracts on dim 1, RHS contracts on dim 0
         if (lhsContractDim == 1 && rhsContractDim == 0) {
-            result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs
+                                                      secondaryTensor:rhs
+                                                                 name:nil];
         }
         // LHS contracts on dim 0: need to transpose LHS
         else if (lhsContractDim == 0 && rhsContractDim == 0) {
-            MPSGraphTensor* lhsT = [g transposeTensor:lhs permutation:@[@1, @0] name:nil];
-            result = [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhs name:nil];
+            MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
+                                                      secondaryTensor:rhs
+                                                                 name:nil];
         }
         // LHS contracts on dim 1, RHS contracts on dim 1: need to transpose RHS
         else if (lhsContractDim == 1 && rhsContractDim == 1) {
-            MPSGraphTensor* rhsT = [g transposeTensor:rhs permutation:@[@1, @0] name:nil];
-            result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhsT name:nil];
+            MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs
+                                                      secondaryTensor:rhsT
+                                                                 name:nil];
         }
         // LHS contracts on dim 0, RHS contracts on dim 1: transpose both
         else if (lhsContractDim == 0 && rhsContractDim == 1) {
-            MPSGraphTensor* lhsT = [g transposeTensor:lhs permutation:@[@1, @0] name:nil];
-            MPSGraphTensor* rhsT = [g transposeTensor:rhs permutation:@[@1, @0] name:nil];
-            result = [g matrixMultiplicationWithPrimaryTensor:lhsT secondaryTensor:rhsT name:nil];
+            MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
+            MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
+                                                      secondaryTensor:rhsT
+                                                                 name:nil];
         }
     }
 
@@ -90,22 +98,22 @@ static ProcessResult HandleDotGeneral(MPSGraph* g, mlir::Operation* op, ValueMap
             "LHS contracting: %lld, RHS contracting: %lld\n",
             lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
             rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
-        result = [g matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
     }
 
-    return Result(values, op, result, "dot_general");
+    return Result(ctx, result, "dot_general");
 }
 REGISTER_MPS_OP("stablehlo.dot_general", HandleDotGeneral);
 
 // Compare operation
-static ProcessResult HandleCompare(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
+static ProcessResult HandleCompare(HandlerContext& ctx) {
+    auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(ctx.op);
     if (!compareOp) {
         return ProcessResult::Error("compare: expected CompareOp");
     }
 
-    MPSGraphTensor* lhs = GetInputTensor(values, op, 0);
-    MPSGraphTensor* rhs = GetInputTensor(values, op, 1);
+    MPSGraphTensor* lhs = GetInputTensor(ctx, 0);
+    MPSGraphTensor* rhs = GetInputTensor(ctx, 1);
     if (!lhs || !rhs)
         return ProcessResult::Error("compare: missing input tensor");
 
@@ -115,60 +123,64 @@ static ProcessResult HandleCompare(MPSGraph* g, mlir::Operation* op, ValueMap& v
     MPSGraphTensor* result = nil;
     switch (direction) {
         case Dir::LT:
-            result = [g lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph lessThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
             break;
         case Dir::LE:
-            result = [g lessThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph lessThanOrEqualToWithPrimaryTensor:lhs
+                                                   secondaryTensor:rhs
+                                                              name:nil];
             break;
         case Dir::GT:
-            result = [g greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph greaterThanWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
             break;
         case Dir::GE:
-            result = [g greaterThanOrEqualToWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph greaterThanOrEqualToWithPrimaryTensor:lhs
+                                                      secondaryTensor:rhs
+                                                                 name:nil];
             break;
         case Dir::EQ:
-            result = [g equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph equalWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
             break;
         case Dir::NE:
-            result = [g notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+            result = [ctx.graph notEqualWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
             break;
         default:
             return ProcessResult::Error("compare: unknown compare direction");
     }
 
-    return Result(values, op, result, "compare");
+    return Result(ctx, result, "compare");
 }
 REGISTER_MPS_OP("stablehlo.compare", HandleCompare);
 
 // Select operation (conditional selection: pred ? true_val : false_val)
-static ProcessResult HandleSelect(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* pred = GetInputTensor(values, op, 0);
-    MPSGraphTensor* onTrue = GetInputTensor(values, op, 1);
-    MPSGraphTensor* onFalse = GetInputTensor(values, op, 2);
+static ProcessResult HandleSelect(HandlerContext& ctx) {
+    MPSGraphTensor* pred = GetInputTensor(ctx, 0);
+    MPSGraphTensor* onTrue = GetInputTensor(ctx, 1);
+    MPSGraphTensor* onFalse = GetInputTensor(ctx, 2);
     if (!pred || !onTrue || !onFalse)
         return ProcessResult::Error("select: missing input tensor");
 
-    MPSGraphTensor* result = [g selectWithPredicateTensor:pred
-                                      truePredicateTensor:onTrue
-                                     falsePredicateTensor:onFalse
-                                                     name:nil];
-    return Result(values, op, result, "select");
+    MPSGraphTensor* result = [ctx.graph selectWithPredicateTensor:pred
+                                              truePredicateTensor:onTrue
+                                             falsePredicateTensor:onFalse
+                                                             name:nil];
+    return Result(ctx, result, "select");
 }
 REGISTER_MPS_OP("stablehlo.select", HandleSelect);
 
 // Clamp operation: clamp(min, x, max)
-static ProcessResult HandleClamp(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* minVal = GetInputTensor(values, op, 0);
-    MPSGraphTensor* operand = GetInputTensor(values, op, 1);
-    MPSGraphTensor* maxVal = GetInputTensor(values, op, 2);
+static ProcessResult HandleClamp(HandlerContext& ctx) {
+    MPSGraphTensor* minVal = GetInputTensor(ctx, 0);
+    MPSGraphTensor* operand = GetInputTensor(ctx, 1);
+    MPSGraphTensor* maxVal = GetInputTensor(ctx, 2);
     if (!minVal || !operand || !maxVal)
         return ProcessResult::Error("clamp: missing input tensor");
 
-    MPSGraphTensor* result = [g clampWithTensor:operand
-                                 minValueTensor:minVal
-                                 maxValueTensor:maxVal
-                                           name:nil];
-    return Result(values, op, result, "clamp");
+    MPSGraphTensor* result = [ctx.graph clampWithTensor:operand
+                                         minValueTensor:minVal
+                                         maxValueTensor:maxVal
+                                                   name:nil];
+    return Result(ctx, result, "clamp");
 }
 REGISTER_MPS_OP("stablehlo.clamp", HandleClamp);
 
@@ -178,9 +190,9 @@ REGISTER_MPS_OP("stablehlo.clamp", HandleClamp);
 // 2. If x or y is NaN, return NaN
 // 3. If x == 0, return smallest subnormal with sign of y
 // 4. Otherwise, treat x as integer bits and increment/decrement based on direction
-static ProcessResult HandleNextAfter(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    MPSGraphTensor* x = GetInputTensor(values, op, 0);
-    MPSGraphTensor* y = GetInputTensor(values, op, 1);
+static ProcessResult HandleNextAfter(HandlerContext& ctx) {
+    MPSGraphTensor* x = GetInputTensor(ctx, 0);
+    MPSGraphTensor* y = GetInputTensor(ctx, 1);
     if (!x || !y)
         return ProcessResult::Error("next_after: missing input tensor");
 
@@ -190,83 +202,92 @@ static ProcessResult HandleNextAfter(MPSGraph* g, mlir::Operation* op, ValueMap&
     NSArray<NSNumber*>* xShape = x.shape;
     bool isScalar = (xShape.count == 0);
     if (isScalar) {
-        x = [g reshapeTensor:x withShape:@[@1] name:nil];
-        y = [g reshapeTensor:y withShape:@[@1] name:nil];
+        x = [ctx.graph reshapeTensor:x withShape:@[@1] name:nil];
+        y = [ctx.graph reshapeTensor:y withShape:@[@1] name:nil];
     }
 
     // Constants
-    MPSGraphTensor* zero = [g constantWithScalar:0.0 dataType:dtype];
-    MPSGraphTensor* one_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
-    MPSGraphTensor* neg_one_int = [g constantWithScalar:-1 dataType:MPSDataTypeInt32];
-    MPSGraphTensor* min_positive_int = [g constantWithScalar:1 dataType:MPSDataTypeInt32];
-    MPSGraphTensor* min_negative_int = [g constantWithScalar:0x80000001 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* zero = [ctx.graph constantWithScalar:0.0 dataType:dtype];
+    MPSGraphTensor* one_int = [ctx.graph constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* neg_one_int = [ctx.graph constantWithScalar:-1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_positive_int = [ctx.graph constantWithScalar:1 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* min_negative_int = [ctx.graph constantWithScalar:0x80000001
+                                                            dataType:MPSDataTypeInt32];
 
     // Bitcast x to int32 (reinterpret bits)
-    MPSGraphTensor* x_as_int = [g reinterpretCastTensor:x toType:MPSDataTypeInt32 name:nil];
+    MPSGraphTensor* x_as_int = [ctx.graph reinterpretCastTensor:x toType:MPSDataTypeInt32 name:nil];
 
     // Check if x == y
-    MPSGraphTensor* x_eq_y = [g equalWithPrimaryTensor:x secondaryTensor:y name:nil];
+    MPSGraphTensor* x_eq_y = [ctx.graph equalWithPrimaryTensor:x secondaryTensor:y name:nil];
 
     // Check if x is zero
-    MPSGraphTensor* x_is_zero = [g equalWithPrimaryTensor:x secondaryTensor:zero name:nil];
+    MPSGraphTensor* x_is_zero = [ctx.graph equalWithPrimaryTensor:x secondaryTensor:zero name:nil];
 
     // Check if y > 0 (to determine direction when x == 0)
-    MPSGraphTensor* y_gt_zero = [g greaterThanWithPrimaryTensor:y secondaryTensor:zero name:nil];
+    MPSGraphTensor* y_gt_zero = [ctx.graph greaterThanWithPrimaryTensor:y
+                                                        secondaryTensor:zero
+                                                                   name:nil];
 
     // When x == 0, return smallest positive or negative subnormal
-    MPSGraphTensor* zero_result_int = [g selectWithPredicateTensor:y_gt_zero
-                                               truePredicateTensor:min_positive_int
-                                              falsePredicateTensor:min_negative_int
+    MPSGraphTensor* zero_result_int = [ctx.graph selectWithPredicateTensor:y_gt_zero
+                                                       truePredicateTensor:min_positive_int
+                                                      falsePredicateTensor:min_negative_int
+                                                                      name:nil];
+    MPSGraphTensor* zero_result = [ctx.graph reinterpretCastTensor:zero_result_int
+                                                            toType:dtype
                                                               name:nil];
-    MPSGraphTensor* zero_result = [g reinterpretCastTensor:zero_result_int toType:dtype name:nil];
 
     // For non-zero x, determine direction and increment/decrement
     // If x > 0 and y > x, or x < 0 and y > x: increment (add 1 to int representation)
     // If x > 0 and y < x, or x < 0 and y < x: decrement (subtract 1 from int representation)
-    MPSGraphTensor* y_gt_x = [g greaterThanWithPrimaryTensor:y secondaryTensor:x name:nil];
+    MPSGraphTensor* y_gt_x = [ctx.graph greaterThanWithPrimaryTensor:y secondaryTensor:x name:nil];
 
     // x > 0
-    MPSGraphTensor* x_gt_zero = [g greaterThanWithPrimaryTensor:x secondaryTensor:zero name:nil];
+    MPSGraphTensor* x_gt_zero = [ctx.graph greaterThanWithPrimaryTensor:x
+                                                        secondaryTensor:zero
+                                                                   name:nil];
 
     // Determine if we should increment the int representation
     // Increment when: (x > 0 && y > x) || (x < 0 && y < x)
     // Which simplifies to: (x > 0) == (y > x)
-    MPSGraphTensor* should_increment = [g equalWithPrimaryTensor:x_gt_zero
-                                                 secondaryTensor:y_gt_x
-                                                            name:nil];
+    MPSGraphTensor* should_increment = [ctx.graph equalWithPrimaryTensor:x_gt_zero
+                                                         secondaryTensor:y_gt_x
+                                                                    name:nil];
 
     // Compute the delta (+1 or -1)
-    MPSGraphTensor* delta = [g selectWithPredicateTensor:should_increment
-                                     truePredicateTensor:one_int
-                                    falsePredicateTensor:neg_one_int
-                                                    name:nil];
+    MPSGraphTensor* delta = [ctx.graph selectWithPredicateTensor:should_increment
+                                             truePredicateTensor:one_int
+                                            falsePredicateTensor:neg_one_int
+                                                            name:nil];
 
     // Add delta to x_as_int
-    MPSGraphTensor* result_int = [g additionWithPrimaryTensor:x_as_int
-                                              secondaryTensor:delta
-                                                         name:nil];
+    MPSGraphTensor* result_int = [ctx.graph additionWithPrimaryTensor:x_as_int
+                                                      secondaryTensor:delta
+                                                                 name:nil];
 
     // Bitcast back to float
-    MPSGraphTensor* non_zero_result = [g reinterpretCastTensor:result_int toType:dtype name:nil];
+    MPSGraphTensor* non_zero_result = [ctx.graph reinterpretCastTensor:result_int
+                                                                toType:dtype
+                                                                  name:nil];
 
     // Select between zero and non-zero cases
-    MPSGraphTensor* non_equal_result = [g selectWithPredicateTensor:x_is_zero
-                                                truePredicateTensor:zero_result
-                                               falsePredicateTensor:non_zero_result
-                                                               name:nil];
+    MPSGraphTensor* non_equal_result = [ctx.graph selectWithPredicateTensor:x_is_zero
+                                                        truePredicateTensor:zero_result
+                                                       falsePredicateTensor:non_zero_result
+                                                                       name:nil];
 
     // If x == y, return y; otherwise return the computed result
-    MPSGraphTensor* result = [g selectWithPredicateTensor:x_eq_y
-                                      truePredicateTensor:y
-                                     falsePredicateTensor:non_equal_result
-                                                     name:nil];
+    MPSGraphTensor* result = [ctx.graph selectWithPredicateTensor:x_eq_y
+                                              truePredicateTensor:y
+                                             falsePredicateTensor:non_equal_result
+                                                             name:nil];
 
     // Reshape back to scalar if needed
     if (isScalar) {
-        result = [g reshapeTensor:result withShape:@[] name:nil];
+        result = [ctx.graph reshapeTensor:result withShape:@[] name:nil];
     }
 
-    return Result(values, op, result, "next_after");
+    return Result(ctx, result, "next_after");
 }
 REGISTER_MPS_OP("chlo.next_after", HandleNextAfter);
 

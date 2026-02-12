@@ -37,13 +37,13 @@ NSInteger inferTopKAxisFromShapes(NSArray<NSNumber*>* inputShape, NSArray<NSNumb
 
 }  // namespace
 
-static ProcessResult HandleSort(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
-    auto sortOp = mlir::dyn_cast<mlir::stablehlo::SortOp>(op);
+static ProcessResult HandleSort(HandlerContext& ctx) {
+    auto sortOp = mlir::dyn_cast<mlir::stablehlo::SortOp>(ctx.op);
     if (!sortOp) {
         return ProcessResult::Error("Expected stablehlo.sort");
     }
 
-    auto dimAttr = op->getAttrOfType<mlir::IntegerAttr>("dimension");
+    auto dimAttr = ctx.op->getAttrOfType<mlir::IntegerAttr>("dimension");
     if (!dimAttr) {
         return ProcessResult::Error("stablehlo.sort missing dimension attribute");
     }
@@ -63,70 +63,70 @@ static ProcessResult HandleSort(MPSGraph* graph, mlir::Operation* op, ValueMap& 
         }
     }
 
-    if (op->getNumOperands() == 1 && op->getNumResults() == 1) {
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    if (ctx.op->getNumOperands() == 1 && ctx.op->getNumResults() == 1) {
+        MPSGraphTensor* input = GetInputTensor(ctx, 0);
         if (!input) {
             return ProcessResult::Error("stablehlo.sort input tensor not found");
         }
-        MPSGraphTensor* sorted = [graph sortWithTensor:input
-                                                  axis:axis
-                                            descending:descending
-                                                  name:nil];
+        MPSGraphTensor* sorted = [ctx.graph sortWithTensor:input
+                                                      axis:axis
+                                                descending:descending
+                                                      name:nil];
         if (!sorted) {
             return ProcessResult::Error("stablehlo.sort lowering failed");
         }
-        values[op->getResult(0).getAsOpaquePointer()] = sorted;
+        ctx.values[ctx.op->getResult(0).getAsOpaquePointer()] = sorted;
         return ProcessResult{};
     }
 
-    if (op->getNumOperands() >= 2 && op->getNumOperands() == op->getNumResults()) {
+    if (ctx.op->getNumOperands() >= 2 && ctx.op->getNumOperands() == ctx.op->getNumResults()) {
         // Tuple sort lowering used by lexsort-like patterns:
         // sort first N-1 tensors as lexicographic keys, apply permutation to all tensors.
         // We build permutation by stable-sorting from least-significant key to most-significant.
-        MPSGraphTensor* base = GetInputTensor(values, op, 0);
+        MPSGraphTensor* base = GetInputTensor(ctx, 0);
         if (!base) {
             return ProcessResult::Error("stablehlo.sort key tensor not found");
         }
 
-        MPSGraphTensor* perm = [graph coordinateAlongAxis:axis withShape:base.shape name:nil];
-        perm = EnsureInt32(graph, perm);
+        MPSGraphTensor* perm = [ctx.graph coordinateAlongAxis:axis withShape:base.shape name:nil];
+        perm = EnsureInt32(ctx.graph, perm);
 
-        for (NSInteger keyIdx = (NSInteger)op->getNumOperands() - 2; keyIdx >= 0; --keyIdx) {
-            MPSGraphTensor* keyTensor = GetInputTensor(values, op, (unsigned)keyIdx);
+        for (NSInteger keyIdx = (NSInteger)ctx.op->getNumOperands() - 2; keyIdx >= 0; --keyIdx) {
+            MPSGraphTensor* keyTensor = GetInputTensor(ctx, (unsigned)keyIdx);
             if (!keyTensor) {
                 return ProcessResult::Error("stablehlo.sort key tensor missing");
             }
-            MPSGraphTensor* keyAtPerm = [graph gatherAlongAxis:axis
-                                             withUpdatesTensor:keyTensor
-                                                 indicesTensor:perm
-                                                          name:nil];
-            MPSGraphTensor* localOrder = [graph argSortWithTensor:keyAtPerm
-                                                             axis:axis
-                                                       descending:descending
-                                                             name:nil];
+            MPSGraphTensor* keyAtPerm = [ctx.graph gatherAlongAxis:axis
+                                                 withUpdatesTensor:keyTensor
+                                                     indicesTensor:perm
+                                                              name:nil];
+            MPSGraphTensor* localOrder = [ctx.graph argSortWithTensor:keyAtPerm
+                                                                 axis:axis
+                                                           descending:descending
+                                                                 name:nil];
             if (!localOrder) {
                 return ProcessResult::Error("stablehlo.sort argSort lowering failed");
             }
-            localOrder = EnsureInt32(graph, localOrder);
-            perm = [graph gatherAlongAxis:axis
-                        withUpdatesTensor:perm
-                            indicesTensor:localOrder
-                                     name:nil];
+            localOrder = EnsureInt32(ctx.graph, localOrder);
+            perm = [ctx.graph gatherAlongAxis:axis
+                            withUpdatesTensor:perm
+                                indicesTensor:localOrder
+                                         name:nil];
         }
 
-        for (unsigned i = 0; i < op->getNumResults(); ++i) {
-            MPSGraphTensor* operandTensor = GetInputTensor(values, op, i);
+        for (unsigned i = 0; i < ctx.op->getNumResults(); ++i) {
+            MPSGraphTensor* operandTensor = GetInputTensor(ctx, i);
             if (!operandTensor) {
                 return ProcessResult::Error("stablehlo.sort operand tensor missing");
             }
-            MPSGraphTensor* sorted = [graph gatherAlongAxis:axis
-                                          withUpdatesTensor:operandTensor
-                                              indicesTensor:perm
-                                                       name:nil];
+            MPSGraphTensor* sorted = [ctx.graph gatherAlongAxis:axis
+                                              withUpdatesTensor:operandTensor
+                                                  indicesTensor:perm
+                                                           name:nil];
             if (!sorted) {
                 return ProcessResult::Error("stablehlo.sort gather lowering failed");
             }
-            values[op->getResult(i).getAsOpaquePointer()] = sorted;
+            ctx.values[ctx.op->getResult(i).getAsOpaquePointer()] = sorted;
         }
         return ProcessResult{};
     }
@@ -134,31 +134,31 @@ static ProcessResult HandleSort(MPSGraph* graph, mlir::Operation* op, ValueMap& 
     return ProcessResult::Error("Unsupported stablehlo.sort operand/result shape");
 }
 
-static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleTopK(HandlerContext& ctx) {
     ProcessResult result;
-    MPS_LOG_DEBUG("HandleTopK: entering with %u operands, %u results\n", op->getNumOperands(),
-                  op->getNumResults());
-    if (op->getNumOperands() < 1 || op->getNumResults() != 2) {
+    MPS_LOG_DEBUG("HandleTopK: entering with %u operands, %u results\n", ctx.op->getNumOperands(),
+                  ctx.op->getNumResults());
+    if (ctx.op->getNumOperands() < 1 || ctx.op->getNumResults() != 2) {
         return ProcessResult::Error("Unsupported top_k operand/result shape");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     MPS_LOG_DEBUG("HandleTopK: got input tensor %p\n", (void*)input);
     if (!input) {
         return ProcessResult::Error("top_k input tensor not found");
     }
 
     int64_t k = -1;
-    if (auto kAttr = op->getAttrOfType<mlir::IntegerAttr>("k")) {
+    if (auto kAttr = ctx.op->getAttrOfType<mlir::IntegerAttr>("k")) {
         k = kAttr.getInt();
     }
 
     NSInteger axis = -1;
-    if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis")) {
+    if (auto axisAttr = ctx.op->getAttrOfType<mlir::IntegerAttr>("axis")) {
         axis = (NSInteger)axisAttr.getInt();
     }
 
-    NSArray<NSNumber*>* valueShape = GetOutputShape(op, 0);
+    NSArray<NSNumber*>* valueShape = GetOutputShape(ctx.op, 0);
     if (k < 0) {
         k = inferTopKFromShapes(input.shape, valueShape);
     }
@@ -177,10 +177,10 @@ static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& 
     NSArray<MPSGraphTensor*>* topk = nil;
     if (axis == (NSInteger)input.shape.count - 1) {
         MPS_LOG_DEBUG("HandleTopK: calling topKWithSourceTensor (last axis)\n");
-        topk = [graph topKWithSourceTensor:input k:(NSUInteger)k name:nil];
+        topk = [ctx.graph topKWithSourceTensor:input k:(NSUInteger)k name:nil];
     } else {
         MPS_LOG_DEBUG("HandleTopK: calling topKWithSourceTensor axis=%ld\n", (long)axis);
-        topk = [graph topKWithSourceTensor:input axis:axis k:(NSUInteger)k name:nil];
+        topk = [ctx.graph topKWithSourceTensor:input axis:axis k:(NSUInteger)k name:nil];
     }
     MPS_LOG_DEBUG("HandleTopK: topk result count=%lu\n", topk ? (unsigned long)topk.count : 0UL);
     if (!topk || topk.count != 2) {
@@ -192,18 +192,18 @@ static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& 
     MPS_LOG_DEBUG("HandleTopK: valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
 
     MPS_LOG_DEBUG("HandleTopK: checking for casts/reshapes\n");
-    MPSDataType valueType = GetResultMpsType(op, 0);
+    MPSDataType valueType = GetResultMpsType(ctx.op, 0);
     if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
         MPS_LOG_DEBUG("HandleTopK: casting valueOut from %d to %d\n", (int)valueOut.dataType,
                       (int)valueType);
-        valueOut = [graph castTensor:valueOut toType:valueType name:nil];
+        valueOut = [ctx.graph castTensor:valueOut toType:valueType name:nil];
         MPS_LOG_DEBUG("HandleTopK: valueOut after cast=%p\n", (void*)valueOut);
     }
-    MPSDataType indexType = GetResultMpsType(op, 1);
+    MPSDataType indexType = GetResultMpsType(ctx.op, 1);
     if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
         MPS_LOG_DEBUG("HandleTopK: casting indexOut from %d to %d\n", (int)indexOut.dataType,
                       (int)indexType);
-        indexOut = [graph castTensor:indexOut toType:indexType name:nil];
+        indexOut = [ctx.graph castTensor:indexOut toType:indexType name:nil];
         MPS_LOG_DEBUG("HandleTopK: indexOut after cast=%p\n", (void*)indexOut);
     }
 
@@ -212,23 +212,24 @@ static ProcessResult HandleTopK(MPSGraph* graph, mlir::Operation* op, ValueMap& 
         MPS_LOG_DEBUG("HandleTopK: reshaping valueOut from %s to %s\n",
                       [[valueOut.shape description] UTF8String],
                       [[valueShape description] UTF8String]);
-        valueOut = [graph reshapeTensor:valueOut withShape:valueShape name:nil];
+        valueOut = [ctx.graph reshapeTensor:valueOut withShape:valueShape name:nil];
         MPS_LOG_DEBUG("HandleTopK: valueOut after reshape=%p\n", (void*)valueOut);
     }
-    NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
+    NSArray<NSNumber*>* indexShape = GetOutputShape(ctx.op, 1);
     if (indexShape && ![indexShape isEqualToArray:indexOut.shape]) {
         MPS_LOG_DEBUG("HandleTopK: reshaping indexOut from %s to %s\n",
                       [[indexOut.shape description] UTF8String],
                       [[indexShape description] UTF8String]);
-        indexOut = [graph reshapeTensor:indexOut withShape:indexShape name:nil];
+        indexOut = [ctx.graph reshapeTensor:indexOut withShape:indexShape name:nil];
         MPS_LOG_DEBUG("HandleTopK: indexOut after reshape=%p\n", (void*)indexOut);
     }
 
     MPS_LOG_DEBUG("HandleTopK: final valueOut=%p, indexOut=%p\n", (void*)valueOut, (void*)indexOut);
     MPS_LOG_DEBUG("HandleTopK: storing results at %p and %p\n",
-                  op->getResult(0).getAsOpaquePointer(), op->getResult(1).getAsOpaquePointer());
-    values[op->getResult(0).getAsOpaquePointer()] = valueOut;
-    values[op->getResult(1).getAsOpaquePointer()] = indexOut;
+                  ctx.op->getResult(0).getAsOpaquePointer(),
+                  ctx.op->getResult(1).getAsOpaquePointer());
+    ctx.values[ctx.op->getResult(0).getAsOpaquePointer()] = valueOut;
+    ctx.values[ctx.op->getResult(1).getAsOpaquePointer()] = indexOut;
 
     MPS_LOG_DEBUG("HandleTopK: done\n");
     return result;

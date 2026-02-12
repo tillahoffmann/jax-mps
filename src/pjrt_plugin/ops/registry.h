@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Types.h"
@@ -41,8 +42,35 @@ struct ProcessResult {
 // Handler signatures
 // ---------------------------------------------------------------------------
 
+// Forward declarations
+struct HandlerContext;
+
+// Block processor for control flow (part of context)
+using BlockProcessor = ProcessResult (*)(HandlerContext& ctx, mlir::Block& block);
+
+// Unified handler context for all GRAPH ops (including control flow)
+struct HandlerContext {
+    MPSGraph* graph;
+    mlir::Operation* op;
+    ValueMap& values;
+
+    // Extended context for control flow ops
+    mlir::ModuleOp module;
+    int depth;
+    BlockProcessor processBlock;
+
+    // Default constructor (for simple ops - module/depth/processBlock set to defaults)
+    HandlerContext(MPSGraph* g, mlir::Operation* o, ValueMap& v)
+        : graph(g), op(o), values(v), module(nullptr), depth(0), processBlock(nullptr) {}
+
+    // Full constructor (for control flow)
+    HandlerContext(MPSGraph* g, mlir::Operation* o, ValueMap& v, mlir::ModuleOp m, int d,
+                   BlockProcessor bp)
+        : graph(g), op(o), values(v), module(m), depth(d), processBlock(bp) {}
+};
+
 // Graph handler: operates on MPSGraph tensors, builds computation graph
-using GraphOpHandler = ProcessResult (*)(MPSGraph*, mlir::Operation*, ValueMap&);
+using GraphOpHandler = ProcessResult (*)(HandlerContext& ctx);
 
 // Native handler: operates directly on Metal buffers via command buffer encoding
 // Returns the output buffer (single-output ops only for now)
@@ -55,9 +83,8 @@ using NativeOpHandler = id<MTLBuffer> (*)(id<MTLDevice>, id<MTLCommandBuffer>, m
 
 struct OpHandler {
     enum class Kind {
-        GRAPH,   // Normal graph-based ops using MPSGraph
-        NATIVE,  // Native MPS kernel ops (e.g., Cholesky)
-        SPECIAL  // Ops handled specially (control flow, custom_call)
+        GRAPH,  // Normal graph-based ops using MPSGraph
+        NATIVE  // Native MPS kernel ops (e.g., Cholesky)
     } kind;
 
     GraphOpHandler graph_handler = nullptr;
@@ -77,20 +104,11 @@ struct OpHandler {
         return handler;
     }
 
-    static OpHandler Special() {
-        OpHandler handler;
-        handler.kind = Kind::SPECIAL;
-        return handler;
-    }
-
     bool is_native() const {
         return kind == Kind::NATIVE;
     }
     bool is_graph() const {
         return kind == Kind::GRAPH;
-    }
-    bool is_special() const {
-        return kind == Kind::SPECIAL;
     }
 };
 
@@ -243,6 +261,20 @@ inline ProcessResult Result(ValueMap& values, mlir::Operation* op, MPSGraphTenso
 }
 
 // ---------------------------------------------------------------------------
+// Context-aware helper functions (for use with HandlerContext)
+// ---------------------------------------------------------------------------
+
+// Get input tensor at index from context
+inline MPSGraphTensor* GetInputTensor(HandlerContext& ctx, unsigned index) {
+    return GetInputTensor(ctx.values, ctx.op, index);
+}
+
+// Finalize a simple op using context
+inline ProcessResult Result(HandlerContext& ctx, MPSGraphTensor* result, const char* op_name) {
+    return Result(ctx.values, ctx.op, result, op_name);
+}
+
+// ---------------------------------------------------------------------------
 // Registration macros
 // ---------------------------------------------------------------------------
 
@@ -257,33 +289,28 @@ inline ProcessResult Result(ValueMap& values, mlir::Operation* op, MPSGraphTenso
     static bool _reg_##handler_fn =                      \
         ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Native(handler_fn))
 
-// Macro for registering special ops (handled specially in mps_executable.mm)
-#define REGISTER_SPECIAL_MPS_OP(mlir_op_name, unique_suffix) \
-    static bool _reg_special_##unique_suffix =               \
-        ::jax_mps::OpRegistry::Register(mlir_op_name, ::jax_mps::OpHandler::Special())
-
 // Convenience macro for simple binary ops
-#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                             \
-    static ::jax_mps::ProcessResult HandleMlir##reg_suffix(MPSGraph* g, mlir::Operation* op,      \
-                                                           ::jax_mps::ValueMap& values) {         \
-        MPSGraphTensor* lhs = GetInputTensor(values, op, 0);                                      \
-        MPSGraphTensor* rhs = GetInputTensor(values, op, 1);                                      \
-        if (!lhs || !rhs)                                                                         \
-            return ::jax_mps::ProcessResult::Error(#reg_suffix ": missing input tensor");         \
-        MPSGraphTensor* out = [g mps_method##WithPrimaryTensor:lhs secondaryTensor:rhs name:nil]; \
-        return Result(values, op, out, #reg_suffix);                                              \
-    }                                                                                             \
+#define REGISTER_MLIR_BINARY_OP(mlir_op_name, mps_method, reg_suffix)                        \
+    static ::jax_mps::ProcessResult HandleMlir##reg_suffix(::jax_mps::HandlerContext& ctx) { \
+        MPSGraphTensor* lhs = GetInputTensor(ctx, 0);                                        \
+        MPSGraphTensor* rhs = GetInputTensor(ctx, 1);                                        \
+        if (!lhs || !rhs)                                                                    \
+            return ::jax_mps::ProcessResult::Error(#reg_suffix ": missing input tensor");    \
+        MPSGraphTensor* out = [ctx.graph mps_method##WithPrimaryTensor:lhs                   \
+                                                       secondaryTensor:rhs                   \
+                                                                  name:nil];                 \
+        return Result(ctx, out, #reg_suffix);                                                \
+    }                                                                                        \
     REGISTER_MPS_OP(mlir_op_name, HandleMlir##reg_suffix)
 
 // Convenience macro for simple unary ops
 #define REGISTER_MLIR_UNARY_OP(mlir_op_name, mps_method, reg_suffix)                         \
-    static ::jax_mps::ProcessResult HandleMlir##reg_suffix(MPSGraph* g, mlir::Operation* op, \
-                                                           ::jax_mps::ValueMap& values) {    \
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);                               \
+    static ::jax_mps::ProcessResult HandleMlir##reg_suffix(::jax_mps::HandlerContext& ctx) { \
+        MPSGraphTensor* input = GetInputTensor(ctx, 0);                                      \
         if (!input)                                                                          \
             return ::jax_mps::ProcessResult::Error(#reg_suffix ": missing input tensor");    \
-        MPSGraphTensor* out = [g mps_method##WithTensor:input name:nil];                     \
-        return Result(values, op, out, #reg_suffix);                                         \
+        MPSGraphTensor* out = [ctx.graph mps_method##WithTensor:input name:nil];             \
+        return Result(ctx, out, #reg_suffix);                                                \
     }                                                                                        \
     REGISTER_MPS_OP(mlir_op_name, HandleMlir##reg_suffix)
 
@@ -295,13 +322,12 @@ inline ProcessResult Result(ValueMap& values, mlir::Operation* op, MPSGraphTenso
 
 // Convenience macro for simple unary custom call targets
 #define REGISTER_CUSTOM_CALL_UNARY_OP(target_name, mps_method, reg_suffix)                 \
-    static ::jax_mps::ProcessResult HandleCc##reg_suffix(MPSGraph* g, mlir::Operation* op, \
-                                                         ::jax_mps::ValueMap& values) {    \
-        MPSGraphTensor* input = GetInputTensor(values, op, 0);                             \
+    static ::jax_mps::ProcessResult HandleCc##reg_suffix(::jax_mps::HandlerContext& ctx) { \
+        MPSGraphTensor* input = GetInputTensor(ctx, 0);                                    \
         if (!input)                                                                        \
             return ::jax_mps::ProcessResult::Error(#reg_suffix ": missing input tensor");  \
-        MPSGraphTensor* out = [g mps_method##WithTensor:input name:nil];                   \
-        return Result(values, op, out, #reg_suffix);                                       \
+        MPSGraphTensor* out = [ctx.graph mps_method##WithTensor:input name:nil];           \
+        return Result(ctx, out, #reg_suffix);                                              \
     }                                                                                      \
     REGISTER_CUSTOM_CALL(target_name, HandleCc##reg_suffix, reg_suffix)
 

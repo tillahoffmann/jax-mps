@@ -4,15 +4,17 @@
 
 namespace jax_mps {
 
-static ProcessResult HandleFft(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto fftOp = mlir::dyn_cast<mlir::stablehlo::FftOp>(op);
+static ProcessResult HandleFft(HandlerContext& ctx) {
+    auto fftOp = mlir::dyn_cast<mlir::stablehlo::FftOp>(ctx.op);
     if (!fftOp) {
         return ProcessResult::Error("fft: expected FftOp");
     }
 
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
         return ProcessResult::Error("fft: missing input tensor");
+
+    MPSGraph* g = ctx.graph;
 
     NSArray<NSNumber*>* inputShape = input.shape;
     NSUInteger rank = inputShape.count;
@@ -62,7 +64,7 @@ static ProcessResult HandleFft(MPSGraph* g, mlir::Operation* op, ValueMap& value
             return ProcessResult::Error("fft: unsupported fft type");
     }
 
-    return Result(values, op, result, "fft");
+    return Result(ctx, result, "fft");
 }
 REGISTER_MPS_OP("stablehlo.fft", HandleFft);
 

@@ -86,14 +86,14 @@ ArgReduceKind detectArgReduceKind(mlir::stablehlo::ReduceOp reduceOp) {
 }  // namespace
 
 // Single-result reduce: sum, product, max, min, and, or
-static ProcessResult HandleSingleResultReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
+static ProcessResult HandleSingleResultReduce(HandlerContext& ctx) {
+    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(ctx.op);
     if (!reduceOp) {
         return ProcessResult::Error("reduce: expected ReduceOp");
     }
 
     // Get the input tensor (first operand)
-    MPSGraphTensor* input = GetInputTensor(values, op, 0);
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input) {
         return ProcessResult::Error("reduce: input tensor not found");
     }
@@ -110,42 +110,42 @@ static ProcessResult HandleSingleResultReduce(MPSGraph* g, mlir::Operation* op, 
 
     MPSGraphTensor* result = nullptr;
     if (reductionType == "stablehlo.add") {
-        result = [g reductionSumWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionSumWithTensor:input axes:axes name:nil];
     } else if (reductionType == "stablehlo.multiply") {
-        result = [g reductionProductWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionProductWithTensor:input axes:axes name:nil];
     } else if (reductionType == "stablehlo.maximum") {
-        result = [g reductionMaximumWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionMaximumWithTensor:input axes:axes name:nil];
     } else if (reductionType == "stablehlo.minimum") {
-        result = [g reductionMinimumWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionMinimumWithTensor:input axes:axes name:nil];
     } else if (reductionType == "stablehlo.and") {
-        result = [g reductionAndWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionAndWithTensor:input axes:axes name:nil];
     } else if (reductionType == "stablehlo.or") {
-        result = [g reductionOrWithTensor:input axes:axes name:nil];
+        result = [ctx.graph reductionOrWithTensor:input axes:axes name:nil];
     } else {
         return ProcessResult::Error("reduce: unsupported reduction type: " + reductionType);
     }
 
     // MPS Graph reduction keeps dimensions (with size 1), but StableHLO reduce removes them
     // Reshape to the expected output shape from the MLIR operation
-    NSArray<NSNumber*>* outputShape = GetOutputShape(op);
+    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
     if (outputShape && result) {
-        result = [g reshapeTensor:result withShape:outputShape name:nil];
+        result = [ctx.graph reshapeTensor:result withShape:outputShape name:nil];
     }
 
-    return Result(values, op, result, "reduce");
+    return Result(ctx, result, "reduce");
 }
 
 // Multi-result reduce: argmax/argmin patterns
-static ProcessResult HandleMultiResultReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
+static ProcessResult HandleMultiResultReduce(HandlerContext& ctx) {
+    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(ctx.op);
     if (!reduceOp) {
         return ProcessResult::Error("reduce: expected ReduceOp");
     }
-    if (op->getNumResults() != 2 || op->getNumOperands() < 2) {
+    if (ctx.op->getNumResults() != 2 || ctx.op->getNumOperands() < 2) {
         return ProcessResult::Error("reduce: unsupported multi-result shape");
     }
 
-    MPSGraphTensor* valueInput = GetInputTensor(values, op, 0);
+    MPSGraphTensor* valueInput = GetInputTensor(ctx, 0);
     if (!valueInput) {
         return ProcessResult::Error("reduce: value input tensor not found");
     }
@@ -164,51 +164,51 @@ static ProcessResult HandleMultiResultReduce(MPSGraph* g, mlir::Operation* op, V
     MPSGraphTensor* valueOut = nullptr;
     MPSGraphTensor* indexOut = nullptr;
     if (kind == ArgReduceKind::kMax) {
-        valueOut = [g reductionMaximumWithTensor:valueInput axis:axis name:nil];
-        indexOut = [g reductionArgMaximumWithTensor:valueInput axis:axis name:nil];
+        valueOut = [ctx.graph reductionMaximumWithTensor:valueInput axis:axis name:nil];
+        indexOut = [ctx.graph reductionArgMaximumWithTensor:valueInput axis:axis name:nil];
     } else {
-        valueOut = [g reductionMinimumWithTensor:valueInput axis:axis name:nil];
-        indexOut = [g reductionArgMinimumWithTensor:valueInput axis:axis name:nil];
+        valueOut = [ctx.graph reductionMinimumWithTensor:valueInput axis:axis name:nil];
+        indexOut = [ctx.graph reductionArgMinimumWithTensor:valueInput axis:axis name:nil];
     }
     if (!valueOut || !indexOut) {
         return ProcessResult::Error("reduce: failed to lower multi-result reduce");
     }
 
-    MPSDataType valueType = GetResultMpsType(op, 0);
+    MPSDataType valueType = GetResultMpsType(ctx.op, 0);
     if (valueType != MPSDataTypeInvalid && valueOut.dataType != valueType) {
-        valueOut = [g castTensor:valueOut toType:valueType name:nil];
+        valueOut = [ctx.graph castTensor:valueOut toType:valueType name:nil];
     }
-    MPSDataType indexType = GetResultMpsType(op, 1);
+    MPSDataType indexType = GetResultMpsType(ctx.op, 1);
     if (indexType != MPSDataTypeInvalid && indexOut.dataType != indexType) {
-        indexOut = [g castTensor:indexOut toType:indexType name:nil];
+        indexOut = [ctx.graph castTensor:indexOut toType:indexType name:nil];
     }
 
-    NSArray<NSNumber*>* valueShape = GetOutputShape(op, 0);
+    NSArray<NSNumber*>* valueShape = GetOutputShape(ctx.op, 0);
     if (valueShape && valueOut) {
-        valueOut = [g reshapeTensor:valueOut withShape:valueShape name:nil];
+        valueOut = [ctx.graph reshapeTensor:valueOut withShape:valueShape name:nil];
     }
-    NSArray<NSNumber*>* indexShape = GetOutputShape(op, 1);
+    NSArray<NSNumber*>* indexShape = GetOutputShape(ctx.op, 1);
     if (indexShape && indexOut) {
-        indexOut = [g reshapeTensor:indexOut withShape:indexShape name:nil];
+        indexOut = [ctx.graph reshapeTensor:indexOut withShape:indexShape name:nil];
     }
 
-    values[op->getResult(0).getAsOpaquePointer()] = valueOut;
-    values[op->getResult(1).getAsOpaquePointer()] = indexOut;
+    ctx.values[ctx.op->getResult(0).getAsOpaquePointer()] = valueOut;
+    ctx.values[ctx.op->getResult(1).getAsOpaquePointer()] = indexOut;
     return ProcessResult{};
 }
 
 // Unified reduce handler - dispatches based on result count
-static ProcessResult HandleReduce(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
-    if (op->getNumResults() > 1) {
-        return HandleMultiResultReduce(g, op, values);
+static ProcessResult HandleReduce(HandlerContext& ctx) {
+    if (ctx.op->getNumResults() > 1) {
+        return HandleMultiResultReduce(ctx);
     }
-    return HandleSingleResultReduce(g, op, values);
+    return HandleSingleResultReduce(ctx);
 }
 REGISTER_MPS_OP("stablehlo.reduce", HandleReduce);
 
 // stablehlo.return is a terminator used inside regions (e.g., reduce body)
 // It's handled implicitly by parent operations, not executed directly
-static ProcessResult HandleReturn(MPSGraph* g, mlir::Operation* op, ValueMap& values) {
+static ProcessResult HandleReturn(HandlerContext& ctx) {
     // This should never be called directly - it's handled by the parent operation
     // But we register it so it's not flagged as unsupported during module verification
     MPS_LOG_WARN("stablehlo.return should not be called directly\n");
