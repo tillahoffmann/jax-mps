@@ -35,6 +35,13 @@ def make_slice_op_configs():
                 lambda rng: rng.normal(size=(2, 3)),
             ),
             OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                lambda rng: jnp.zeros((10, 1, 4), dtype=jnp.bfloat16),
+                lambda rng: numpy.int32(0),
+                lambda rng: jnp.ones((1, 4), dtype=jnp.bfloat16),
+                name="scalar_index_set_rank_squeezed_update",
+            ),
+            OperationTestConfig(
                 lambda x: x.at[0].set(1.0),
                 lambda rng: rng.normal(size=(10,)),
             ),

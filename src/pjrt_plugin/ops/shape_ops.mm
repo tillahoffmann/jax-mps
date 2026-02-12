@@ -593,6 +593,28 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         if (updates.shape.count == 0)
             updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
 
+        // Scalar index updates in StableHLO can drop the scattered axis from the update
+        // shape (e.g. input [10,1,4], updates [1,4] for axis 0). MPS scatter expects the
+        // update tensor rank to match the operand rank, so reinsert a singleton axis.
+        if (updates.shape.count + 1 == input.shape.count) {
+            NSArray<NSNumber*>* updatesShape = updates.shape;
+            NSMutableArray<NSNumber*>* alignedUpdatesShape =
+                [NSMutableArray arrayWithCapacity:input.shape.count];
+            NSUInteger updateDim = 0;
+            for (NSUInteger dim = 0; dim < input.shape.count; ++dim) {
+                if ((int64_t)dim == scatterAxis) {
+                    [alignedUpdatesShape addObject:@1];
+                    continue;
+                }
+                if (updateDim >= updatesShape.count) {
+                    return ProcessResult::Error(
+                        "scatter: failed to align update shape with operand rank");
+                }
+                [alignedUpdatesShape addObject:updatesShape[updateDim++]];
+            }
+            updates = [ctx.graph reshapeTensor:updates withShape:alignedUpdatesShape name:nil];
+        }
+
         // Use scatterWithDataTensor to scatter updates into input
         MPSGraphTensor* result =
             [ctx.graph scatterWithDataTensor:input
