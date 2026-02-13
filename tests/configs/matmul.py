@@ -139,7 +139,7 @@ def make_matmul_op_configs():
 
         # Edge case: zero batch size (empty batch dimension)
         # CPU handles this correctly, returning empty arrays with the right shape.
-        # MPS fails because Metal cannot create buffers of size 0.
+        # MPS doesn't support zero-sized tensors.
         yield pytest.param(
             OperationTestConfig(
                 jnp.matmul,
@@ -147,5 +147,5 @@ def make_matmul_op_configs():
                 numpy.zeros((0, 4, 5), dtype=numpy.float32),
                 name="batched_zero_batch",
             ),
-            marks=[xfail_match("Failed to create Metal buffer")],
+            marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
         )

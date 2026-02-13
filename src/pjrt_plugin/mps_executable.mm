@@ -726,6 +726,15 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                           std::to_string(inputs.size()));
         }
 
+        // Check for zero-sized tensors (MPS framework doesn't support them)
+        for (size_t i = 0; i < plan_->slots.size(); i++) {
+            if (plan_->slots[i].byte_size == 0) {
+                return ExecutionResult::Error("Zero-sized tensors are not supported by MPS. "
+                                              "Tensor at slot " +
+                                              std::to_string(i) + " has size 0 bytes.");
+            }
+        }
+
         // Handle identity functions (no steps, but outputs reference inputs)
         if (plan_->steps.empty() && !plan_->output_slots.empty() && !inputs.empty()) {
             ExecutionResult result;
