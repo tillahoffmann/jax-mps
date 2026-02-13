@@ -1,8 +1,9 @@
 import numpy
+import pytest
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 
-from .util import OperationTestConfig
+from .util import OperationTestConfig, xfail_match
 
 
 def _random_posdef(
@@ -160,3 +161,24 @@ def make_linalg_op_configs():
                 ),
                 name=f"triangular_solve_batched_{batch_str}",
             )
+
+        # Edge case: zero batch size (empty batch dimension)
+        # CPU handles this correctly, returning empty arrays with the right shape.
+        # MPS fails because Metal cannot create buffers of size 0.
+        yield pytest.param(
+            OperationTestConfig(
+                jnp.linalg.cholesky,
+                numpy.zeros((0, 3, 3), dtype=numpy.float32),
+                name="cholesky_zero_batch",
+            ),
+            marks=[xfail_match("Failed to create Metal buffer")],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _solve_triangular_lower,
+                numpy.zeros((0, 3, 3), dtype=numpy.float32),
+                numpy.zeros((0, 3, 1), dtype=numpy.float32),
+                name="triangular_solve_zero_batch",
+            ),
+            marks=[xfail_match("Failed to create Metal buffer")],
+        )

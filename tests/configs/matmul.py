@@ -5,10 +5,11 @@ the dot_general batch dimension handling.
 """
 
 import numpy
+import pytest
 from jax import lax
 from jax import numpy as jnp
 
-from .util import OperationTestConfig
+from .util import OperationTestConfig, xfail_match
 
 
 def make_matmul_op_configs():
@@ -134,4 +135,17 @@ def make_matmul_op_configs():
                 numpy.float32
             ),  # (B, N, K)
             name="dot_general_both_transposed",
+        )
+
+        # Edge case: zero batch size (empty batch dimension)
+        # CPU handles this correctly, returning empty arrays with the right shape.
+        # MPS fails because Metal cannot create buffers of size 0.
+        yield pytest.param(
+            OperationTestConfig(
+                jnp.matmul,
+                numpy.zeros((0, 3, 4), dtype=numpy.float32),
+                numpy.zeros((0, 4, 5), dtype=numpy.float32),
+                name="batched_zero_batch",
+            ),
+            marks=[xfail_match("Failed to create Metal buffer")],
         )
