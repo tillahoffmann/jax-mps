@@ -142,14 +142,12 @@ def make_linalg_op_configs():
             name="triangular_solve_1x1",
         )
 
-        # Batched inputs - gradient testing disabled because dot_general
-        # doesn't fully support batch dimensions yet.
+        # Batched inputs
         for batch_shape in [(2,), (2, 3)]:
             batch_str = "x".join(map(str, batch_shape))
             yield OperationTestConfig(
                 jnp.linalg.cholesky,
                 lambda rng, bs=batch_shape: _random_posdef(rng, 3, batch_shape=bs),
-                differentiable_argnums=(),
                 name=f"cholesky_batched_{batch_str}",
             )
             yield OperationTestConfig(
@@ -160,6 +158,5 @@ def make_linalg_op_configs():
                 lambda rng, bs=batch_shape: rng.standard_normal((*bs, 3, 1)).astype(
                     numpy.float32
                 ),
-                differentiable_argnums=(),
                 name=f"triangular_solve_batched_{batch_str}",
             )

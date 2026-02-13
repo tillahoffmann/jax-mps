@@ -1,6 +1,8 @@
 // Binary operations: add, subtract, multiply, divide, maximum, minimum,
 // compare, select, clamp, next_after, dot, dot_general
 
+#import <set>
+
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
@@ -29,7 +31,14 @@ static ProcessResult HandleDot(HandlerContext& ctx) {
 REGISTER_MPS_OP("stablehlo.dot", HandleDot);
 
 // Generalized matrix multiplication (dot_general)
-// Handles contracting dimensions and batch dimensions
+// Handles contracting dimensions and batch dimensions.
+//
+// For MPSGraph's matrixMultiplication:
+//   - LHS shape (..., M, K), RHS shape (..., K, N) -> Result (..., M, N)
+//   - Contracts LHS's last dim with RHS's second-to-last dim
+//   - Broadcasts over leading batch dimensions
+//
+// We transpose inputs so contracting dims are in the right positions.
 static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(ctx.op);
     if (!dotOp) {
@@ -54,8 +63,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
 
     MPSGraphTensor* result = nil;
 
-    // Simple case: standard 2D matmul with contraction on last/first dims
-    // LHS: (M, K), RHS: (K, N) -> (M, N)
+    // Simple case: standard 2D matmul with no batch dims and single contraction
     if (lhsBatchDims.empty() && rhsBatchDims.empty() && lhsRank == 2 && rhsRank == 2 &&
         lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
         int64_t lhsContractDim = lhsContractingDims[0];
@@ -67,21 +75,21 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
                                                       secondaryTensor:rhs
                                                                  name:nil];
         }
-        // LHS contracts on dim 0: need to transpose LHS
+        // LHS contracts on dim 0: transpose LHS
         else if (lhsContractDim == 0 && rhsContractDim == 0) {
             MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
             result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
                                                       secondaryTensor:rhs
                                                                  name:nil];
         }
-        // LHS contracts on dim 1, RHS contracts on dim 1: need to transpose RHS
+        // RHS contracts on dim 1: transpose RHS
         else if (lhsContractDim == 1 && rhsContractDim == 1) {
             MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
             result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs
                                                       secondaryTensor:rhsT
                                                                  name:nil];
         }
-        // LHS contracts on dim 0, RHS contracts on dim 1: transpose both
+        // Both transpose
         else if (lhsContractDim == 0 && rhsContractDim == 1) {
             MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
             MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
@@ -91,7 +99,72 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
         }
     }
 
-    // Fall back to simple matmul for unhandled cases
+    // Batched case: both have same number of batch dims (>0) and single contraction
+    if (!result && !lhsBatchDims.empty() && lhsBatchDims.size() == rhsBatchDims.size() &&
+        lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
+        // Verify contracting dimensions have the same size
+        int64_t lhsContractDim = lhsContractingDims[0];
+        int64_t rhsContractDim = rhsContractingDims[0];
+        NSNumber* lhsContractSize = lhsShape[(NSUInteger)lhsContractDim];
+        NSNumber* rhsContractSize = rhsShape[(NSUInteger)rhsContractDim];
+
+        if ([lhsContractSize isEqualToNumber:rhsContractSize]) {
+            // Convert to sets for fast lookup
+            std::set<int64_t> lhsBatchSet(lhsBatchDims.begin(), lhsBatchDims.end());
+            std::set<int64_t> rhsBatchSet(rhsBatchDims.begin(), rhsBatchDims.end());
+            std::set<int64_t> lhsContractSet(lhsContractingDims.begin(), lhsContractingDims.end());
+            std::set<int64_t> rhsContractSet(rhsContractingDims.begin(), rhsContractingDims.end());
+
+            // Build permutation for LHS: batch dims, free dims, contracting dims
+            NSMutableArray<NSNumber*>* lhsPerm = [NSMutableArray array];
+            for (int64_t d : lhsBatchDims)
+                [lhsPerm addObject:@(d)];
+            for (int64_t d = 0; d < static_cast<int64_t>(lhsRank); d++) {
+                if (lhsBatchSet.count(d) == 0 && lhsContractSet.count(d) == 0)
+                    [lhsPerm addObject:@(d)];
+            }
+            for (int64_t d : lhsContractingDims)
+                [lhsPerm addObject:@(d)];
+
+            // Build permutation for RHS: batch dims, contracting dims, free dims
+            NSMutableArray<NSNumber*>* rhsPerm = [NSMutableArray array];
+            for (int64_t d : rhsBatchDims)
+                [rhsPerm addObject:@(d)];
+            for (int64_t d : rhsContractingDims)
+                [rhsPerm addObject:@(d)];
+            for (int64_t d = 0; d < static_cast<int64_t>(rhsRank); d++) {
+                if (rhsBatchSet.count(d) == 0 && rhsContractSet.count(d) == 0)
+                    [rhsPerm addObject:@(d)];
+            }
+
+            // Check if permutation is identity
+            auto isIdentityPerm = [](NSArray<NSNumber*>* perm, NSUInteger rank) {
+                if (perm.count != rank)
+                    return false;
+                for (NSUInteger i = 0; i < rank; i++) {
+                    if (perm[i].unsignedIntegerValue != i)
+                        return false;
+                }
+                return true;
+            };
+
+            MPSGraphTensor* lhsT = lhs;
+            if (!isIdentityPerm(lhsPerm, lhsRank)) {
+                lhsT = [ctx.graph transposeTensor:lhs permutation:lhsPerm name:nil];
+            }
+
+            MPSGraphTensor* rhsT = rhs;
+            if (!isIdentityPerm(rhsPerm, rhsRank)) {
+                rhsT = [ctx.graph transposeTensor:rhs permutation:rhsPerm name:nil];
+            }
+
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
+                                                      secondaryTensor:rhsT
+                                                                 name:nil];
+        }
+    }
+
+    // Fallback for unhandled cases - try simple matmul (may fail for incompatible shapes)
     if (!result) {
         MPS_LOG_WARN(
             "dot_general with complex contracting/batch dims, falling back to simple matmul. "
