@@ -60,7 +60,15 @@ static id<MTLBuffer> UnpadBuffer(id<MTLDevice> device, id<MTLCommandBuffer> cmdB
 
 // ---------------------------------------------------------------------------
 // stablehlo.cholesky – native MPSMatrixDecompositionCholesky
+// Supports batched inputs of shape [batch..., n, n] by looping over batch dims.
 // ---------------------------------------------------------------------------
+
+/// Fill a buffer with zeros using blit command encoder.
+static void FillBufferWithZeros(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> buffer, size_t size) {
+    id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+    [blit fillBuffer:buffer range:NSMakeRange(0, size) value:0];
+    [blit endEncoding];
+}
 
 static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
                                            mlir::Operation* op,
@@ -78,11 +86,17 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
 
     auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     auto shape = resultType.getShape();
-    if (shape.size() != 2) {
-        MPS_LOG_ERROR("cholesky: batched inputs not yet supported (got rank %zu)\n", shape.size());
+    if (shape.size() < 2) {
+        MPS_LOG_ERROR("cholesky: expected at least rank 2 (got rank %zu)\n", shape.size());
         return nil;
     }
     int64_t n = shape[shape.size() - 1];
+
+    // Compute batch size (product of all dimensions except last two).
+    int64_t batchSize = 1;
+    for (size_t i = 0; i < shape.size() - 2; i++) {
+        batchSize *= shape[i];
+    }
 
     if (!resultType.getElementType().isF32()) {
         MPS_LOG_ERROR("cholesky: only float32 is supported (got unsupported dtype)\n");
@@ -95,41 +109,15 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     NSUInteger dataRowBytes = (NSUInteger)(n * (int64_t)elem_size);
     NSUInteger mpsRowBytes = [MPSMatrixDescriptor rowBytesFromColumns:(NSUInteger)n
                                                              dataType:mps_dtype];
+    size_t matrixDataSize = (size_t)(n * n) * elem_size;  // Size of one matrix in input.
+    size_t matrixMpsSize = (size_t)n * mpsRowBytes;       // Size of one matrix with MPS alignment.
 
-    // Pad source rows to MPS-recommended alignment.
-    id<MTLBuffer> srcBuf = PadBuffer(device, cmdBuf, inputs[0], n, dataRowBytes, mpsRowBytes);
+    // Allocate output buffer for all batches.
+    size_t totalOutSize = (size_t)batchSize * matrixDataSize;
+    id<MTLBuffer> outBuf = [device newBufferWithLength:totalOutSize
+                                               options:MTLResourceStorageModeShared];
 
-    MPSMatrixDescriptor* desc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)n
-                                                                      columns:(NSUInteger)n
-                                                                     rowBytes:mpsRowBytes
-                                                                     dataType:mps_dtype];
-    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:srcBuf descriptor:desc];
-
-    // Result buffer with MPS alignment (zero-filled so unused triangle is clean).
-    id<MTLBuffer> resultBuf = [device newBufferWithLength:mpsRowBytes * (NSUInteger)n
-                                                  options:MTLResourceStorageModeShared];
-    memset(resultBuf.contents, 0, mpsRowBytes * (NSUInteger)n);
-    MPSMatrix* resultMatrix = [[MPSMatrix alloc] initWithBuffer:resultBuf descriptor:desc];
-
-    MPSMatrixDecompositionCholesky* cholesky =
-        [[MPSMatrixDecompositionCholesky alloc] initWithDevice:device
-                                                         lower:lower
-                                                         order:(NSUInteger)n];
-
-    // The status buffer is unreliable on Apple Silicon — it always writes 0
-    // (success) regardless of whether the input is positive definite.
-    // See https://developer.apple.com/forums/thread/736787
-    [cholesky encodeToCommandBuffer:cmdBuf
-                       sourceMatrix:sourceMatrix
-                       resultMatrix:resultMatrix
-                             status:nil];
-
-    // MPSMatrixDecompositionCholesky copies the source to the result before
-    // decomposing in-place.  On failure it stops, leaving partially computed
-    // pivots on the diagonal.  The failing pivot is always non-positive (the
-    // kernel computes d = A[j,j] - sum_k L[j,k]^2 and stops when d <= 0).
-    // Encode a verification kernel that checks the diagonal and fills the
-    // output with NaN if any pivot is non-positive, matching CPU behavior.
+    // Compile the verification shader once.
     static id<MTLComputePipelineState> verifyPipeline = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -163,26 +151,85 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
       }
     });
 
-    if (verifyPipeline) {
-        uint32_t n32 = (uint32_t)n;
-        uint32_t lStride = (uint32_t)(mpsRowBytes / elem_size);
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        [enc setComputePipelineState:verifyPipeline];
-        [enc setBuffer:resultBuf offset:0 atIndex:0];
-        [enc setBytes:&n32 length:sizeof(n32) atIndex:1];
-        [enc setBytes:&lStride length:sizeof(lStride) atIndex:2];
-        [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-        [enc endEncoding];
+    MPSMatrixDescriptor* desc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)n
+                                                                      columns:(NSUInteger)n
+                                                                     rowBytes:mpsRowBytes
+                                                                     dataType:mps_dtype];
+
+    MPSMatrixDecompositionCholesky* cholesky =
+        [[MPSMatrixDecompositionCholesky alloc] initWithDevice:device
+                                                         lower:lower
+                                                         order:(NSUInteger)n];
+
+    // Process each matrix in the batch.
+    for (int64_t b = 0; b < batchSize; b++) {
+        // Blit this matrix slice from input buffer using GPU commands.
+        size_t srcOffset = (size_t)b * matrixDataSize;
+        id<MTLBuffer> srcSlice = [device newBufferWithLength:matrixDataSize
+                                                     options:MTLResourceStorageModeShared];
+        id<MTLBlitCommandEncoder> blitIn = [cmdBuf blitCommandEncoder];
+        [blitIn copyFromBuffer:inputs[0]
+                  sourceOffset:srcOffset
+                      toBuffer:srcSlice
+             destinationOffset:0
+                          size:matrixDataSize];
+        [blitIn endEncoding];
+
+        // Pad source rows to MPS-recommended alignment.
+        id<MTLBuffer> srcBuf = PadBuffer(device, cmdBuf, srcSlice, n, dataRowBytes, mpsRowBytes);
+
+        MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:srcBuf descriptor:desc];
+
+        // Result buffer with MPS alignment (zero-filled so unused triangle is clean).
+        id<MTLBuffer> resultBuf = [device newBufferWithLength:matrixMpsSize
+                                                      options:MTLResourceStorageModeShared];
+        FillBufferWithZeros(cmdBuf, resultBuf, matrixMpsSize);
+        MPSMatrix* resultMatrix = [[MPSMatrix alloc] initWithBuffer:resultBuf descriptor:desc];
+
+        // The status buffer is unreliable on Apple Silicon — it always writes 0
+        // (success) regardless of whether the input is positive definite.
+        // See https://developer.apple.com/forums/thread/736787
+        [cholesky encodeToCommandBuffer:cmdBuf
+                           sourceMatrix:sourceMatrix
+                           resultMatrix:resultMatrix
+                                 status:nil];
+
+        // Verification kernel to check diagonal and fill with NaN if non-positive.
+        if (verifyPipeline) {
+            uint32_t n32 = (uint32_t)n;
+            uint32_t lStride = (uint32_t)(mpsRowBytes / elem_size);
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            [enc setComputePipelineState:verifyPipeline];
+            [enc setBuffer:resultBuf offset:0 atIndex:0];
+            [enc setBytes:&n32 length:sizeof(n32) atIndex:1];
+            [enc setBytes:&lStride length:sizeof(lStride) atIndex:2];
+            [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [enc endEncoding];
+        }
+
+        // Unpad result to contiguous layout and copy to output buffer.
+        id<MTLBuffer> unpadded =
+            UnpadBuffer(device, cmdBuf, resultBuf, n, dataRowBytes, mpsRowBytes);
+
+        // Blit the unpadded result to the output buffer at the correct offset.
+        size_t dstOffset = (size_t)b * matrixDataSize;
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:unpadded
+                 sourceOffset:0
+                     toBuffer:outBuf
+            destinationOffset:dstOffset
+                         size:matrixDataSize];
+        [blit endEncoding];
     }
 
-    // Unpad result to contiguous layout.
-    return UnpadBuffer(device, cmdBuf, resultBuf, n, dataRowBytes, mpsRowBytes);
+    return outBuf;
 }
 
 REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
 
 // ---------------------------------------------------------------------------
 // stablehlo.triangular_solve – native MPSMatrixSolveTriangular
+// Supports batched inputs of shape [batch..., n, n] by looping over batch dims.
 // ---------------------------------------------------------------------------
 
 static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
@@ -203,14 +250,24 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
 
     auto aType = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType());
     auto bType = mlir::cast<mlir::RankedTensorType>(op->getOperand(1).getType());
-    if (aType.getShape().size() != 2 || bType.getShape().size() != 2) {
-        MPS_LOG_ERROR("triangular_solve: batched inputs not yet supported (got ranks %zu, %zu)\n",
-                      aType.getShape().size(), bType.getShape().size());
-        return nil;
-    }
+    auto aShape = aType.getShape();
     auto bShape = bType.getShape();
 
-    int64_t n = aType.getShape().back();
+    if (aShape.size() < 2 || bShape.size() < 2) {
+        MPS_LOG_ERROR("triangular_solve: expected at least rank 2 (got ranks %zu, %zu)\n",
+                      aShape.size(), bShape.size());
+        return nil;
+    }
+
+    // Compute batch size (product of all dimensions except last two).
+    // Both A and B must have the same batch dimensions.
+    int64_t batchSize = 1;
+    size_t batchRank = aShape.size() - 2;
+    for (size_t i = 0; i < batchRank; i++) {
+        batchSize *= aShape[i];
+    }
+
+    int64_t n = aShape[aShape.size() - 1];
     int64_t bRows = bShape[bShape.size() - 2];
     int64_t bCols = bShape[bShape.size() - 1];
 
@@ -234,27 +291,23 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     NSUInteger bMpsRowBytes = [MPSMatrixDescriptor rowBytesFromColumns:(NSUInteger)bCols
                                                               dataType:mps_dtype];
 
-    // Pad inputs to MPS alignment.
-    id<MTLBuffer> aBuf = PadBuffer(device, cmdBuf, inputs[0], n, aDataRowBytes, aMpsRowBytes);
-    id<MTLBuffer> bBuf = PadBuffer(device, cmdBuf, inputs[1], bRows, bDataRowBytes, bMpsRowBytes);
+    size_t aMatrixDataSize = (size_t)(n * n) * elem_size;
+    size_t bMatrixDataSize = (size_t)(bRows * bCols) * elem_size;
 
-    // Source matrix A (NxN)
+    // Allocate output buffer for all batches.
+    size_t totalOutSize = (size_t)batchSize * bMatrixDataSize;
+    id<MTLBuffer> outBuf = [device newBufferWithLength:totalOutSize
+                                               options:MTLResourceStorageModeShared];
+
     MPSMatrixDescriptor* aDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)n
                                                                        columns:(NSUInteger)n
                                                                       rowBytes:aMpsRowBytes
                                                                       dataType:mps_dtype];
-    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:aBuf descriptor:aDesc];
 
-    // RHS matrix B and solution X (same shape)
     MPSMatrixDescriptor* bDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)bRows
                                                                        columns:(NSUInteger)bCols
                                                                       rowBytes:bMpsRowBytes
                                                                       dataType:mps_dtype];
-    MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:bBuf descriptor:bDesc];
-
-    id<MTLBuffer> solBuf = [device newBufferWithLength:bMpsRowBytes * (NSUInteger)bRows
-                                               options:MTLResourceStorageModeShared];
-    MPSMatrix* solutionMatrix = [[MPSMatrix alloc] initWithBuffer:solBuf descriptor:bDesc];
 
     MPSMatrixSolveTriangular* solver =
         [[MPSMatrixSolveTriangular alloc] initWithDevice:device
@@ -266,13 +319,64 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
                                   numberOfRightHandSides:nrhs
                                                    alpha:1.0];
 
-    [solver encodeToCommandBuffer:cmdBuf
-                     sourceMatrix:sourceMatrix
-              rightHandSideMatrix:rhsMatrix
-                   solutionMatrix:solutionMatrix];
+    // Process each matrix in the batch.
+    for (int64_t b = 0; b < batchSize; b++) {
+        // Blit matrix slices from input buffers using GPU commands.
+        size_t aOffset = (size_t)b * aMatrixDataSize;
+        size_t bOffset = (size_t)b * bMatrixDataSize;
 
-    // Unpad solution to contiguous layout.
-    return UnpadBuffer(device, cmdBuf, solBuf, bRows, bDataRowBytes, bMpsRowBytes);
+        id<MTLBuffer> aSlice = [device newBufferWithLength:aMatrixDataSize
+                                                   options:MTLResourceStorageModeShared];
+        id<MTLBlitCommandEncoder> blitA = [cmdBuf blitCommandEncoder];
+        [blitA copyFromBuffer:inputs[0]
+                 sourceOffset:aOffset
+                     toBuffer:aSlice
+            destinationOffset:0
+                         size:aMatrixDataSize];
+        [blitA endEncoding];
+
+        id<MTLBuffer> bSlice = [device newBufferWithLength:bMatrixDataSize
+                                                   options:MTLResourceStorageModeShared];
+        id<MTLBlitCommandEncoder> blitB = [cmdBuf blitCommandEncoder];
+        [blitB copyFromBuffer:inputs[1]
+                 sourceOffset:bOffset
+                     toBuffer:bSlice
+            destinationOffset:0
+                         size:bMatrixDataSize];
+        [blitB endEncoding];
+
+        // Pad inputs to MPS alignment.
+        id<MTLBuffer> aBuf = PadBuffer(device, cmdBuf, aSlice, n, aDataRowBytes, aMpsRowBytes);
+        id<MTLBuffer> bBuf = PadBuffer(device, cmdBuf, bSlice, bRows, bDataRowBytes, bMpsRowBytes);
+
+        MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:aBuf descriptor:aDesc];
+        MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:bBuf descriptor:bDesc];
+
+        id<MTLBuffer> solBuf = [device newBufferWithLength:bMpsRowBytes * (NSUInteger)bRows
+                                                   options:MTLResourceStorageModeShared];
+        MPSMatrix* solutionMatrix = [[MPSMatrix alloc] initWithBuffer:solBuf descriptor:bDesc];
+
+        [solver encodeToCommandBuffer:cmdBuf
+                         sourceMatrix:sourceMatrix
+                  rightHandSideMatrix:rhsMatrix
+                       solutionMatrix:solutionMatrix];
+
+        // Unpad solution to contiguous layout and copy to output buffer.
+        id<MTLBuffer> unpadded =
+            UnpadBuffer(device, cmdBuf, solBuf, bRows, bDataRowBytes, bMpsRowBytes);
+
+        // Blit the unpadded result to the output buffer at the correct offset.
+        size_t dstOffset = (size_t)b * bMatrixDataSize;
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:unpadded
+                 sourceOffset:0
+                     toBuffer:outBuf
+            destinationOffset:dstOffset
+                         size:bMatrixDataSize];
+        [blit endEncoding];
+    }
+
+    return outBuf;
 }
 
 REGISTER_NATIVE_MPS_OP("stablehlo.triangular_solve", NativeHandle_triangular_solve);
