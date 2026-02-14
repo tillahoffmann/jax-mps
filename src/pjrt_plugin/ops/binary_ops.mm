@@ -1,9 +1,73 @@
 // Binary operations: add, subtract, multiply, divide, maximum, minimum,
 // compare, select, clamp, next_after, dot, dot_general
 
+#include <algorithm>
+
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
+
+// ---------------------------------------------------------------------------
+// Helpers for dot_general permutation building
+// ---------------------------------------------------------------------------
+
+/// Check if a dimension is in the given list (linear search, fast for small lists).
+static bool ContainsDim(const llvm::ArrayRef<int64_t>& dims, int64_t d) {
+    return std::find(dims.begin(), dims.end(), d) != dims.end();
+}
+
+/// Build a permutation array that reorders dimensions for MPS matrixMultiplication.
+/// MPS expects: primary (..., M, K), secondary (..., K, N) -> (..., M, N)
+/// where K is the contracting dimension.
+///
+/// For LHS (contractAtEnd=true):  [batch dims] [free dims] [contracting dims]
+/// For RHS (contractAtEnd=false): [batch dims] [contracting dims] [free dims]
+static NSMutableArray<NSNumber*>* BuildPermutation(int64_t rank,
+                                                   const llvm::ArrayRef<int64_t>& batchDims,
+                                                   const llvm::ArrayRef<int64_t>& contractDims,
+                                                   bool contractAtEnd) {
+    NSMutableArray<NSNumber*>* perm = [NSMutableArray array];
+
+    // Batch dims first
+    for (int64_t d : batchDims) {
+        [perm addObject:@(d)];
+    }
+
+    if (contractAtEnd) {
+        // Free dims, then contracting dims (for LHS)
+        for (int64_t d = 0; d < rank; d++) {
+            if (!ContainsDim(batchDims, d) && !ContainsDim(contractDims, d)) {
+                [perm addObject:@(d)];
+            }
+        }
+        for (int64_t d : contractDims) {
+            [perm addObject:@(d)];
+        }
+    } else {
+        // Contracting dims, then free dims (for RHS)
+        for (int64_t d : contractDims) {
+            [perm addObject:@(d)];
+        }
+        for (int64_t d = 0; d < rank; d++) {
+            if (!ContainsDim(batchDims, d) && !ContainsDim(contractDims, d)) {
+                [perm addObject:@(d)];
+            }
+        }
+    }
+
+    return perm;
+}
+
+/// Check if a permutation is the identity (no reordering needed).
+static bool IsIdentityPerm(NSArray<NSNumber*>* perm, NSUInteger rank) {
+    if (perm.count != rank)
+        return false;
+    for (NSUInteger i = 0; i < rank; i++) {
+        if (perm[i].unsignedIntegerValue != i)
+            return false;
+    }
+    return true;
+}
 
 REGISTER_MLIR_BINARY_OP("stablehlo.add", addition, add);
 REGISTER_MLIR_BINARY_OP("stablehlo.subtract", subtraction, subtract);
@@ -29,7 +93,14 @@ static ProcessResult HandleDot(HandlerContext& ctx) {
 REGISTER_MPS_OP("stablehlo.dot", HandleDot);
 
 // Generalized matrix multiplication (dot_general)
-// Handles contracting dimensions and batch dimensions
+// Handles contracting dimensions and batch dimensions.
+//
+// For MPSGraph's matrixMultiplication:
+//   - LHS shape (..., M, K), RHS shape (..., K, N) -> Result (..., M, N)
+//   - Contracts LHS's last dim with RHS's second-to-last dim
+//   - Broadcasts over leading batch dimensions
+//
+// We transpose inputs so contracting dims are in the right positions.
 static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(ctx.op);
     if (!dotOp) {
@@ -54,8 +125,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
 
     MPSGraphTensor* result = nil;
 
-    // Simple case: standard 2D matmul with contraction on last/first dims
-    // LHS: (M, K), RHS: (K, N) -> (M, N)
+    // Simple case: standard 2D matmul with no batch dims and single contraction
     if (lhsBatchDims.empty() && rhsBatchDims.empty() && lhsRank == 2 && rhsRank == 2 &&
         lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
         int64_t lhsContractDim = lhsContractingDims[0];
@@ -67,21 +137,21 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
                                                       secondaryTensor:rhs
                                                                  name:nil];
         }
-        // LHS contracts on dim 0: need to transpose LHS
+        // LHS contracts on dim 0: transpose LHS
         else if (lhsContractDim == 0 && rhsContractDim == 0) {
             MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
             result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
                                                       secondaryTensor:rhs
                                                                  name:nil];
         }
-        // LHS contracts on dim 1, RHS contracts on dim 1: need to transpose RHS
+        // RHS contracts on dim 1: transpose RHS
         else if (lhsContractDim == 1 && rhsContractDim == 1) {
             MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
             result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs
                                                       secondaryTensor:rhsT
                                                                  name:nil];
         }
-        // LHS contracts on dim 0, RHS contracts on dim 1: transpose both
+        // Both transpose
         else if (lhsContractDim == 0 && rhsContractDim == 1) {
             MPSGraphTensor* lhsT = [ctx.graph transposeTensor:lhs permutation:@[@1, @0] name:nil];
             MPSGraphTensor* rhsT = [ctx.graph transposeTensor:rhs permutation:@[@1, @0] name:nil];
@@ -91,7 +161,69 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
         }
     }
 
-    // Fall back to simple matmul for unhandled cases
+    // Batched case: both have same number of batch dims (>0) and single contraction
+    if (!result && !lhsBatchDims.empty() && lhsBatchDims.size() == rhsBatchDims.size() &&
+        lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
+        // Verify matmul-like semantics: exactly one free dimension per operand.
+        // Free dims = total dims - batch dims - contracting dims
+        NSUInteger lhsFreeDims = lhsRank - lhsBatchDims.size() - lhsContractingDims.size();
+        NSUInteger rhsFreeDims = rhsRank - rhsBatchDims.size() - rhsContractingDims.size();
+        if (lhsFreeDims != 1 || rhsFreeDims != 1) {
+            // Not matmul-like - batched operations with multiple free dimensions are not
+            // supported. MPS's matrixMultiplication expects exactly one free dim per operand
+            // (M for LHS, N for RHS) in addition to batch and contracting dimensions.
+            return ProcessResult::Error(
+                "dot_general: batched operations with multiple free dimensions are not "
+                "supported (LHS has " +
+                std::to_string(lhsFreeDims) + " free dims, RHS has " + std::to_string(rhsFreeDims) +
+                " free dims, expected 1 each)");
+        } else {
+            // Verify batch dimension sizes match
+            bool batchSizesMatch = true;
+            for (size_t i = 0; i < lhsBatchDims.size(); i++) {
+                NSNumber* lhsBatchSize = lhsShape[(NSUInteger)lhsBatchDims[i]];
+                NSNumber* rhsBatchSize = rhsShape[(NSUInteger)rhsBatchDims[i]];
+                if (![lhsBatchSize isEqualToNumber:rhsBatchSize]) {
+                    batchSizesMatch = false;
+                    break;
+                }
+            }
+
+            // Verify contracting dimensions have the same size
+            int64_t lhsContractDim = lhsContractingDims[0];
+            int64_t rhsContractDim = rhsContractingDims[0];
+            NSNumber* lhsContractSize = lhsShape[(NSUInteger)lhsContractDim];
+            NSNumber* rhsContractSize = rhsShape[(NSUInteger)rhsContractDim];
+
+            if (batchSizesMatch && [lhsContractSize isEqualToNumber:rhsContractSize]) {
+                // Build permutations to reorder dims for MPS matrixMultiplication.
+                // LHS: [batch] [free] [contract] -> (..., M, K)
+                // RHS: [batch] [contract] [free] -> (..., K, N)
+                NSMutableArray<NSNumber*>* lhsPerm = BuildPermutation(
+                    static_cast<int64_t>(lhsRank), lhsBatchDims, lhsContractingDims,
+                    /*contractAtEnd=*/true);
+                NSMutableArray<NSNumber*>* rhsPerm = BuildPermutation(
+                    static_cast<int64_t>(rhsRank), rhsBatchDims, rhsContractingDims,
+                    /*contractAtEnd=*/false);
+
+                MPSGraphTensor* lhsT = lhs;
+                if (!IsIdentityPerm(lhsPerm, lhsRank)) {
+                    lhsT = [ctx.graph transposeTensor:lhs permutation:lhsPerm name:nil];
+                }
+
+                MPSGraphTensor* rhsT = rhs;
+                if (!IsIdentityPerm(rhsPerm, rhsRank)) {
+                    rhsT = [ctx.graph transposeTensor:rhs permutation:rhsPerm name:nil];
+                }
+
+                result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
+                                                          secondaryTensor:rhsT
+                                                                     name:nil];
+            }
+        }  // end else (matmul-like validation)
+    }
+
+    // Fallback for unhandled cases - try simple matmul (may fail for incompatible shapes)
     if (!result) {
         MPS_LOG_WARN(
             "dot_general with complex contracting/batch dims, falling back to simple matmul. "

@@ -726,6 +726,15 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                           std::to_string(inputs.size()));
         }
 
+        // Check for zero-sized tensors (MPS framework doesn't support them)
+        for (size_t i = 0; i < plan_->slots.size(); i++) {
+            if (plan_->slots[i].byte_size == 0) {
+                return ExecutionResult::Error("Zero-sized tensors are not supported by MPS. "
+                                              "Tensor at slot " +
+                                              std::to_string(i) + " has size 0 bytes.");
+            }
+        }
+
         // Handle identity functions (no steps, but outputs reference inputs)
         if (plan_->steps.empty() && !plan_->output_slots.empty() && !inputs.empty()) {
             ExecutionResult result;
@@ -933,12 +942,12 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     input_bufs.push_back(slot_bufs[slot]);
                 }
 
-                id<MTLBuffer> output = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
-                if (!output) {
-                    return ExecutionResult::Error("Native op handler returned nil");
+                NativeResult result = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
+                if (!result.ok()) {
+                    return ExecutionResult::Error(result.error);
                 }
 
-                slot_bufs[ns.output_slot] = output;
+                slot_bufs[ns.output_slot] = result.buffer;
             }
         }
 
