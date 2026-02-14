@@ -17,6 +17,7 @@ Avoid commenting on:
 - Availability of standard Unix tools (bc, awk, grep) in developer scripts
 - Constants whose meaning is clear from context
 - Alternative implementations when the current code is correct and readable
+- Syntax or type errors and code formatting or style (will be caught by the compiler and linters)
 
 ## Architecture
 

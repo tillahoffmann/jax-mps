@@ -72,10 +72,32 @@ struct HandlerContext {
 // Graph handler: operates on MPSGraph tensors, builds computation graph
 using GraphOpHandler = ProcessResult (*)(HandlerContext& ctx);
 
+// Result type for native op handlers - can be an error or a buffer
+struct NativeResult {
+    id<MTLBuffer> buffer = nil;
+    std::string error;
+
+    bool ok() const {
+        return error.empty();
+    }
+
+    static NativeResult Error(const std::string& msg) {
+        NativeResult r;
+        r.error = msg;
+        return r;
+    }
+
+    static NativeResult Buffer(id<MTLBuffer> buf) {
+        NativeResult r;
+        r.buffer = buf;
+        return r;
+    }
+};
+
 // Native handler: operates directly on Metal buffers via command buffer encoding
-// Returns the output buffer (single-output ops only for now)
-using NativeOpHandler = id<MTLBuffer> (*)(id<MTLDevice>, id<MTLCommandBuffer>, mlir::Operation*,
-                                          const std::vector<id<MTLBuffer>>&);
+// Returns a NativeResult containing either the output buffer or an error message
+using NativeOpHandler = NativeResult (*)(id<MTLDevice>, id<MTLCommandBuffer>, mlir::Operation*,
+                                         const std::vector<id<MTLBuffer>>&);
 
 // ---------------------------------------------------------------------------
 // Tagged handler: unified representation for both execution models

@@ -6,10 +6,17 @@ from jax.scipy.linalg import solve_triangular
 from .util import OperationTestConfig, xfail_match
 
 
-def _random_posdef(rng: numpy.random.Generator, n: int) -> numpy.ndarray:
-    """Generate a random positive-definite matrix of size n x n."""
-    A = rng.standard_normal((n, n)).astype(numpy.float32)
-    return A @ A.T + n * numpy.eye(n, dtype=numpy.float32)
+def _random_posdef(
+    rng: numpy.random.Generator, n: int, batch_shape: tuple[int, ...] = ()
+) -> numpy.ndarray:
+    """Generate random positive-definite matrices of shape (*batch_shape, n, n)."""
+    shape = (*batch_shape, n, n)
+    A = rng.standard_normal(shape).astype(numpy.float32)
+    # A @ A.T for batched inputs: (..., n, n) @ (..., n, n) -> (..., n, n)
+    result = numpy.einsum("...ij,...kj->...ik", A, A) + n * numpy.eye(
+        n, dtype=numpy.float32
+    )
+    return result
 
 
 def _solve_triangular_lower(L, B):
@@ -33,12 +40,18 @@ def _solve_triangular_unit_diag(L, B):
 
 
 def _random_triangular(
-    rng: numpy.random.Generator, n: int, lower: bool = True
+    rng: numpy.random.Generator,
+    n: int,
+    lower: bool = True,
+    batch_shape: tuple[int, ...] = (),
 ) -> numpy.ndarray:
-    """Generate a random well-conditioned triangular matrix."""
-    M = rng.standard_normal((n, n)).astype(numpy.float32)
+    """Generate random well-conditioned triangular matrices of shape (*batch_shape, n, n)."""
+    shape = (*batch_shape, n, n)
+    M = rng.standard_normal(shape).astype(numpy.float32)
     L = numpy.tril(M) if lower else numpy.triu(M)
-    numpy.fill_diagonal(L, numpy.abs(numpy.diag(L)) + 1)
+    # Fix diagonal to ensure well-conditioned: |diag| + 1
+    diag_idx = numpy.arange(n)
+    L[..., diag_idx, diag_idx] = numpy.abs(L[..., diag_idx, diag_idx]) + 1
     return L
 
 
@@ -130,16 +143,42 @@ def make_linalg_op_configs():
             name="triangular_solve_1x1",
         )
 
-        # Batched inputs: not yet supported by native MPS kernels.
+        # Batched inputs
+        for batch_shape in [(2,), (2, 3)]:
+            batch_str = "x".join(map(str, batch_shape))
+            yield OperationTestConfig(
+                jnp.linalg.cholesky,
+                lambda rng, bs=batch_shape: _random_posdef(rng, 3, batch_shape=bs),
+                name=f"cholesky_batched_{batch_str}",
+            )
+            yield OperationTestConfig(
+                _solve_triangular_lower,
+                lambda rng, bs=batch_shape: _random_triangular(
+                    rng, 3, lower=True, batch_shape=bs
+                ),
+                lambda rng, bs=batch_shape: rng.standard_normal((*bs, 3, 1)).astype(
+                    numpy.float32
+                ),
+                name=f"triangular_solve_batched_{batch_str}",
+            )
+
+        # Edge case: zero batch size (empty batch dimension)
+        # CPU handles this correctly, returning empty arrays with the right shape.
+        # MPS doesn't support zero-sized tensors.
         yield pytest.param(
             OperationTestConfig(
                 jnp.linalg.cholesky,
-                lambda rng: numpy.stack(
-                    [_random_posdef(rng, 3), _random_posdef(rng, 3)]
-                ),
-                name="cholesky_batched",
+                numpy.zeros((0, 3, 3), dtype=numpy.float32),
+                name="cholesky_zero_batch",
             ),
-            marks=xfail_match(
-                "batched inputs not yet supported|Native op handler returned nil"
+            marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _solve_triangular_lower,
+                numpy.zeros((0, 3, 3), dtype=numpy.float32),
+                numpy.zeros((0, 3, 1), dtype=numpy.float32),
+                name="triangular_solve_zero_batch",
             ),
+            marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
         )
