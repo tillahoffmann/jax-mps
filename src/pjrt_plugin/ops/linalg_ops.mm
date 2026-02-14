@@ -169,6 +169,10 @@ static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuf
     // srcBuf: padded source for MPS (same as srcSlice if no padding needed)
     // resultBuf: MPS output with alignment
     // unpaddedBuf: contiguous result (same as resultBuf if no padding needed)
+    //
+    // NOTE: Using MTLResourceStorageModeShared for simplicity. If profiling shows
+    // memory bandwidth is a bottleneck, consider MTLResourceStorageModePrivate for
+    // GPU-only intermediate buffers (srcBuf, resultBuf when padding is needed).
     bool needsPadding = (mpsRowBytes != dataRowBytes);
     id<MTLBuffer> srcSlice = [device newBufferWithLength:matrixDataSize
                                                  options:MTLResourceStorageModeShared];
@@ -363,6 +367,9 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
                                                    alpha:1.0];
 
     // Pre-allocate reusable buffers for batch processing.
+    // NOTE: Using MTLResourceStorageModeShared for simplicity. If profiling shows
+    // memory bandwidth is a bottleneck, consider MTLResourceStorageModePrivate for
+    // GPU-only intermediate buffers (aBuf, bBuf, solBuf when padding is needed).
     bool aNeedsPadding = (aMpsRowBytes != aDataRowBytes);
     bool bNeedsPadding = (bMpsRowBytes != bDataRowBytes);
     size_t aMpsSize = (size_t)n * aMpsRowBytes;
