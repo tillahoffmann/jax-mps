@@ -1,11 +1,73 @@
 // Binary operations: add, subtract, multiply, divide, maximum, minimum,
 // compare, select, clamp, next_after, dot, dot_general
 
-#include <set>
+#include <algorithm>
 
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
+
+// ---------------------------------------------------------------------------
+// Helpers for dot_general permutation building
+// ---------------------------------------------------------------------------
+
+/// Check if a dimension is in the given list (linear search, fast for small lists).
+static bool ContainsDim(const llvm::ArrayRef<int64_t>& dims, int64_t d) {
+    return std::find(dims.begin(), dims.end(), d) != dims.end();
+}
+
+/// Build a permutation array that reorders dimensions for MPS matrixMultiplication.
+/// MPS expects: primary (..., M, K), secondary (..., K, N) -> (..., M, N)
+/// where K is the contracting dimension.
+///
+/// For LHS (contractAtEnd=true):  [batch dims] [free dims] [contracting dims]
+/// For RHS (contractAtEnd=false): [batch dims] [contracting dims] [free dims]
+static NSMutableArray<NSNumber*>* BuildPermutation(int64_t rank,
+                                                   const llvm::ArrayRef<int64_t>& batchDims,
+                                                   const llvm::ArrayRef<int64_t>& contractDims,
+                                                   bool contractAtEnd) {
+    NSMutableArray<NSNumber*>* perm = [NSMutableArray array];
+
+    // Batch dims first
+    for (int64_t d : batchDims) {
+        [perm addObject:@(d)];
+    }
+
+    if (contractAtEnd) {
+        // Free dims, then contracting dims (for LHS)
+        for (int64_t d = 0; d < rank; d++) {
+            if (!ContainsDim(batchDims, d) && !ContainsDim(contractDims, d)) {
+                [perm addObject:@(d)];
+            }
+        }
+        for (int64_t d : contractDims) {
+            [perm addObject:@(d)];
+        }
+    } else {
+        // Contracting dims, then free dims (for RHS)
+        for (int64_t d : contractDims) {
+            [perm addObject:@(d)];
+        }
+        for (int64_t d = 0; d < rank; d++) {
+            if (!ContainsDim(batchDims, d) && !ContainsDim(contractDims, d)) {
+                [perm addObject:@(d)];
+            }
+        }
+    }
+
+    return perm;
+}
+
+/// Check if a permutation is the identity (no reordering needed).
+static bool IsIdentityPerm(NSArray<NSNumber*>* perm, NSUInteger rank) {
+    if (perm.count != rank)
+        return false;
+    for (NSUInteger i = 0; i < rank; i++) {
+        if (perm[i].unsignedIntegerValue != i)
+            return false;
+    }
+    return true;
+}
 
 REGISTER_MLIR_BINARY_OP("stablehlo.add", addition, add);
 REGISTER_MLIR_BINARY_OP("stablehlo.subtract", subtraction, subtract);
@@ -120,52 +182,23 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
         NSNumber* rhsContractSize = rhsShape[(NSUInteger)rhsContractDim];
 
         if (batchSizesMatch && [lhsContractSize isEqualToNumber:rhsContractSize]) {
-            // Convert to sets for fast lookup
-            std::set<int64_t> lhsBatchSet(lhsBatchDims.begin(), lhsBatchDims.end());
-            std::set<int64_t> rhsBatchSet(rhsBatchDims.begin(), rhsBatchDims.end());
-            std::set<int64_t> lhsContractSet(lhsContractingDims.begin(), lhsContractingDims.end());
-            std::set<int64_t> rhsContractSet(rhsContractingDims.begin(), rhsContractingDims.end());
-
-            // Build permutation for LHS: batch dims, free dims, contracting dims
-            NSMutableArray<NSNumber*>* lhsPerm = [NSMutableArray array];
-            for (int64_t d : lhsBatchDims)
-                [lhsPerm addObject:@(d)];
-            for (int64_t d = 0; d < static_cast<int64_t>(lhsRank); d++) {
-                if (lhsBatchSet.count(d) == 0 && lhsContractSet.count(d) == 0)
-                    [lhsPerm addObject:@(d)];
-            }
-            for (int64_t d : lhsContractingDims)
-                [lhsPerm addObject:@(d)];
-
-            // Build permutation for RHS: batch dims, contracting dims, free dims
-            NSMutableArray<NSNumber*>* rhsPerm = [NSMutableArray array];
-            for (int64_t d : rhsBatchDims)
-                [rhsPerm addObject:@(d)];
-            for (int64_t d : rhsContractingDims)
-                [rhsPerm addObject:@(d)];
-            for (int64_t d = 0; d < static_cast<int64_t>(rhsRank); d++) {
-                if (rhsBatchSet.count(d) == 0 && rhsContractSet.count(d) == 0)
-                    [rhsPerm addObject:@(d)];
-            }
-
-            // Check if permutation is identity
-            auto isIdentityPerm = [](NSArray<NSNumber*>* perm, NSUInteger rank) {
-                if (perm.count != rank)
-                    return false;
-                for (NSUInteger i = 0; i < rank; i++) {
-                    if (perm[i].unsignedIntegerValue != i)
-                        return false;
-                }
-                return true;
-            };
+            // Build permutations to reorder dims for MPS matrixMultiplication.
+            // LHS: [batch] [free] [contract] -> (..., M, K)
+            // RHS: [batch] [contract] [free] -> (..., K, N)
+            NSMutableArray<NSNumber*>* lhsPerm =
+                BuildPermutation(static_cast<int64_t>(lhsRank), lhsBatchDims, lhsContractingDims,
+                                 /*contractAtEnd=*/true);
+            NSMutableArray<NSNumber*>* rhsPerm =
+                BuildPermutation(static_cast<int64_t>(rhsRank), rhsBatchDims, rhsContractingDims,
+                                 /*contractAtEnd=*/false);
 
             MPSGraphTensor* lhsT = lhs;
-            if (!isIdentityPerm(lhsPerm, lhsRank)) {
+            if (!IsIdentityPerm(lhsPerm, lhsRank)) {
                 lhsT = [ctx.graph transposeTensor:lhs permutation:lhsPerm name:nil];
             }
 
             MPSGraphTensor* rhsT = rhs;
-            if (!isIdentityPerm(rhsPerm, rhsRank)) {
+            if (!IsIdentityPerm(rhsPerm, rhsRank)) {
                 rhsT = [ctx.graph transposeTensor:rhs permutation:rhsPerm name:nil];
             }
 
