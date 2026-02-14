@@ -61,6 +61,11 @@ static void UnpadToBuffer(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> src, id<MTL
 // ---------------------------------------------------------------------------
 // stablehlo.cholesky – native MPSMatrixDecompositionCholesky
 // Supports batched inputs of shape [batch..., n, n] by looping over batch dims.
+//
+// NOTE: Unlike MPSMatrixMultiplication which has native batch support via
+// batchStart/batchSize, MPSMatrixDecompositionCholesky only supports single
+// matrix operations. The loop-based approach is necessary. This matches how
+// other frameworks (e.g., mlx) handle batched Cholesky on MPS.
 // ---------------------------------------------------------------------------
 
 /// Fill a buffer with zeros using blit command encoder.
@@ -257,6 +262,9 @@ REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
 // ---------------------------------------------------------------------------
 // stablehlo.triangular_solve – native MPSMatrixSolveTriangular
 // Supports batched inputs of shape [batch..., n, n] by looping over batch dims.
+//
+// NOTE: MPSMatrixSolveTriangular only supports single matrix operations.
+// The loop-based approach is necessary (same limitation as Cholesky above).
 // ---------------------------------------------------------------------------
 
 static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
