@@ -942,12 +942,12 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     input_bufs.push_back(slot_bufs[slot]);
                 }
 
-                id<MTLBuffer> output = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
-                if (!output) {
-                    return ExecutionResult::Error("Native op handler returned nil");
+                NativeResult result = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
+                if (!result.ok()) {
+                    return ExecutionResult::Error(result.error);
                 }
 
-                slot_bufs[ns.output_slot] = output;
+                slot_bufs[ns.output_slot] = result.buffer;
             }
         }
 

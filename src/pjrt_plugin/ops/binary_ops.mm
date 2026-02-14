@@ -1,7 +1,7 @@
 // Binary operations: add, subtract, multiply, divide, maximum, minimum,
 // compare, select, clamp, next_after, dot, dot_general
 
-#import <set>
+#include <set>
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -102,13 +102,24 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     // Batched case: both have same number of batch dims (>0) and single contraction
     if (!result && !lhsBatchDims.empty() && lhsBatchDims.size() == rhsBatchDims.size() &&
         lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
+        // Verify batch dimension sizes match
+        bool batchSizesMatch = true;
+        for (size_t i = 0; i < lhsBatchDims.size(); i++) {
+            NSNumber* lhsBatchSize = lhsShape[(NSUInteger)lhsBatchDims[i]];
+            NSNumber* rhsBatchSize = rhsShape[(NSUInteger)rhsBatchDims[i]];
+            if (![lhsBatchSize isEqualToNumber:rhsBatchSize]) {
+                batchSizesMatch = false;
+                break;
+            }
+        }
+
         // Verify contracting dimensions have the same size
         int64_t lhsContractDim = lhsContractingDims[0];
         int64_t rhsContractDim = rhsContractingDims[0];
         NSNumber* lhsContractSize = lhsShape[(NSUInteger)lhsContractDim];
         NSNumber* rhsContractSize = rhsShape[(NSUInteger)rhsContractDim];
 
-        if ([lhsContractSize isEqualToNumber:rhsContractSize]) {
+        if (batchSizesMatch && [lhsContractSize isEqualToNumber:rhsContractSize]) {
             // Convert to sets for fast lookup
             std::set<int64_t> lhsBatchSet(lhsBatchDims.begin(), lhsBatchDims.end());
             std::set<int64_t> rhsBatchSet(rhsBatchDims.begin(), rhsBatchDims.end());

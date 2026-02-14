@@ -70,13 +70,12 @@ static void FillBufferWithZeros(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> buffe
     [blit endEncoding];
 }
 
-static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
-                                           mlir::Operation* op,
-                                           const std::vector<id<MTLBuffer>>& inputs) {
+static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
+                                          mlir::Operation* op,
+                                          const std::vector<id<MTLBuffer>>& inputs) {
     auto choleskyOp = mlir::dyn_cast<mlir::stablehlo::CholeskyOp>(op);
     if (!choleskyOp) {
-        MPS_LOG_ERROR("cholesky: expected CholeskyOp\n");
-        return nil;
+        return NativeResult::Error("cholesky: expected CholeskyOp");
     }
 
     bool lower = true;
@@ -87,10 +86,15 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     auto shape = resultType.getShape();
     if (shape.size() < 2) {
-        MPS_LOG_ERROR("cholesky: expected at least rank 2 (got rank %zu)\n", shape.size());
-        return nil;
+        return NativeResult::Error("cholesky: expected at least rank 2 (got rank " +
+                                   std::to_string(shape.size()) + ")");
     }
     int64_t n = shape[shape.size() - 1];
+    int64_t m = shape[shape.size() - 2];
+    if (n != m) {
+        return NativeResult::Error("cholesky: expected square matrix (got " + std::to_string(m) +
+                                   " x " + std::to_string(n) + ")");
+    }
 
     // Compute batch size (product of all dimensions except last two).
     int64_t batchSize = 1;
@@ -99,8 +103,7 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     }
 
     if (!resultType.getElementType().isF32()) {
-        MPS_LOG_ERROR("cholesky: only float32 is supported (got unsupported dtype)\n");
-        return nil;
+        return NativeResult::Error("cholesky: only float32 is supported");
     }
 
     MPSDataType mps_dtype = MlirTypeToMps(resultType.getElementType());
@@ -222,7 +225,7 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
         [blit endEncoding];
     }
 
-    return outBuf;
+    return NativeResult::Buffer(outBuf);
 }
 
 REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
@@ -232,13 +235,12 @@ REGISTER_NATIVE_MPS_OP("stablehlo.cholesky", NativeHandle_cholesky);
 // Supports batched inputs of shape [batch..., n, n] by looping over batch dims.
 // ---------------------------------------------------------------------------
 
-static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
-                                                   id<MTLCommandBuffer> cmdBuf, mlir::Operation* op,
-                                                   const std::vector<id<MTLBuffer>>& inputs) {
+static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
+                                                  mlir::Operation* op,
+                                                  const std::vector<id<MTLBuffer>>& inputs) {
     auto triSolveOp = mlir::dyn_cast<mlir::stablehlo::TriangularSolveOp>(op);
     if (!triSolveOp) {
-        MPS_LOG_ERROR("triangular_solve: expected TriangularSolveOp\n");
-        return nil;
+        return NativeResult::Error("triangular_solve: expected TriangularSolveOp");
     }
 
     bool leftSide = triSolveOp.getLeftSide();
@@ -254,9 +256,31 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     auto bShape = bType.getShape();
 
     if (aShape.size() < 2 || bShape.size() < 2) {
-        MPS_LOG_ERROR("triangular_solve: expected at least rank 2 (got ranks %zu, %zu)\n",
-                      aShape.size(), bShape.size());
-        return nil;
+        return NativeResult::Error("triangular_solve: expected at least rank 2 (got ranks " +
+                                   std::to_string(aShape.size()) + ", " +
+                                   std::to_string(bShape.size()) + ")");
+    }
+
+    // A must be square.
+    int64_t aRows = aShape[aShape.size() - 2];
+    int64_t aCols = aShape[aShape.size() - 1];
+    if (aRows != aCols) {
+        return NativeResult::Error("triangular_solve: matrix A must be square (got " +
+                                   std::to_string(aRows) + " x " + std::to_string(aCols) + ")");
+    }
+
+    // A and B must have matching rank and batch dimensions.
+    if (aShape.size() != bShape.size()) {
+        return NativeResult::Error("triangular_solve: A and B must have same rank (got " +
+                                   std::to_string(aShape.size()) + " vs " +
+                                   std::to_string(bShape.size()) + ")");
+    }
+    for (size_t i = 0; i < aShape.size() - 2; i++) {
+        if (aShape[i] != bShape[i]) {
+            return NativeResult::Error(
+                "triangular_solve: A and B batch dimensions must match (dim " + std::to_string(i) +
+                ": " + std::to_string(aShape[i]) + " vs " + std::to_string(bShape[i]) + ")");
+        }
     }
 
     // Compute batch size (product of all dimensions except last two).
@@ -272,8 +296,7 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     int64_t bCols = bShape[bShape.size() - 1];
 
     if (!bType.getElementType().isF32()) {
-        MPS_LOG_ERROR("triangular_solve: only float32 is supported (got unsupported dtype)\n");
-        return nil;
+        return NativeResult::Error("triangular_solve: only float32 is supported");
     }
 
     MPSDataType mps_dtype = MlirTypeToMps(bType.getElementType());
@@ -376,7 +399,7 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
         [blit endEncoding];
     }
 
-    return outBuf;
+    return NativeResult::Buffer(outBuf);
 }
 
 REGISTER_NATIVE_MPS_OP("stablehlo.triangular_solve", NativeHandle_triangular_solve);
