@@ -32,30 +32,30 @@ static void BlitRows(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> src, NSUInteger 
     [blit endEncoding];
 }
 
-/// Allocate a zero-filled staging buffer and blit contiguous rows into it.
-/// Returns the staging buffer, or the original buffer if no padding is needed.
-static id<MTLBuffer> PadBuffer(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> src,
-                               int64_t rows, NSUInteger dataRowBytes, NSUInteger mpsRowBytes) {
-    if (mpsRowBytes == dataRowBytes)
-        return src;
-    id<MTLBuffer> padded = [device newBufferWithLength:mpsRowBytes * (NSUInteger)rows
-                                               options:MTLResourceStorageModeShared];
-    memset(padded.contents, 0, mpsRowBytes * (NSUInteger)rows);
-    BlitRows(cmdBuf, src, dataRowBytes, padded, mpsRowBytes, rows, dataRowBytes);
-    return padded;
+/// Copy contiguous rows from src to pre-allocated dst with different row strides.
+/// If no padding is needed (strides match), just copies the data directly.
+static void PadToBuffer(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> src, id<MTLBuffer> dst,
+                        int64_t rows, NSUInteger dataRowBytes, NSUInteger mpsRowBytes) {
+    if (mpsRowBytes == dataRowBytes) {
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:src.length];
+        [blit endEncoding];
+    } else {
+        BlitRows(cmdBuf, src, dataRowBytes, dst, mpsRowBytes, rows, dataRowBytes);
+    }
 }
 
-/// Blit rows from a padded staging buffer into a new contiguous output buffer.
-/// Returns the padded buffer directly if no padding was needed.
-static id<MTLBuffer> UnpadBuffer(id<MTLDevice> device, id<MTLCommandBuffer> cmdBuf,
-                                 id<MTLBuffer> padded, int64_t rows, NSUInteger dataRowBytes,
-                                 NSUInteger mpsRowBytes) {
-    if (mpsRowBytes == dataRowBytes)
-        return padded;
-    size_t outSize = (size_t)rows * dataRowBytes;
-    id<MTLBuffer> out = [device newBufferWithLength:outSize options:MTLResourceStorageModeShared];
-    BlitRows(cmdBuf, padded, mpsRowBytes, out, dataRowBytes, rows, dataRowBytes);
-    return out;
+/// Copy padded rows from src to pre-allocated contiguous dst.
+/// If no padding was used (strides match), just copies the data directly.
+static void UnpadToBuffer(id<MTLCommandBuffer> cmdBuf, id<MTLBuffer> src, id<MTLBuffer> dst,
+                          int64_t rows, NSUInteger dataRowBytes, NSUInteger mpsRowBytes) {
+    if (mpsRowBytes == dataRowBytes) {
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:dst.length];
+        [blit endEncoding];
+    } else {
+        BlitRows(cmdBuf, src, mpsRowBytes, dst, dataRowBytes, rows, dataRowBytes);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,12 +164,35 @@ static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuf
                                                          lower:lower
                                                          order:(NSUInteger)n];
 
+    // Pre-allocate reusable buffers for batch processing.
+    // srcSlice: holds one matrix slice copied from input
+    // srcBuf: padded source for MPS (same as srcSlice if no padding needed)
+    // resultBuf: MPS output with alignment
+    // unpaddedBuf: contiguous result (same as resultBuf if no padding needed)
+    bool needsPadding = (mpsRowBytes != dataRowBytes);
+    id<MTLBuffer> srcSlice = [device newBufferWithLength:matrixDataSize
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> srcBuf = needsPadding ? [device newBufferWithLength:matrixMpsSize
+                                                              options:MTLResourceStorageModeShared]
+                                        : srcSlice;
+    id<MTLBuffer> resultBuf = [device newBufferWithLength:matrixMpsSize
+                                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> unpaddedBuf = needsPadding
+                                    ? [device newBufferWithLength:matrixDataSize
+                                                          options:MTLResourceStorageModeShared]
+                                    : resultBuf;
+
+    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:srcBuf descriptor:desc];
+    MPSMatrix* resultMatrix = [[MPSMatrix alloc] initWithBuffer:resultBuf descriptor:desc];
+
+    // Verification kernel constants.
+    uint32_t n32 = (uint32_t)n;
+    uint32_t lStride = (uint32_t)(mpsRowBytes / elem_size);
+
     // Process each matrix in the batch.
     for (int64_t b = 0; b < batchSize; b++) {
-        // Blit this matrix slice from input buffer using GPU commands.
+        // Blit this matrix slice from input buffer.
         size_t srcOffset = (size_t)b * matrixDataSize;
-        id<MTLBuffer> srcSlice = [device newBufferWithLength:matrixDataSize
-                                                     options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> blitIn = [cmdBuf blitCommandEncoder];
         [blitIn copyFromBuffer:inputs[0]
                   sourceOffset:srcOffset
@@ -178,16 +201,14 @@ static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuf
                           size:matrixDataSize];
         [blitIn endEncoding];
 
-        // Pad source rows to MPS-recommended alignment.
-        id<MTLBuffer> srcBuf = PadBuffer(device, cmdBuf, srcSlice, n, dataRowBytes, mpsRowBytes);
+        // Pad source rows to MPS-recommended alignment if needed.
+        if (needsPadding) {
+            memset(srcBuf.contents, 0, matrixMpsSize);
+            PadToBuffer(cmdBuf, srcSlice, srcBuf, n, dataRowBytes, mpsRowBytes);
+        }
 
-        MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:srcBuf descriptor:desc];
-
-        // Result buffer with MPS alignment (zero-filled so unused triangle is clean).
-        id<MTLBuffer> resultBuf = [device newBufferWithLength:matrixMpsSize
-                                                      options:MTLResourceStorageModeShared];
+        // Zero-fill result buffer (unused triangle must be clean).
         FillBufferWithZeros(cmdBuf, resultBuf, matrixMpsSize);
-        MPSMatrix* resultMatrix = [[MPSMatrix alloc] initWithBuffer:resultBuf descriptor:desc];
 
         // The status buffer is unreliable on Apple Silicon — it always writes 0
         // (success) regardless of whether the input is positive definite.
@@ -199,8 +220,6 @@ static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuf
 
         // Verification kernel to check diagonal and fill with NaN if non-positive.
         if (verifyPipeline) {
-            uint32_t n32 = (uint32_t)n;
-            uint32_t lStride = (uint32_t)(mpsRowBytes / elem_size);
             id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
             [enc setComputePipelineState:verifyPipeline];
             [enc setBuffer:resultBuf offset:0 atIndex:0];
@@ -210,14 +229,15 @@ static NativeResult NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBuf
             [enc endEncoding];
         }
 
-        // Unpad result to contiguous layout and copy to output buffer.
-        id<MTLBuffer> unpadded =
-            UnpadBuffer(device, cmdBuf, resultBuf, n, dataRowBytes, mpsRowBytes);
+        // Unpad result to contiguous layout if needed.
+        if (needsPadding) {
+            UnpadToBuffer(cmdBuf, resultBuf, unpaddedBuf, n, dataRowBytes, mpsRowBytes);
+        }
 
-        // Blit the unpadded result to the output buffer at the correct offset.
+        // Blit the result to the output buffer at the correct offset.
         size_t dstOffset = (size_t)b * matrixDataSize;
         id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
-        [blit copyFromBuffer:unpadded
+        [blit copyFromBuffer:unpaddedBuf
                  sourceOffset:0
                      toBuffer:outBuf
             destinationOffset:dstOffset
@@ -342,14 +362,39 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
                                   numberOfRightHandSides:nrhs
                                                    alpha:1.0];
 
+    // Pre-allocate reusable buffers for batch processing.
+    bool aNeedsPadding = (aMpsRowBytes != aDataRowBytes);
+    bool bNeedsPadding = (bMpsRowBytes != bDataRowBytes);
+    size_t aMpsSize = (size_t)n * aMpsRowBytes;
+    size_t bMpsSize = (size_t)bRows * bMpsRowBytes;
+
+    id<MTLBuffer> aSlice = [device newBufferWithLength:aMatrixDataSize
+                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> aBuf = aNeedsPadding ? [device newBufferWithLength:aMpsSize
+                                                             options:MTLResourceStorageModeShared]
+                                       : aSlice;
+    id<MTLBuffer> bSlice = [device newBufferWithLength:bMatrixDataSize
+                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bBuf = bNeedsPadding ? [device newBufferWithLength:bMpsSize
+                                                             options:MTLResourceStorageModeShared]
+                                       : bSlice;
+    id<MTLBuffer> solBuf = [device newBufferWithLength:bMpsSize
+                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> unpaddedBuf = bNeedsPadding
+                                    ? [device newBufferWithLength:bMatrixDataSize
+                                                          options:MTLResourceStorageModeShared]
+                                    : solBuf;
+
+    MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:aBuf descriptor:aDesc];
+    MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:bBuf descriptor:bDesc];
+    MPSMatrix* solutionMatrix = [[MPSMatrix alloc] initWithBuffer:solBuf descriptor:bDesc];
+
     // Process each matrix in the batch.
     for (int64_t b = 0; b < batchSize; b++) {
-        // Blit matrix slices from input buffers using GPU commands.
+        // Blit matrix slices from input buffers.
         size_t aOffset = (size_t)b * aMatrixDataSize;
         size_t bOffset = (size_t)b * bMatrixDataSize;
 
-        id<MTLBuffer> aSlice = [device newBufferWithLength:aMatrixDataSize
-                                                   options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> blitA = [cmdBuf blitCommandEncoder];
         [blitA copyFromBuffer:inputs[0]
                  sourceOffset:aOffset
@@ -358,8 +403,6 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
                          size:aMatrixDataSize];
         [blitA endEncoding];
 
-        id<MTLBuffer> bSlice = [device newBufferWithLength:bMatrixDataSize
-                                                   options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> blitB = [cmdBuf blitCommandEncoder];
         [blitB copyFromBuffer:inputs[1]
                  sourceOffset:bOffset
@@ -368,30 +411,30 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
                          size:bMatrixDataSize];
         [blitB endEncoding];
 
-        // Pad inputs to MPS alignment.
-        id<MTLBuffer> aBuf = PadBuffer(device, cmdBuf, aSlice, n, aDataRowBytes, aMpsRowBytes);
-        id<MTLBuffer> bBuf = PadBuffer(device, cmdBuf, bSlice, bRows, bDataRowBytes, bMpsRowBytes);
-
-        MPSMatrix* sourceMatrix = [[MPSMatrix alloc] initWithBuffer:aBuf descriptor:aDesc];
-        MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:bBuf descriptor:bDesc];
-
-        id<MTLBuffer> solBuf = [device newBufferWithLength:bMpsRowBytes * (NSUInteger)bRows
-                                                   options:MTLResourceStorageModeShared];
-        MPSMatrix* solutionMatrix = [[MPSMatrix alloc] initWithBuffer:solBuf descriptor:bDesc];
+        // Pad inputs to MPS alignment if needed.
+        if (aNeedsPadding) {
+            memset(aBuf.contents, 0, aMpsSize);
+            PadToBuffer(cmdBuf, aSlice, aBuf, n, aDataRowBytes, aMpsRowBytes);
+        }
+        if (bNeedsPadding) {
+            memset(bBuf.contents, 0, bMpsSize);
+            PadToBuffer(cmdBuf, bSlice, bBuf, bRows, bDataRowBytes, bMpsRowBytes);
+        }
 
         [solver encodeToCommandBuffer:cmdBuf
                          sourceMatrix:sourceMatrix
                   rightHandSideMatrix:rhsMatrix
                        solutionMatrix:solutionMatrix];
 
-        // Unpad solution to contiguous layout and copy to output buffer.
-        id<MTLBuffer> unpadded =
-            UnpadBuffer(device, cmdBuf, solBuf, bRows, bDataRowBytes, bMpsRowBytes);
+        // Unpad solution to contiguous layout if needed.
+        if (bNeedsPadding) {
+            UnpadToBuffer(cmdBuf, solBuf, unpaddedBuf, bRows, bDataRowBytes, bMpsRowBytes);
+        }
 
-        // Blit the unpadded result to the output buffer at the correct offset.
+        // Blit the result to the output buffer at the correct offset.
         size_t dstOffset = (size_t)b * bMatrixDataSize;
         id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
-        [blit copyFromBuffer:unpadded
+        [blit copyFromBuffer:unpaddedBuf
                  sourceOffset:0
                      toBuffer:outBuf
             destinationOffset:dstOffset
