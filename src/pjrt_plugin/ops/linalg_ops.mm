@@ -95,10 +95,6 @@ static id<MTLBuffer> NativeHandle_cholesky(id<MTLDevice> device, id<MTLCommandBu
     // Compute batch size (product of all dimensions except last two).
     int64_t batchSize = 1;
     for (size_t i = 0; i < shape.size() - 2; i++) {
-        if (shape[i] > 0 && batchSize > INT64_MAX / shape[i]) {
-            MPS_LOG_ERROR("cholesky: batch size overflow\n");
-            return nil;
-        }
         batchSize *= shape[i];
     }
 
@@ -268,10 +264,6 @@ static id<MTLBuffer> NativeHandle_triangular_solve(id<MTLDevice> device,
     int64_t batchSize = 1;
     size_t batchRank = aShape.size() - 2;
     for (size_t i = 0; i < batchRank; i++) {
-        if (aShape[i] > 0 && batchSize > INT64_MAX / aShape[i]) {
-            MPS_LOG_ERROR("triangular_solve: batch size overflow\n");
-            return nil;
-        }
         batchSize *= aShape[i];
     }
 
