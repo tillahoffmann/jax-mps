@@ -215,11 +215,18 @@ jobs:
           uv sync --all-groups --no-install-project
           uv pip install dist/*.whl
 
-      # MPS is not available on the runner yet.
+      # MPS is not available on the runner yet. We explicitly skip this step to
+      # highlight the gap ...
       # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
       - name: Run pytest
         if: false
         run: uv run pytest tests/ -v
+
+      # ... we then run the tests only on the CPU to check that the tests *could* run.
+      - name: Run tests on CPU
+        run: uv run pytest tests/ -v
+        env:
+          JAX_TEST_MODE: cpu
 
   release:
     name: Release
