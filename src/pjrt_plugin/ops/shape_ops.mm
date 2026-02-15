@@ -466,14 +466,13 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         return Result(ctx, result, "gather");
     }
 
-    // Handle full-index gather pattern:
+    // Handle full-index gather pattern (e.g., x[0, 0, 0] on a rank-3 tensor):
     // - indices is a 1D vector of length input_rank
-    // - index_vector_dim is 0, all indices are included in the vector
-    // - start index map covers all operand dimensions
-    // - no offset dimensions
-    // - collapsed_slice_dims is either empty or fully collapsed
-    //   ([0, 1, ..., input_rank-1]); both are treated as point gathers
-    //   and normalized to a scalar result below
+    // - index_vector_dim is 0, meaning the entire indices tensor is one index vector
+    // - start_index_map covers all operand dimensions in order [0, 1, ..., rank-1]
+    // - offset_dims is empty (no trailing slice dimensions)
+    // - collapsed_slice_dims is either empty (slice sizes are all 1) or fully collapsed
+    //   ([0, 1, ..., rank-1]); both represent point gathers yielding a scalar
     if (indexVectorDim == 0 && indicesRank == 1 && startIndexMap.size() == operand.shape.count &&
         offsetDims.empty() && [indicesShape[0] integerValue] == (NSInteger)operand.shape.count) {
         bool hasFullCollapsedSliceDims = collapsedSliceDims.size() == operand.shape.count;
@@ -562,7 +561,6 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         return ProcessResult::Error("scatter: missing input tensor");
 
     auto dimNumbers = scatterOp.getScatterDimensionNumbers();
-    auto updateWindowDims = dimNumbers.getUpdateWindowDims();
     auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
     auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
     auto inputBatchingDims = dimNumbers.getInputBatchingDims();
@@ -684,6 +682,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
     // Handle full-rank point updates (e.g. x.at[0,0,...].set(value) on MPS):
     // the update index tensor stores a full index vector and update_window_dims is empty.
+    auto updateWindowDims = dimNumbers.getUpdateWindowDims();
     if (updateWindowDims.empty() && inputBatchingDims.empty() &&
         scatterDimsToOperandDims.size() == input.shape.count &&
         insertedWindowDims.size() == input.shape.count && indicesRank == 1 &&
