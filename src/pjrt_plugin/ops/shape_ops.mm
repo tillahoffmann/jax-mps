@@ -470,7 +470,10 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
     // - indices is a 1D vector of length input_rank
     // - index_vector_dim is 0, all indices are included in the vector
     // - start index map covers all operand dimensions
-    // - no offset dimensions and no collapsed slice dimensions (scalar result)
+    // - no offset dimensions
+    // - collapsed_slice_dims is either empty or fully collapsed
+    //   ([0, 1, ..., input_rank-1]); both are treated as point gathers
+    //   and normalized to a scalar result below
     if (indexVectorDim == 0 && indicesRank == 1 &&
         startIndexMap.size() == operand.shape.count &&
         offsetDims.empty() &&
