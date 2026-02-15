@@ -35,6 +35,60 @@ def make_slice_op_configs():
                 lambda rng: rng.normal(size=(2, 3)),
             ),
             OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                lambda rng: jnp.zeros((10, 1, 4), dtype=jnp.float32),
+                lambda rng: numpy.int32(0),
+                lambda rng: jnp.ones((1, 4), dtype=jnp.float32),
+                name="scalar_index_set_rank_squeezed_update",
+            ),
+            OperationTestConfig(
+                lambda x, val: x.at[0, 0, 0].set(val),
+                lambda rng: jnp.zeros((2, 2, 2), dtype=jnp.float32),
+                lambda rng: jnp.array(3.14, dtype=jnp.float32),
+                name="scalar_update_rank_mismatch_gt_1",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                lambda rng: jnp.zeros((2, 2, 2), dtype=jnp.float32),
+                lambda rng: numpy.int32(0),
+                lambda rng: jnp.array(5.0, dtype=jnp.float32),
+                name="slice_update_scalar_broadcast_rank3",
+            ),
+            # Full-index gather: x[i, j, k] on rank-3 tensor returns scalar
+            OperationTestConfig(
+                lambda x: x[1, 2, 0],
+                lambda rng: rng.normal(size=(3, 4, 2)).astype(numpy.float32),
+                name="full_index_gather_rank3",
+            ),
+            # ScatterND with add mode (not just set)
+            OperationTestConfig(
+                lambda x, val: x.at[0, 0, 0].add(val),
+                lambda rng: jnp.ones((2, 2, 2), dtype=jnp.float32),
+                lambda rng: jnp.array(5.0, dtype=jnp.float32),
+                name="scatternd_add_mode",
+            ),
+            # Higher rank tensor (rank 4)
+            OperationTestConfig(
+                lambda x, val: x.at[0, 0, 0, 0].set(val),
+                lambda rng: jnp.zeros((2, 3, 4, 5), dtype=jnp.float32),
+                lambda rng: jnp.array(1.0, dtype=jnp.float32),
+                name="full_index_scatter_rank4",
+            ),
+            # Non-zero indices
+            OperationTestConfig(
+                lambda x, val: x.at[1, 1, 1].set(val),
+                lambda rng: jnp.zeros((3, 3, 3), dtype=jnp.float32),
+                lambda rng: jnp.array(7.0, dtype=jnp.float32),
+                name="full_index_scatter_nonzero",
+            ),
+            # Mixed index pattern
+            OperationTestConfig(
+                lambda x, val: x.at[2, 0, 1].set(val),
+                lambda rng: jnp.zeros((4, 3, 2), dtype=jnp.float32),
+                lambda rng: jnp.array(9.0, dtype=jnp.float32),
+                name="full_index_scatter_mixed",
+            ),
+            OperationTestConfig(
                 lambda x: x.at[0].set(1.0),
                 lambda rng: rng.normal(size=(10,)),
             ),

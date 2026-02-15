@@ -418,6 +418,7 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
 
     auto dimNumbers = gatherOp.getDimensionNumbers();
     auto collapsedSliceDims = dimNumbers.getCollapsedSliceDims();
+    auto offsetDims = dimNumbers.getOffsetDims();
     auto startIndexMap = dimNumbers.getStartIndexMap();
     int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
 
@@ -463,6 +464,55 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                                                                name:nil];
 
         return Result(ctx, result, "gather");
+    }
+
+    // Handle full-index gather pattern (e.g., x[0, 0, 0] on a rank-3 tensor):
+    // - indices is a 1D vector of length input_rank
+    // - index_vector_dim is 0, meaning the entire indices tensor is one index vector
+    // - start_index_map covers all operand dimensions in order [0, 1, ..., rank-1]
+    // - offset_dims is empty (no trailing slice dimensions)
+    // - collapsed_slice_dims is either empty (slice sizes are all 1) or fully collapsed
+    //   ([0, 1, ..., rank-1]); both represent point gathers yielding a scalar
+    if (indexVectorDim == 0 && indicesRank == 1 && startIndexMap.size() == operand.shape.count &&
+        offsetDims.empty() && [indicesShape[0] integerValue] == (NSInteger)operand.shape.count) {
+        bool hasFullCollapsedSliceDims = collapsedSliceDims.size() == operand.shape.count;
+        if (hasFullCollapsedSliceDims) {
+            for (NSUInteger dim = 0; dim < operand.shape.count; ++dim) {
+                if (collapsedSliceDims[dim] != (int64_t)dim) {
+                    hasFullCollapsedSliceDims = false;
+                    break;
+                }
+            }
+        }
+
+        bool fullRange = true;
+        for (NSUInteger dim = 0; dim < operand.shape.count; ++dim) {
+            if (startIndexMap[dim] != (int64_t)dim) {
+                fullRange = false;
+                break;
+            }
+        }
+
+        if (!fullRange || !(collapsedSliceDims.empty() || hasFullCollapsedSliceDims)) {
+            return ProcessResult::Error("gather: unsupported full-index gather pattern");
+        }
+
+        // MPS gatherND expects indices as [N, rank]. Reshape [rank] -> [1, rank].
+        MPSGraphTensor* ndIndices = [ctx.graph reshapeTensor:startIndices
+                                                   withShape:@[@1, @(operand.shape.count)]
+                                                        name:nil];
+        ndIndices = EnsureInt32(ctx.graph, ndIndices);
+
+        MPSGraphTensor* gathered = [ctx.graph gatherNDWithUpdatesTensor:operand
+                                                          indicesTensor:ndIndices
+                                                        batchDimensions:0
+                                                                   name:nil];
+
+        // Result is [1] for a scalar point gather; reshape to scalar.
+        if (gathered.shape.count == 1 && [gathered.shape[0] integerValue] == 1) {
+            gathered = [ctx.graph reshapeTensor:gathered withShape:@[] name:nil];
+        }
+        return Result(ctx, gathered, "gather");
     }
 
     // For now, log unsupported patterns
@@ -593,6 +643,32 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         if (updates.shape.count == 0)
             updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
 
+        // Scalar index updates in StableHLO can drop the scattered axis from the update
+        // shape (e.g. input [10,1,4], updates [1,4] for axis 0). MPS scatter expects the
+        // update tensor rank to match the operand rank, so reinsert singleton axes as needed.
+        if (updates.shape.count < input.shape.count) {
+            NSArray<NSNumber*>* updatesShape = updates.shape;
+            NSMutableArray<NSNumber*>* alignedUpdatesShape =
+                [NSMutableArray arrayWithCapacity:input.shape.count];
+            NSUInteger updateDimIndex = 0;
+
+            for (NSUInteger dim = 0; dim < input.shape.count; ++dim) {
+                if ((int64_t)dim == scatterAxis) {
+                    [alignedUpdatesShape addObject:@1];
+                    continue;
+                }
+
+                if (updateDimIndex >= updatesShape.count) {
+                    [alignedUpdatesShape addObject:@1];
+                    continue;
+                }
+
+                [alignedUpdatesShape addObject:updatesShape[updateDimIndex++]];
+            }
+
+            updates = [ctx.graph reshapeTensor:updates withShape:alignedUpdatesShape name:nil];
+        }
+
         // Use scatterWithDataTensor to scatter updates into input
         MPSGraphTensor* result =
             [ctx.graph scatterWithDataTensor:input
@@ -601,6 +677,48 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
                                         axis:static_cast<NSInteger>(scatterAxis)
                                         mode:mode
                                         name:nil];
+        return Result(ctx, result, "scatter");
+    }
+
+    // Handle full-rank point updates (e.g. x.at[0,0,...].set(value) on MPS):
+    // the update index tensor stores a full index vector and update_window_dims is empty.
+    auto updateWindowDims = dimNumbers.getUpdateWindowDims();
+    if (updateWindowDims.empty() && inputBatchingDims.empty() &&
+        scatterDimsToOperandDims.size() == input.shape.count &&
+        insertedWindowDims.size() == input.shape.count && indicesRank == 1 &&
+        [indicesShape[0] integerValue] == (NSInteger)input.shape.count && indexVectorDim == 0) {
+        bool fullRange = true;
+        NSUInteger inputRank = input.shape.count;
+        for (NSUInteger dim = 0; dim < inputRank; ++dim) {
+            if (scatterDimsToOperandDims[dim] != (int64_t)dim ||
+                insertedWindowDims[dim] != (int64_t)dim) {
+                fullRange = false;
+                break;
+            }
+        }
+        if (!fullRange) {
+            return ProcessResult::Error("scatter: unsupported full-rank scatter pattern");
+        }
+
+        MPSGraphScatterMode mode = GetScatterMode(scatterOp);
+
+        // MPS scatterND expects indices as [N, rank]. For full point updates with a scalar
+        // index vector (e.g. [0,0,0]), reshape to one update row.
+        MPSGraphTensor* ndIndices = [ctx.graph reshapeTensor:scatterIndices
+                                                   withShape:@[@1, indicesShape[0]]
+                                                        name:nil];
+        ndIndices = EnsureInt32(ctx.graph, ndIndices);
+
+        if (updates.shape.count == 0) {
+            updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
+        }
+
+        MPSGraphTensor* result = [ctx.graph scatterNDWithDataTensor:input
+                                                      updatesTensor:updates
+                                                      indicesTensor:ndIndices
+                                                    batchDimensions:0
+                                                               mode:mode
+                                                               name:nil];
         return Result(ctx, result, "scatter");
     }
 
