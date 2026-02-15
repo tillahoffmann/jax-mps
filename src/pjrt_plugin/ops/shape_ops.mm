@@ -648,8 +648,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         // Scalar index updates in StableHLO can drop the scattered axis from the update
         // shape (e.g. input [10,1,4], updates [1,4] for axis 0). MPS scatter expects the
         // update tensor rank to match the operand rank, so reinsert singleton axes as needed.
-        NSUInteger rankDiff = input.shape.count - updates.shape.count;
-        if (rankDiff > 0) {
+        if (updates.shape.count < input.shape.count) {
             NSArray<NSNumber*>* updatesShape = updates.shape;
             NSMutableArray<NSNumber*>* alignedUpdatesShape =
                 [NSMutableArray arrayWithCapacity:input.shape.count];
