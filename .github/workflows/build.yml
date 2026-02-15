@@ -220,11 +220,11 @@ jobs:
       # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners
       - name: Run pytest
         if: false
-        run: uv run pytest tests/ -v
+        run: uv run --no-build pytest tests/ -v
 
       # ... we then run the tests only on the CPU to check that the tests *could* run.
       - name: Run tests on CPU
-        run: uv run pytest tests/ -v
+        run: uv run --no-build pytest tests/ -v
         env:
           JAX_TEST_MODE: cpu
 
