@@ -474,10 +474,8 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
     // - collapsed_slice_dims is either empty or fully collapsed
     //   ([0, 1, ..., input_rank-1]); both are treated as point gathers
     //   and normalized to a scalar result below
-    if (indexVectorDim == 0 && indicesRank == 1 &&
-        startIndexMap.size() == operand.shape.count &&
-        offsetDims.empty() &&
-        [indicesShape[0] integerValue] == (NSInteger)operand.shape.count) {
+    if (indexVectorDim == 0 && indicesRank == 1 && startIndexMap.size() == operand.shape.count &&
+        offsetDims.empty() && [indicesShape[0] integerValue] == (NSInteger)operand.shape.count) {
         bool hasFullCollapsedSliceDims = collapsedSliceDims.size() == operand.shape.count;
         if (hasFullCollapsedSliceDims) {
             for (NSUInteger dim = 0; dim < operand.shape.count; ++dim) {
@@ -496,21 +494,20 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             }
         }
 
-        if (!fullRange ||
-            !(collapsedSliceDims.empty() || hasFullCollapsedSliceDims)) {
+        if (!fullRange || !(collapsedSliceDims.empty() || hasFullCollapsedSliceDims)) {
             return ProcessResult::Error("gather: unsupported full-index gather pattern");
         }
 
         // MPS gatherND expects indices as [N, rank]. Reshape [rank] -> [1, rank].
         MPSGraphTensor* ndIndices = [ctx.graph reshapeTensor:startIndices
-                                                     withShape:@[@1, @(operand.shape.count)]
-                                                          name:nil];
+                                                   withShape:@[@1, @(operand.shape.count)]
+                                                        name:nil];
         ndIndices = EnsureInt32(ctx.graph, ndIndices);
 
         MPSGraphTensor* gathered = [ctx.graph gatherNDWithUpdatesTensor:operand
-                                                         indicesTensor:ndIndices
-                                                       batchDimensions:0
-                                                                  name:nil];
+                                                          indicesTensor:ndIndices
+                                                        batchDimensions:0
+                                                                   name:nil];
 
         // Result is [1] for a scalar point gather; reshape to scalar.
         if (gathered.shape.count == 1 && [gathered.shape[0] integerValue] == 1) {
@@ -689,10 +686,8 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
     // the update index tensor stores a full index vector and update_window_dims is empty.
     if (updateWindowDims.empty() && inputBatchingDims.empty() &&
         scatterDimsToOperandDims.size() == input.shape.count &&
-        insertedWindowDims.size() == input.shape.count &&
-        indicesRank == 1 &&
-        [indicesShape[0] integerValue] == (NSInteger)input.shape.count &&
-        indexVectorDim == 0) {
+        insertedWindowDims.size() == input.shape.count && indicesRank == 1 &&
+        [indicesShape[0] integerValue] == (NSInteger)input.shape.count && indexVectorDim == 0) {
         bool fullRange = true;
         NSUInteger inputRank = input.shape.count;
         for (NSUInteger dim = 0; dim < inputRank; ++dim) {
@@ -711,8 +706,8 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         // MPS scatterND expects indices as [N, rank]. For full point updates with a scalar
         // index vector (e.g. [0,0,0]), reshape to one update row.
         MPSGraphTensor* ndIndices = [ctx.graph reshapeTensor:scatterIndices
-                                                     withShape:@[@1, indicesShape[0]]
-                                                          name:nil];
+                                                   withShape:@[@1, indicesShape[0]]
+                                                        name:nil];
         ndIndices = EnsureInt32(ctx.graph, ndIndices);
 
         if (updates.shape.count == 0) {
@@ -720,11 +715,11 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         }
 
         MPSGraphTensor* result = [ctx.graph scatterNDWithDataTensor:input
-                                                         updatesTensor:updates
-                                                         indicesTensor:ndIndices
-                                                       batchDimensions:0
-                                                                  mode:mode
-                                                                  name:nil];
+                                                      updatesTensor:updates
+                                                      indicesTensor:ndIndices
+                                                    batchDimensions:0
+                                                               mode:mode
+                                                               name:nil];
         return Result(ctx, result, "scatter");
     }
 
