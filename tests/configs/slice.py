@@ -42,6 +42,18 @@ def make_slice_op_configs():
                 name="scalar_index_set_rank_squeezed_update",
             ),
             OperationTestConfig(
+                lambda x, val: x.at[0, 0, 0].set(val),
+                lambda rng: jnp.zeros((2, 2, 2), dtype=jnp.float32),
+                lambda rng: jnp.array(3.14, dtype=jnp.float32),
+                name="scalar_update_rank_mismatch_gt_1",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                lambda rng: numpy.int32(0),
+                lambda rng: jnp.array(5.0, dtype=jnp.float32),
+                name="slice_update_scalar_broadcast_rank3",
+            ),
+            OperationTestConfig(
                 lambda x: x.at[0].set(1.0),
                 lambda rng: rng.normal(size=(10,)),
             ),
