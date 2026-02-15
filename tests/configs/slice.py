@@ -49,6 +49,7 @@ def make_slice_op_configs():
             ),
             OperationTestConfig(
                 lambda x, idx, val: x.at[idx].set(val),
+                lambda rng: jnp.zeros((2, 2, 2), dtype=jnp.float32),
                 lambda rng: numpy.int32(0),
                 lambda rng: jnp.array(5.0, dtype=jnp.float32),
                 name="slice_update_scalar_broadcast_rank3",
