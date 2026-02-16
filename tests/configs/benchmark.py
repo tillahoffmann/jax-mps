@@ -1,3 +1,5 @@
+from typing import Generator
+
 import jax
 import numpy
 from jax import numpy as jnp
@@ -5,7 +7,7 @@ from jax import numpy as jnp
 from .util import OperationTestConfig
 
 
-def make_benchmark_op_configs():
+def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
     with OperationTestConfig.module_name("benchmark"):
         # Elementwise ops: use 1D arrays to avoid quadratic memory growth.
         # scale -> total elements: 1->10K, 10->100K, 100->1M, 1000->10M
