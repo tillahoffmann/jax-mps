@@ -15,7 +15,13 @@ STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
 
 
 def xfail_match(pattern: str) -> pytest.MarkDecorator:
-    """Create a strict xfail marker that validates the error message pattern."""
+    """Create a strict xfail marker that validates the error message pattern.
+
+    When MPS is not available (e.g., JAX_PLATFORMS=cpu), return a no-op marker
+    since MPS-specific errors won't occur and the test should pass normally.
+    """
+    if MPS_DEVICE is None:
+        return pytest.mark.usefixtures()  # No-op marker
     return pytest.mark.xfail(reason=pattern, match=pattern, strict=True)  # pyright: ignore[reportCallIssue]
 
 
