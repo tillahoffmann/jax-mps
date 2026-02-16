@@ -21,7 +21,7 @@ def xfail_match(pattern: str) -> pytest.MarkDecorator:
     since MPS-specific errors won't occur and the test should pass normally.
     """
     if MPS_DEVICE is None:
-        return pytest.mark.usefixtures()  # No-op marker
+        return pytest.mark.noop
     return pytest.mark.xfail(reason=pattern, match=pattern, strict=True)  # pyright: ignore[reportCallIssue]
 
 
