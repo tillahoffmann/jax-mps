@@ -4,6 +4,8 @@ JAX PJRT plugin for Apple Metal Performance Shaders. Review PRs against these re
 
 ## Review Philosophy
 
+**Assume CI passes.** PRs are reviewed after tests pass. Do not comment that code "will fail" or "will raise"—if tests pass, it works. Do not suggest fixes for problems that don't exist.
+
 Prioritize high-impact feedback. Focus review effort on:
 
 - Bugs, correctness issues, and security vulnerabilities
@@ -18,6 +20,10 @@ Avoid commenting on:
 - Constants whose meaning is clear from context
 - Alternative implementations when the current code is correct and readable
 - Syntax or type errors and code formatting or style (will be caught by the compiler and linters)
+- API usage that you believe might fail at runtime—the test suite catches these issues
+- Type annotations that you think might be incorrect—pyright catches these in CI
+- Code that you speculate "will raise" or "won't work"—if CI passes, it works
+- Third-party API usage (JAX, NumPy, pytest)—do not claim an API call is wrong unless you are certain
 
 ## Architecture
 
