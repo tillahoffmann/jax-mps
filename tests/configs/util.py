@@ -8,7 +8,9 @@ import pytest
 from jax import numpy as jnp
 
 CPU_DEVICE = jax.devices("cpu")[0]
-MPS_DEVICE = jax.devices("mps")[0]
+MPS_DEVICE = (
+    jax.devices("mps")[0] if "mps" in {d.platform for d in jax.devices()} else None
+)
 STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
 
 
