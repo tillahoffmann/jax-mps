@@ -1,6 +1,6 @@
 from jax import random
 
-from .util import OperationTestConfig
+from .util import MPS_DEVICE, OperationTestConfig
 
 
 def make_random_op_configs():
@@ -32,3 +32,11 @@ def make_random_op_configs():
                     random.split, random.key(18), 5, static_argnums=(1,)
                 ),
             ]
+        # Bug: indexing into split result differs on MPS vs CPU in eager mode.
+        # JIT compiles around the bug; only eager exposes it.
+        if MPS_DEVICE is not None:
+            yield OperationTestConfig(
+                lambda key: random.split(key)[0],
+                random.key(42),
+                name="split_index",
+            )

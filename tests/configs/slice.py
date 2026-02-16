@@ -11,21 +11,17 @@ def make_slice_op_configs():
             OperationTestConfig(
                 lambda x, idx: x[idx],
                 lambda key: random.normal(key, (4, 5)),
-                # FIXME: Should split key but MPS has a bug where random.split produces
-                # different values than CPU. Using same key twice works because randint
-                # with different ranges produces different values deterministically.
                 lambda key: (
-                    random.randint(key, (), 0, 4),
-                    random.randint(key, (), 0, 5),
+                    random.randint(random.split(key)[0], (), 0, 4),
+                    random.randint(random.split(key)[1], (), 0, 5),
                 ),
             ),
             OperationTestConfig(
                 lambda x, idx, y: x[idx],
                 lambda key: random.normal(key, (4, 5)),
-                # FIXME: Same MPS random.split bug as above.
                 lambda key: (
-                    random.randint(key, (), 0, 4),
-                    random.randint(key, (), 0, 5),
+                    random.randint(random.split(key)[0], (), 0, 4),
+                    random.randint(random.split(key)[1], (), 0, 5),
                 ),
                 lambda key: numpy.asarray(7.0),
             ),
