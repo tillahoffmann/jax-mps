@@ -1,5 +1,5 @@
 import numpy
-from jax import lax
+from jax import lax, random
 from jax import numpy as jnp
 
 from .util import OperationTestConfig, complex_standard_normal
@@ -13,133 +13,133 @@ def make_binary_op_configs():
             yield from [
                 OperationTestConfig(
                     jnp.add,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 1), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 1), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.subtract,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 1), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 1), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.multiply,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 1), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 1), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.divide,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 1), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 1), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.dot,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (4, 5), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (4, 5), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.less,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.less_equal,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.equal,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.greater_equal,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.greater,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.broadcast_arrays,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 1), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 1), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.minimum,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.maximum,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (3, 4), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (3, 4), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.power,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (5,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (5,), complex
                     ),
-                    lambda rng: rng.gamma(5, size=(7, 1)),
+                    lambda key: random.gamma(key, 5.0, (7, 1)),
                 ),
                 OperationTestConfig(
                     jnp.power,
-                    lambda rng: rng.gamma(5, size=(7, 1)),
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (5,), complex
+                    lambda key: random.gamma(key, 5.0, (7, 1)),
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (5,), complex
                     ),
                 ),
             ]
@@ -149,8 +149,8 @@ def make_binary_op_configs():
         yield from [
             OperationTestConfig(
                 lax.rem,
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.gamma(5, size=(3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.gamma(key, 5.0, (3, 4)),
             ),
             OperationTestConfig(
                 jnp.nextafter,
@@ -160,32 +160,32 @@ def make_binary_op_configs():
             ),
             OperationTestConfig(
                 jnp.clip,
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
             ),
             OperationTestConfig(
                 jnp.clip,
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
                 None,
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
             ),
             OperationTestConfig(
                 jnp.clip,
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
                 None,
             ),
             OperationTestConfig(
                 lax.clamp,
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
             ),
             OperationTestConfig(
                 jnp.arctan2,
-                lambda rng: rng.standard_normal((3, 4)),
-                lambda rng: rng.standard_normal((3, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (3, 4)),
             ),
             OperationTestConfig(
                 jnp.bitwise_and,

@@ -1,5 +1,5 @@
-import numpy
 import pytest
+from jax import numpy as jnp
 from jax import random
 from numpyro import distributions as dists
 
@@ -20,7 +20,7 @@ class NumpyroDistributionTestConfig(OperationTestConfig):
         kwargs.setdefault("name", dist_cls.__name__)
         super().__init__(
             lambda x, *args: dist_cls(*args).log_prob(x).mean(),
-            lambda rng: dist_cls(*[a(rng) if callable(a) else a for a in args]).sample(
+            lambda key: dist_cls(*[a(key) if callable(a) else a for a in args]).sample(
                 random.key(17)
             ),  # pyright: ignore[reportArgumentType]
             *args,
@@ -34,72 +34,77 @@ def make_numpyro_op_configs():
             yield from [
                 NumpyroDistributionTestConfig(
                     dists.Normal,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Gamma,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Exponential,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Uniform,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs) + 2,
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs) + 2,
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Laplace,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Cauchy,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.HalfNormal,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.HalfCauchy,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.LogNormal,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Beta,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.StudentT,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs) + 2,  # df > 2
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs)
+                    + 2,  # df > 2
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Dirichlet,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs + (3,)),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs + (3,)),
                 ),
                 # Discrete distributions (differentiable_argnums excludes sample at 0).
                 NumpyroDistributionTestConfig(
                     dists.BernoulliProbs,
-                    lambda rng, bs=batch_shape: rng.uniform(0.1, 0.9, bs),
+                    lambda key, bs=batch_shape: random.uniform(
+                        key, bs, minval=0.1, maxval=0.9
+                    ),
                     differentiable_argnums=(1,),
                     name="Bernoulli",
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
                         dists.BinomialProbs,
-                        lambda rng, bs=batch_shape: rng.uniform(0.1, 0.9, bs),
+                        lambda key, bs=batch_shape: random.uniform(
+                            key, bs, minval=0.1, maxval=0.9
+                        ),
                         10,  # total_count (not differentiable)
                         differentiable_argnums=(1,),
                         name="Binomial",
@@ -109,7 +114,9 @@ def make_numpyro_op_configs():
                 pytest.param(
                     NumpyroDistributionTestConfig(
                         dists.CategoricalProbs,
-                        lambda rng, bs=batch_shape: rng.dirichlet(numpy.ones(5), bs),
+                        lambda key, bs=batch_shape: random.dirichlet(
+                            key, jnp.ones(5), bs
+                        ),
                         differentiable_argnums=(1,),
                         name="Categorical",
                     ),
@@ -119,25 +126,31 @@ def make_numpyro_op_configs():
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Poisson,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                     differentiable_argnums=(1,),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.GeometricProbs,
-                    lambda rng, bs=batch_shape: rng.uniform(0.1, 0.9, bs),
+                    lambda key, bs=batch_shape: random.uniform(
+                        key, bs, minval=0.1, maxval=0.9
+                    ),
                     differentiable_argnums=(1,),
                     name="Geometric",
                 ),
                 NumpyroDistributionTestConfig(
                     dists.NegativeBinomial2,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # mean
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # concentration
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # mean
+                    lambda key, bs=batch_shape: random.gamma(
+                        key, 5.0, bs
+                    ),  # concentration
                     differentiable_argnums=(1, 2),
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
                         dists.MultinomialProbs,
-                        lambda rng, bs=batch_shape: rng.dirichlet(numpy.ones(5), bs),
+                        lambda key, bs=batch_shape: random.dirichlet(
+                            key, jnp.ones(5), bs
+                        ),
                         10,  # total_count (not differentiable)
                         differentiable_argnums=(1,),
                         name="Multinomial",
@@ -149,52 +162,56 @@ def make_numpyro_op_configs():
                 # Additional continuous distributions.
                 NumpyroDistributionTestConfig(
                     dists.Gumbel,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Logistic,
-                    lambda rng, bs=batch_shape: rng.standard_normal(bs),
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),
+                    lambda key, bs=batch_shape: random.normal(key, bs),
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Pareto,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # scale
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # alpha
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # scale
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # alpha
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Weibull,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # scale
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # concentration
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # scale
+                    lambda key, bs=batch_shape: random.gamma(
+                        key, 5.0, bs
+                    ),  # concentration
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Chi2,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs) + 2,  # df
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs) + 2,  # df
                 ),
                 NumpyroDistributionTestConfig(
                     dists.InverseGamma,
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # concentration
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # rate
+                    lambda key, bs=batch_shape: random.gamma(
+                        key, 5.0, bs
+                    ),  # concentration
+                    lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # rate
                 ),
                 NumpyroDistributionTestConfig(
                     dists.VonMises,
-                    lambda rng, bs=batch_shape: rng.uniform(
-                        -numpy.pi, numpy.pi, bs
+                    lambda key, bs=batch_shape: random.uniform(
+                        key, bs, minval=-jnp.pi, maxval=jnp.pi
                     ),  # loc
-                    lambda rng, bs=batch_shape: rng.gamma(5, 5, bs),  # concentration
+                    lambda key, bs=batch_shape: random.gamma(
+                        key, 5.0, bs
+                    ),  # concentration
                 ),
                 # Multivariate distributions.
                 pytest.param(
                     NumpyroDistributionTestConfig(
                         dists.MultivariateNormal,
-                        lambda rng, bs=batch_shape: rng.standard_normal(
-                            bs + (4,)
+                        lambda key, bs=batch_shape: random.normal(
+                            key, bs + (4,)
                         ),  # loc
                         None,  # covariance_matrix
                         None,  # precision_matrix
-                        lambda rng: numpy.linalg.cholesky(
-                            numpy.eye(4) + numpy.ones((4, 4))
-                        ),
+                        lambda key: jnp.linalg.cholesky(jnp.eye(4) + jnp.ones((4, 4))),
                     ),
                     marks=[
                         xfail_match(
@@ -205,14 +222,14 @@ def make_numpyro_op_configs():
                 pytest.param(
                     NumpyroDistributionTestConfig(
                         dists.LowRankMultivariateNormal,
-                        lambda rng, bs=batch_shape: rng.standard_normal(
-                            bs + (4,)
+                        lambda key, bs=batch_shape: random.normal(
+                            key, bs + (4,)
                         ),  # loc
-                        lambda rng, bs=batch_shape: rng.standard_normal(
-                            bs + (4, 2)
+                        lambda key, bs=batch_shape: random.normal(
+                            key, bs + (4, 2)
                         ),  # cov_factor
-                        lambda rng, bs=batch_shape: rng.gamma(
-                            5, 5, bs + (4,)
+                        lambda key, bs=batch_shape: random.gamma(
+                            key, 5.0, bs + (4,)
                         ),  # cov_diag
                     ),
                     marks=[xfail_match("scatter:.+unsupported scatter pattern")],

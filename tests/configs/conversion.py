@@ -1,4 +1,4 @@
-from jax import lax
+from jax import lax, random
 from jax import numpy as jnp
 
 from .util import OperationTestConfig
@@ -13,12 +13,12 @@ def make_conversion_op_configs():
             ),
             OperationTestConfig(
                 lambda x: x.astype(jnp.float16),
-                lambda rng: rng.normal(size=(4, 5)),
+                lambda key: random.normal(key, (4, 5)),
                 differentiable_argnums=(),
             ),
             OperationTestConfig(
                 lambda x: lax.bitcast_convert_type(x, jnp.int32),
-                lambda rng: rng.normal(size=(4, 5)),
+                lambda key: random.normal(key, (4, 5)),
                 differentiable_argnums=(),
             ),
         ]

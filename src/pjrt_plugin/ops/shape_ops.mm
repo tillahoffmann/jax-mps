@@ -643,6 +643,16 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         if (updates.shape.count == 0)
             updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
 
+        // MPS scatter requires updates rank to match operand rank. When updates has higher
+        // rank (e.g. 2D batch of indices into 2D embedding table), MPS cannot handle it.
+        if (updates.shape.count > input.shape.count) {
+            return ProcessResult::Error(
+                "scatter: MPS does not support scatter where updates rank (" +
+                std::to_string(updates.shape.count) + ") > operand rank (" +
+                std::to_string(input.shape.count) +
+                "). This can occur with multi-dimensional indices into embeddings.");
+        }
+
         // Scalar index updates in StableHLO can drop the scattered axis from the update
         // shape (e.g. input [10,1,4], updates [1,4] for axis 0). MPS scatter expects the
         // update tensor rank to match the operand rank, so reinsert singleton axes as needed.

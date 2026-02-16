@@ -1,8 +1,8 @@
 from typing import Generator
 
 import jax
-import numpy
 from jax import numpy as jnp
+from jax import random
 
 from .util import OperationTestConfig
 
@@ -17,22 +17,22 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
             # Unary elementwise (dispatch overhead + compute).
             yield OperationTestConfig(
                 jnp.exp,
-                lambda rng, n=n: rng.standard_normal((n,)).astype(numpy.float32),
+                lambda key, n=n: random.normal(key, (n,)),
                 name=f"exp_{scale}",
             )
 
             # Binary elementwise (memory bandwidth bound).
             yield OperationTestConfig(
                 jnp.add,
-                lambda rng, n=n: rng.standard_normal((n,)).astype(numpy.float32),
-                lambda rng, n=n: rng.standard_normal((n,)).astype(numpy.float32),
+                lambda key, n=n: random.normal(key, (n,)),
+                lambda key, n=n: random.normal(key, (n,)),
                 name=f"add_{scale}",
             )
 
             # Reduction (cross-axis operations).
             yield OperationTestConfig(
                 jnp.sum,
-                lambda rng, n=n: rng.standard_normal((n,)).astype(numpy.float32),
+                lambda key, n=n: random.normal(key, (n,)),
                 name=f"sum_{scale}",
             )
 
@@ -40,9 +40,7 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
             # Use 2D with reasonable inner dim for softmax axis.
             yield OperationTestConfig(
                 lambda x: jax.nn.softmax(x, axis=-1),
-                lambda rng, n=n: rng.standard_normal((n // 1000, 1000)).astype(
-                    numpy.float32
-                ),
+                lambda key, n=n: random.normal(key, (n // 1000, 1000)),
                 name=f"softmax_{scale}",
             )
 
@@ -51,12 +49,8 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
         for scale in [1, 10, 100, 1000]:
             yield OperationTestConfig(
                 jnp.matmul,
-                lambda rng, s=scale: rng.standard_normal((s * 4, s * 5)).astype(
-                    numpy.float32
-                ),
-                lambda rng, s=scale: rng.standard_normal((s * 5, s * 3)).astype(
-                    numpy.float32
-                ),
+                lambda key, s=scale: random.normal(key, (s * 4, s * 5)),
+                lambda key, s=scale: random.normal(key, (s * 5, s * 3)),
                 name=f"matmul_{scale}",
             )
 
@@ -64,12 +58,8 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
         for batch in [8, 32, 128]:
             yield OperationTestConfig(
                 jnp.matmul,
-                lambda rng, b=batch: rng.standard_normal((b, 64, 64)).astype(
-                    numpy.float32
-                ),
-                lambda rng, b=batch: rng.standard_normal((b, 64, 64)).astype(
-                    numpy.float32
-                ),
+                lambda key, b=batch: random.normal(key, (b, 64, 64)),
+                lambda key, b=batch: random.normal(key, (b, 64, 64)),
                 name=f"matmul_batched_{batch}",
             )
 
@@ -84,12 +74,8 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
                     padding="SAME",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda rng, c=channels: rng.standard_normal((8, 32, 32, c)).astype(
-                    numpy.float32
-                ),
-                lambda rng, c=channels: rng.standard_normal((3, 3, c, c)).astype(
-                    numpy.float32
-                ),
+                lambda key, c=channels: random.normal(key, (8, 32, 32, c)),
+                lambda key, c=channels: random.normal(key, (3, 3, c, c)),
                 name=f"conv2d_{channels}ch",
             )
 
@@ -102,8 +88,6 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
         for hidden in [256, 512, 1024]:
             yield OperationTestConfig(
                 layer_norm,
-                lambda rng, h=hidden: rng.standard_normal((32, 128, h)).astype(
-                    numpy.float32
-                ),
+                lambda key, h=hidden: random.normal(key, (32, 128, h)),
                 name=f"layernorm_{hidden}",
             )

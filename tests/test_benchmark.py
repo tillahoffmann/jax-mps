@@ -1,6 +1,6 @@
 import jax
-import numpy
 import pytest
+from jax import random
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from .configs import OperationTestConfig, make_benchmark_op_configs
@@ -37,13 +37,15 @@ def test_benchmark_value(
     op_config: OperationTestConfig, device, benchmark: BenchmarkFixture
 ) -> None:
     # Get the args and move them to the right device.
-    rng = numpy.random.default_rng(op_config.seed)
+    key = random.key(op_config.seed)
+    args_key, kwargs_key = random.split(key)
     args = jax.tree.map(
-        lambda x: jax.device_put(x, device).block_until_ready(), op_config.get_args(rng)
+        lambda x: jax.device_put(x, device).block_until_ready(),
+        op_config.get_args(args_key),
     )
     kwargs = jax.tree.map(
         lambda x: jax.device_put(x, device).block_until_ready(),
-        op_config.get_kwargs(rng),
+        op_config.get_kwargs(kwargs_key),
     )
     func = jax.jit(op_config.func, static_argnums=op_config.static_argnums)
 
@@ -67,13 +69,15 @@ def test_benchmark_grad(
     op_config: OperationTestConfig, argnum: int, device, benchmark: BenchmarkFixture
 ) -> None:
     # Get the args and move them to the right device.
-    rng = numpy.random.default_rng(op_config.seed)
+    key = random.key(op_config.seed)
+    args_key, kwargs_key = random.split(key)
     args = jax.tree.map(
-        lambda x: jax.device_put(x, device).block_until_ready(), op_config.get_args(rng)
+        lambda x: jax.device_put(x, device).block_until_ready(),
+        op_config.get_args(args_key),
     )
     kwargs = jax.tree.map(
         lambda x: jax.device_put(x, device).block_until_ready(),
-        op_config.get_kwargs(rng),
+        op_config.get_kwargs(kwargs_key),
     )
 
     # Build scalar loss function (grad requires scalar output).
