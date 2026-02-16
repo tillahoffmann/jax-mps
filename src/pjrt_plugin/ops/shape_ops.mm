@@ -5,6 +5,90 @@
 
 namespace jax_mps {
 
+// WORKAROUND: MPSGraph's gather operations (gatherWithUpdatesTensor,
+// gatherAlongAxis, gatherNDWithUpdatesTensor) internally convert integer data
+// to float32, causing precision loss for 32-bit and 64-bit integers with
+// values > 2^24. This affects random key operations like jax.random.split().
+//
+// Evidence:
+// - Tested all three gather APIs: all corrupt uint32 values > 2^24 identically
+// - Non-gather ops (sliceTensor, identity) work correctly with uint32
+// - Corruption matches float32 precision loss (16777217 -> 16777216)
+// - PyTorch MPS backend has similar workarounds:
+//   * Converts UInt8 -> Int8 for gather (Indexing.mm:659-662)
+//   * Uses custom Metal shaders instead of MPSGraph gather (View.mm)
+//   * castToIHFTypes() only supports Int32/Float32/Float16/Int64, not UInt32
+//
+// Workaround approach:
+// 1. Bitcast 32-bit integers to float32 (preserving bit patterns, not values)
+// 2. Perform the gather on the "float32" data
+// 3. Bitcast back to the original integer type
+// For 64-bit integers, we reshape to pairs of 32-bit values first.
+//
+// Returns the input tensor prepared for gather (possibly bitcast to float32),
+// and sets needsReverse to true if the caller should reverse the operation.
+static MPSGraphTensor* PrepareForGather(MPSGraph* graph, MPSGraphTensor* input,
+                                        MPSDataType& originalType, bool& needsReverse,
+                                        bool& is64Bit) {
+    originalType = input.dataType;
+    needsReverse = (originalType == MPSDataTypeInt32 || originalType == MPSDataTypeUInt32);
+    is64Bit = (originalType == MPSDataTypeInt64 || originalType == MPSDataTypeUInt64);
+
+    if (is64Bit) {
+        // Reshape input: [shape...] -> [shape..., 2] treating each 64-bit as two 32-bits
+        NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray arrayWithArray:input.shape];
+        [expandedShape addObject:@2];
+
+        // Reinterpret as uint32 pairs
+        input = [graph reinterpretCastTensor:input toType:MPSDataTypeUInt32 name:nil];
+        input = [graph reshapeTensor:input withShape:expandedShape name:nil];
+        needsReverse = true;
+    }
+
+    if (needsReverse) {
+        // Bitcast to float32 (reinterpret bits, no conversion)
+        input = [graph reinterpretCastTensor:input toType:MPSDataTypeFloat32 name:nil];
+    }
+
+    return input;
+}
+
+// Reverses the PrepareForGather operation - bitcasts back to original type.
+static MPSGraphTensor* FinalizeGather(MPSGraph* graph, MPSGraphTensor* result,
+                                      MPSDataType originalType, bool needsReverse, bool is64Bit) {
+    if (needsReverse) {
+        // MPS reinterpret_cast doesn't work on scalar tensors (rank 0).
+        // If the result is a scalar, reshape to [1], cast, then reshape back.
+        bool isScalar = result.shape.count == 0;
+        if (isScalar) {
+            result = [graph reshapeTensor:result withShape:@[@1] name:nil];
+        }
+
+        // Bitcast back to original type (or uint32 for 64-bit case)
+        MPSDataType targetType = is64Bit ? MPSDataTypeUInt32 : originalType;
+        result = [graph reinterpretCastTensor:result toType:targetType name:nil];
+
+        if (isScalar) {
+            result = [graph reshapeTensor:result withShape:@[] name:nil];
+        }
+    }
+
+    if (is64Bit) {
+        // Reinterpret as original 64-bit type
+        // Again handle scalar case
+        bool isScalar = result.shape.count == 0;
+        if (isScalar) {
+            result = [graph reshapeTensor:result withShape:@[@1] name:nil];
+        }
+        result = [graph reinterpretCastTensor:result toType:originalType name:nil];
+        if (isScalar) {
+            result = [graph reshapeTensor:result withShape:@[] name:nil];
+        }
+    }
+
+    return result;
+}
+
 static ProcessResult HandleBroadcast(HandlerContext& ctx) {
     MPSGraphTensor* input = GetInputTensor(ctx, 0);
     if (!input)
@@ -198,12 +282,79 @@ static ProcessResult HandleDynamicSlice(HandlerContext& ctx) {
     // Shape: [slice_size_0, slice_size_1, ..., rank]
     MPSGraphTensor* indices = [ctx.graph stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
+    // WORKAROUND: MPSGraph's gatherND has a bug where it internally converts integer data
+    // to float32, causing precision loss for 32-bit and 64-bit integers with values > 2^24.
+    // We work around this by:
+    // 1. Bitcasting 32-bit integers to float32 (preserving bit patterns)
+    // 2. Performing the gather on the "float32" data
+    // 3. Bitcasting back to the original integer type
+    // This preserves all bits since we're reinterpreting, not converting.
+    MPSDataType originalType = input.dataType;
+    bool needsBitcast = (originalType == MPSDataTypeInt32 || originalType == MPSDataTypeUInt32);
+
+    // For 64-bit integers, we need to reshape to pairs of 32-bit values
+    bool is64Bit = (originalType == MPSDataTypeInt64 || originalType == MPSDataTypeUInt64);
+    if (is64Bit) {
+        // Reshape input: [shape...] -> [shape..., 2] treating each 64-bit as two 32-bits
+        NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray arrayWithArray:input.shape];
+        for (NSUInteger i = 0; i < expandedShape.count; i++) {
+            expandedShape[i] = expandedShape[i];
+        }
+        [expandedShape addObject:@2];
+
+        // Reinterpret as uint32 pairs
+        input = [ctx.graph reinterpretCastTensor:input toType:MPSDataTypeUInt32 name:nil];
+        input = [ctx.graph reshapeTensor:input withShape:expandedShape name:nil];
+
+        // Set needsBitcast since we're now working with uint32
+        needsBitcast = true;
+    }
+
+    MPSGraphTensor* gatherInput = input;
+    if (needsBitcast) {
+        // Bitcast to float32 (reinterpret bits, no conversion)
+        gatherInput = [ctx.graph reinterpretCastTensor:input toType:MPSDataTypeFloat32 name:nil];
+    }
+
     // Use gatherND to gather the slice from the input tensor
     // batchDimensions: 0 means no batch dimensions
-    MPSGraphTensor* result = [ctx.graph gatherNDWithUpdatesTensor:input
+    MPSGraphTensor* result = [ctx.graph gatherNDWithUpdatesTensor:gatherInput
                                                     indicesTensor:indices
                                                   batchDimensions:0
                                                              name:nil];
+
+    if (needsBitcast) {
+        // MPS reinterpret_cast doesn't work on scalar tensors (rank 0).
+        // If the result is a scalar, reshape to [1], cast, then reshape back.
+        bool isScalar = result.shape.count == 0;
+        if (isScalar) {
+            result = [ctx.graph reshapeTensor:result withShape:@[@1] name:nil];
+        }
+
+        // Bitcast back to original type (or uint32 for 64-bit case)
+        MPSDataType targetType = is64Bit ? MPSDataTypeUInt32 : originalType;
+        result = [ctx.graph reinterpretCastTensor:result toType:targetType name:nil];
+
+        if (isScalar) {
+            result = [ctx.graph reshapeTensor:result withShape:@[] name:nil];
+        }
+    }
+
+    if (is64Bit) {
+        // Reshape back from [..., 2] to [...] and reinterpret as original 64-bit type
+        MPSDataType outputType = GetResultMpsType(ctx.op);
+
+        // Handle scalar case for 64-bit
+        bool isScalar = result.shape.count == 0;
+        if (isScalar) {
+            result = [ctx.graph reshapeTensor:result withShape:@[@1] name:nil];
+        }
+        result = [ctx.graph reinterpretCastTensor:result toType:outputType name:nil];
+        if (isScalar) {
+            result = [ctx.graph reshapeTensor:result withShape:@[] name:nil];
+        }
+    }
+
     return Result(ctx, result, "dynamic_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", HandleDynamicSlice);
@@ -453,6 +604,12 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         // Cast indices to int32 if needed (MPS gather requires int32)
         squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
+        // Apply bitcast workaround for integer types
+        MPSDataType originalType;
+        bool needsReverse = false;
+        bool is64Bit = false;
+        operand = PrepareForGather(ctx.graph, operand, originalType, needsReverse, is64Bit);
+
         // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
         // This gathers slices from operand along the specified axis using indices
         // Result shape: indices.shape + operand.shape[axis+1:]
@@ -462,6 +619,9 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                                                                axis:(NSUInteger)gatherAxis
                                                     batchDimensions:0
                                                                name:nil];
+
+        // Reverse the bitcast workaround
+        result = FinalizeGather(ctx.graph, result, originalType, needsReverse, is64Bit);
 
         return Result(ctx, result, "gather");
     }
@@ -503,10 +663,19 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                                                         name:nil];
         ndIndices = EnsureInt32(ctx.graph, ndIndices);
 
+        // Apply bitcast workaround for integer types
+        MPSDataType originalType;
+        bool needsReverse = false;
+        bool is64Bit = false;
+        operand = PrepareForGather(ctx.graph, operand, originalType, needsReverse, is64Bit);
+
         MPSGraphTensor* gathered = [ctx.graph gatherNDWithUpdatesTensor:operand
                                                           indicesTensor:ndIndices
                                                         batchDimensions:0
                                                                    name:nil];
+
+        // Reverse the bitcast workaround
+        gathered = FinalizeGather(ctx.graph, gathered, originalType, needsReverse, is64Bit);
 
         // Result is [1] for a scalar point gather; reshape to scalar.
         if (gathered.shape.count == 1 && [gathered.shape[0] integerValue] == 1) {
