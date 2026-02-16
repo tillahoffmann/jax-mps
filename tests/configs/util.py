@@ -8,12 +8,20 @@ import pytest
 from jax import numpy as jnp
 
 CPU_DEVICE = jax.devices("cpu")[0]
-MPS_DEVICE = jax.devices("mps")[0]
+MPS_DEVICE = (
+    jax.devices("mps")[0] if "mps" in {d.platform for d in jax.devices()} else None
+)
 STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
 
 
 def xfail_match(pattern: str) -> pytest.MarkDecorator:
-    """Create a strict xfail marker that validates the error message pattern."""
+    """Create a strict xfail marker that validates the error message pattern.
+
+    When MPS is not available (e.g., JAX_PLATFORMS=cpu), return a no-op marker
+    since MPS-specific errors won't occur and the test should pass normally.
+    """
+    if MPS_DEVICE is None:
+        return pytest.mark.noop
     return pytest.mark.xfail(reason=pattern, match=pattern, strict=True)  # pyright: ignore[reportCallIssue]
 
 
