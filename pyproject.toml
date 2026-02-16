@@ -59,6 +59,7 @@ dev = [
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",
     "pytest",
+    "pytest-benchmark>=5.2.3",
     "ruff>=0.14.13",
     "tqdm>=4.67.1",
 ]
