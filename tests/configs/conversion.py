@@ -1,4 +1,5 @@
-from jax import lax
+import numpy
+from jax import lax, random
 from jax import numpy as jnp
 
 from .util import OperationTestConfig
@@ -13,12 +14,15 @@ def make_conversion_op_configs():
             ),
             OperationTestConfig(
                 lambda x: x.astype(jnp.float16),
-                lambda rng: rng.normal(size=(4, 5)),
+                lambda key: random.normal(key, (4, 5)),
                 differentiable_argnums=(),
             ),
+            # Use deterministic input for bitcast tests since random.normal can
+            # produce slightly different values on MPS vs CPU, which becomes
+            # visible when bitcasting to integers.
             OperationTestConfig(
                 lambda x: lax.bitcast_convert_type(x, jnp.int32),
-                lambda rng: rng.normal(size=(4, 5)),
+                numpy.arange(20, dtype=numpy.float32).reshape(4, 5),
                 differentiable_argnums=(),
             ),
         ]

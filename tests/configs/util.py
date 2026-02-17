@@ -5,7 +5,9 @@ from typing import Any, Callable, ClassVar, Sequence
 import jax
 import numpy
 import pytest
+from flax import nnx
 from jax import numpy as jnp
+from jax import random
 
 CPU_DEVICE = jax.devices("cpu")[0]
 MPS_DEVICE = (
@@ -38,13 +40,13 @@ def get_device_placement(value):
 
 
 def complex_standard_normal(
-    rng: numpy.random.Generator, shape: tuple[int, ...], complex: bool
-) -> numpy.ndarray:
+    key: jax.Array, shape: tuple[int, ...], complex: bool
+) -> jax.Array:
     """Generate random normal data, optionally complex-valued."""
     if complex:
-        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
-    else:
-        return rng.standard_normal(shape)
+        key1, key2 = random.split(key)
+        return random.normal(key1, shape) + 1j * random.normal(key2, shape)
+    return random.normal(key, shape)
 
 
 class OperationTestConfig:
@@ -97,13 +99,13 @@ class OperationTestConfig:
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
         self.seed = seed
-        # Wrap non-callables in lambdas that accept (and ignore) rng
+        # Wrap non-callables in lambdas that accept (and ignore) key
         self.args = [
-            arg if callable(arg) else (lambda rng, arg=arg: arg) for arg in args
+            arg if callable(arg) else (lambda key, arg=arg: arg) for arg in args
         ]
         self.kwargs = {
-            key: arg if callable(arg) else (lambda rng, arg=arg: arg)
-            for key, arg in kwargs.items()
+            k: arg if callable(arg) else (lambda key, arg=arg: arg)
+            for k, arg in kwargs.items()
         }
 
         if name is None:
@@ -112,19 +114,25 @@ class OperationTestConfig:
             name = f"{self.ACTIVE_MODULE_NAME}.{name}"
         self.name = name
 
-    def get_args(self, rng: numpy.random.Generator):
-        """Get positional arguments, using rng for any random generation."""
+    def get_args(self, key: jax.Array):
+        """Get positional arguments, using key for any random generation."""
         args = []
         for arg_func in self.args:
-            arg = arg_func(rng)
+            key, subkey = random.split(key)
+            arg = arg_func(subkey)
+            # Convert numpy arrays to JAX arrays for compatibility
             if isinstance(arg, numpy.ndarray):
                 arg = jnp.asarray(arg)
             args.append(arg)
         return args
 
-    def get_kwargs(self, rng: numpy.random.Generator):
-        """Get keyword arguments, using rng for any random generation."""
-        return {key: arg_func(rng) for key, arg_func in self.kwargs.items()}
+    def get_kwargs(self, key: jax.Array):
+        """Get keyword arguments, using key for any random generation."""
+        kwargs = {}
+        for k, arg_func in self.kwargs.items():
+            key, subkey = random.split(key)
+            kwargs[k] = arg_func(subkey)
+        return kwargs
 
     def get_differentiable_argnums(self) -> tuple[int, ...]:
         """Get a tuple of integers indicating which arguments can be differentiated with
@@ -132,21 +140,28 @@ class OperationTestConfig:
         if self.differentiable_argnums is not None:
             return tuple(self.differentiable_argnums)
 
-        rng = numpy.random.default_rng(self.seed)
+        key = random.key(self.seed)
         differentiable_argnums: list[int] = []
-        for argnum, arg in enumerate(self.get_args(rng)):
-            if isinstance(arg, float):
-                differentiable_argnums.append(argnum)
-            elif isinstance(arg, jnp.ndarray):
-                if arg.dtype == jnp.float32 or arg.dtype == jnp.complex64:
+        for argnum, arg_func in enumerate(self.args):
+            key, subkey = random.split(key)
+            # Use eval_shape to get dtype without materializing the full array.
+            arg_struct = jax.eval_shape(arg_func, subkey)
+            if hasattr(arg_struct, "dtype"):
+                # ShapeDtypeStruct or array-like with dtype attribute.
+                if jnp.issubdtype(arg_struct.dtype, jnp.inexact):
                     differentiable_argnums.append(argnum)
+            elif isinstance(arg_struct, float):
+                differentiable_argnums.append(argnum)
+            elif isinstance(arg_struct, nnx.Module):
+                differentiable_argnums.append(argnum)
         return tuple(differentiable_argnums)
 
     def evaluate_value(self, jit: bool):
         """Evaluate the output of the operation."""
-        rng = numpy.random.default_rng(self.seed)
-        args = self.get_args(rng)
-        kwargs = self.get_kwargs(rng)
+        key = random.key(self.seed)
+        args_key, kwargs_key = random.split(key)
+        args = self.get_args(args_key)
+        kwargs = self.get_kwargs(kwargs_key)
         lowered = None
         func = self.func
         if jit:
@@ -163,9 +178,10 @@ class OperationTestConfig:
     def evaluate_grad(self, argnum: int, jit: bool) -> tuple[jnp.ndarray]:
         """Evaluate the gradient of the operation. If the operation returns a tuple of
         values, gradients are evaluated for each element."""
-        rng = numpy.random.default_rng(self.seed)
-        args = self.get_args(rng)
-        kwargs = self.get_kwargs(rng)
+        key = random.key(self.seed)
+        args_key, kwargs_key = random.split(key)
+        args = self.get_args(args_key)
+        kwargs = self.get_kwargs(kwargs_key)
 
         func = self.func
         result = func(*args, **kwargs)
@@ -186,10 +202,10 @@ class OperationTestConfig:
                 else:
                     result = result[returnnum]
 
-                # FIXME: Reduce to the magnitude if the function is complex-valued so we
+                # Reduce to the magnitude if the function is complex-valued so we
                 # don't have to deal with complex derivatives. This isn't ideal but
                 # pragmatic.
-                if result.dtype == jnp.complex64:
+                if jnp.issubdtype(result.dtype, jnp.complexfloating):
                     result = jnp.abs(result)
 
                 # Reduce to the mean if the output is not a scalar; we can only

@@ -1,6 +1,7 @@
 // Shape operations: broadcast, reshape, convert, slice, concatenate,
 // custom_call, etc.
 
+#import "pjrt_plugin/ops/gather_scatter_utils.h"
 #import "pjrt_plugin/ops/registry.h"
 
 namespace jax_mps {
@@ -198,12 +199,9 @@ static ProcessResult HandleDynamicSlice(HandlerContext& ctx) {
     // Shape: [slice_size_0, slice_size_1, ..., rank]
     MPSGraphTensor* indices = [ctx.graph stackTensors:indexTensors axis:(NSInteger)rank name:nil];
 
-    // Use gatherND to gather the slice from the input tensor
-    // batchDimensions: 0 means no batch dimensions
-    MPSGraphTensor* result = [ctx.graph gatherNDWithUpdatesTensor:input
-                                                    indicesTensor:indices
-                                                  batchDimensions:0
-                                                             name:nil];
+    // Use SafeGatherND to handle integer precision issues
+    MPSGraphTensor* result = SafeGatherND(ctx.graph, input, indices, 0);
+
     return Result(ctx, result, "dynamic_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_slice", HandleDynamicSlice);
@@ -392,13 +390,9 @@ static ProcessResult HandleDynamicUpdateSlice(HandlerContext& ctx) {
     // Cast indices to int32 if needed
     indices = EnsureInt32(ctx.graph, indices);
 
-    // Use scatterND to update the operand at the specified indices
-    MPSGraphTensor* result = [ctx.graph scatterNDWithDataTensor:operand
-                                                  updatesTensor:update
-                                                  indicesTensor:indices
-                                                batchDimensions:0
-                                                           mode:MPSGraphScatterModeSet
-                                                           name:nil];
+    // Use SafeScatterND to handle integer precision issues
+    MPSGraphTensor* result =
+        SafeScatterND(ctx.graph, operand, update, indices, 0, MPSGraphScatterModeSet);
     return Result(ctx, result, "dynamic_update_slice");
 }
 REGISTER_MPS_OP("stablehlo.dynamic_update_slice", HandleDynamicUpdateSlice);
@@ -453,15 +447,9 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         // Cast indices to int32 if needed (MPS gather requires int32)
         squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
-        // Use gatherWithUpdatesTensor:indicesTensor:axis:batchDimensions:
-        // This gathers slices from operand along the specified axis using indices
-        // Result shape: indices.shape + operand.shape[axis+1:]
-        // For embedding [100, 5] with indices [3]: result is [3, 5]
-        MPSGraphTensor* result = [ctx.graph gatherWithUpdatesTensor:operand
-                                                      indicesTensor:squeezedIndices
-                                                               axis:(NSUInteger)gatherAxis
-                                                    batchDimensions:0
-                                                               name:nil];
+        // Use SafeGather to handle integer precision issues
+        MPSGraphTensor* result =
+            SafeGather(ctx.graph, operand, squeezedIndices, (NSUInteger)gatherAxis, 0);
 
         return Result(ctx, result, "gather");
     }
@@ -503,10 +491,8 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                                                         name:nil];
         ndIndices = EnsureInt32(ctx.graph, ndIndices);
 
-        MPSGraphTensor* gathered = [ctx.graph gatherNDWithUpdatesTensor:operand
-                                                          indicesTensor:ndIndices
-                                                        batchDimensions:0
-                                                                   name:nil];
+        // Use SafeGatherND to handle integer precision issues
+        MPSGraphTensor* gathered = SafeGatherND(ctx.graph, operand, ndIndices, 0);
 
         // Result is [1] for a scalar point gather; reshape to scalar.
         if (gathered.shape.count == 1 && [gathered.shape[0] integerValue] == 1) {
@@ -594,15 +580,9 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
         MPSGraphScatterMode mode = GetScatterMode(scatterOp);
 
-        // Use scatterAlongAxis which handles batched scatter correctly:
-        // For each position in updates, it scatters to the position given by indices at that
-        // position
-        MPSGraphTensor* result = [ctx.graph scatterAlongAxis:static_cast<NSInteger>(scatterAxis)
-                                              withDataTensor:input
-                                               updatesTensor:updates
-                                               indicesTensor:squeezedIndices
-                                                        mode:mode
-                                                        name:nil];
+        // Use SafeScatterAlongAxis to handle integer precision issues
+        MPSGraphTensor* result = SafeScatterAlongAxis(
+            ctx.graph, static_cast<NSInteger>(scatterAxis), input, updates, squeezedIndices, mode);
         return Result(ctx, result, "scatter");
     }
 
@@ -643,6 +623,16 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         if (updates.shape.count == 0)
             updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
 
+        // MPS scatter requires updates rank to match operand rank. When updates has higher
+        // rank (e.g. 2D batch of indices into 2D embedding table), MPS cannot handle it.
+        if (updates.shape.count > input.shape.count) {
+            return ProcessResult::Error(
+                "scatter: MPS does not support scatter where updates rank (" +
+                std::to_string(updates.shape.count) + ") > operand rank (" +
+                std::to_string(input.shape.count) +
+                "). This can occur with multi-dimensional indices into embeddings.");
+        }
+
         // Scalar index updates in StableHLO can drop the scattered axis from the update
         // shape (e.g. input [10,1,4], updates [1,4] for axis 0). MPS scatter expects the
         // update tensor rank to match the operand rank, so reinsert singleton axes as needed.
@@ -669,14 +659,9 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             updates = [ctx.graph reshapeTensor:updates withShape:alignedUpdatesShape name:nil];
         }
 
-        // Use scatterWithDataTensor to scatter updates into input
-        MPSGraphTensor* result =
-            [ctx.graph scatterWithDataTensor:input
-                               updatesTensor:updates
-                               indicesTensor:squeezedIndices
-                                        axis:static_cast<NSInteger>(scatterAxis)
-                                        mode:mode
-                                        name:nil];
+        // Use SafeScatter to handle integer precision issues
+        MPSGraphTensor* result = SafeScatter(ctx.graph, input, updates, squeezedIndices,
+                                             static_cast<NSInteger>(scatterAxis), mode);
         return Result(ctx, result, "scatter");
     }
 
@@ -713,12 +698,8 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             updates = [ctx.graph reshapeTensor:updates withShape:@[@1] name:nil];
         }
 
-        MPSGraphTensor* result = [ctx.graph scatterNDWithDataTensor:input
-                                                      updatesTensor:updates
-                                                      indicesTensor:ndIndices
-                                                    batchDimensions:0
-                                                               mode:mode
-                                                               name:nil];
+        // Use SafeScatterND to handle integer precision issues
+        MPSGraphTensor* result = SafeScatterND(ctx.graph, input, updates, ndIndices, 0, mode);
         return Result(ctx, result, "scatter");
     }
 

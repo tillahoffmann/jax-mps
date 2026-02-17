@@ -1,3 +1,4 @@
+#import "pjrt_plugin/ops/gather_scatter_utils.h"
 #import "pjrt_plugin/ops/registry.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -96,10 +97,7 @@ static ProcessResult HandleSort(HandlerContext& ctx) {
             if (!keyTensor) {
                 return ProcessResult::Error("stablehlo.sort key tensor missing");
             }
-            MPSGraphTensor* keyAtPerm = [ctx.graph gatherAlongAxis:axis
-                                                 withUpdatesTensor:keyTensor
-                                                     indicesTensor:perm
-                                                              name:nil];
+            MPSGraphTensor* keyAtPerm = SafeGatherAlongAxis(ctx.graph, axis, keyTensor, perm);
             MPSGraphTensor* localOrder = [ctx.graph argSortWithTensor:keyAtPerm
                                                                  axis:axis
                                                            descending:descending
@@ -108,10 +106,7 @@ static ProcessResult HandleSort(HandlerContext& ctx) {
                 return ProcessResult::Error("stablehlo.sort argSort lowering failed");
             }
             localOrder = EnsureInt32(ctx.graph, localOrder);
-            perm = [ctx.graph gatherAlongAxis:axis
-                            withUpdatesTensor:perm
-                                indicesTensor:localOrder
-                                         name:nil];
+            perm = SafeGatherAlongAxis(ctx.graph, axis, perm, localOrder);
         }
 
         for (unsigned i = 0; i < ctx.op->getNumResults(); ++i) {
@@ -119,10 +114,7 @@ static ProcessResult HandleSort(HandlerContext& ctx) {
             if (!operandTensor) {
                 return ProcessResult::Error("stablehlo.sort operand tensor missing");
             }
-            MPSGraphTensor* sorted = [ctx.graph gatherAlongAxis:axis
-                                              withUpdatesTensor:operandTensor
-                                                  indicesTensor:perm
-                                                           name:nil];
+            MPSGraphTensor* sorted = SafeGatherAlongAxis(ctx.graph, axis, operandTensor, perm);
             if (!sorted) {
                 return ProcessResult::Error("stablehlo.sort gather lowering failed");
             }

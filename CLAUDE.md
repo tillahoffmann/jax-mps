@@ -8,8 +8,11 @@
 - You may NEVER push to `main` unless explicitly requested.
 - You may NEVER delete operations or tests without my explicit approval.
 - For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See `tests/configs/unary.py` for an example and `tests/configs/util.py` for the signature of `OperationTestConfig`.
-- You may NEVER claim that a failed test is "a known limitation" or "unrelated to our changes" without providing proof. CI is always green.
 - You may NEVER create new op registries. Use `OpRegistry` for all ops and `CustomCallRegistry` for custom call targets. See `src/pjrt_plugin/ops/registry.h`.
+
+# CI is Always Green
+
+Tests, linting, and compilation on the `main` branch and in Continuous Integration testing ALWAYS pass. This means that any failures MUST be related to changes we made. You may NEVER claim that failures are "known issues," "unrelated to our changes," or similar.
 
 # Naming Conventions
 
@@ -33,4 +36,13 @@
 uv sync --all-groups
 uv pip install -e .
 uv run pytest
+```
+
+# Benchmarks
+
+Benchmarks are excluded from normal test runs. To run them:
+
+```bash
+# Run benchmarks (compares CPU vs MPS performance)
+uv run pytest -m benchmark --benchmark-only
 ```

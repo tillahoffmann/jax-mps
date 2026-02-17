@@ -1,5 +1,5 @@
 import numpy
-from jax import lax
+from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy import special
 
@@ -14,95 +14,95 @@ def make_unary_op_configs():
             yield from [
                 OperationTestConfig(
                     jnp.abs,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.cos,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.exp,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.negative,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sign,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sin,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.square,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.tan,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.tanh,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.real,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.imag,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.log,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.log1p,
-                    lambda rng, complex=complex: (
-                        0.5 * complex_standard_normal(rng, (17,), complex)
+                    lambda key, complex=complex: (
+                        0.5 * complex_standard_normal(key, (17,), complex)
                         if complex
-                        else rng.gamma(5, size=(17,)) - 1
+                        else random.gamma(key, 5.0, (17,)) - 1
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sqrt,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
             ]
     yield from [
-        OperationTestConfig(jnp.ceil, lambda rng: rng.standard_normal((17,))),
-        OperationTestConfig(jnp.floor, lambda rng: rng.standard_normal((17,))),
-        OperationTestConfig(jnp.round, lambda rng: rng.standard_normal((17,))),
+        OperationTestConfig(jnp.ceil, lambda key: random.normal(key, (17,))),
+        OperationTestConfig(jnp.floor, lambda key: random.normal(key, (17,))),
+        OperationTestConfig(jnp.round, lambda key: random.normal(key, (17,))),
     ]
 
     # Ops that don't trivially generalize across real/complex.
@@ -111,42 +111,42 @@ def make_unary_op_configs():
         OperationTestConfig(
             jnp.isfinite, numpy.asarray([1, jnp.nan, 1 + 1j * jnp.inf, -jnp.inf + 1j])
         ),
-        OperationTestConfig(lax.rsqrt, lambda rng: rng.gamma(5, size=(17,))),
+        OperationTestConfig(lax.rsqrt, lambda key: random.gamma(key, 5.0, (17,))),
         OperationTestConfig(
             jnp.arcsin,
-            lambda rng: rng.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.arccos,
-            lambda rng: rng.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.sinh,
-            lambda rng: rng.standard_normal((17,)).astype(numpy.float32),
+            lambda key: random.normal(key, (17,)),
         ),
         OperationTestConfig(
             jnp.cosh,
-            lambda rng: rng.standard_normal((17,)).astype(numpy.float32),
+            lambda key: random.normal(key, (17,)),
         ),
         OperationTestConfig(
             jnp.arcsinh,
-            lambda rng: rng.standard_normal((17,)).astype(numpy.float32),
+            lambda key: random.normal(key, (17,)),
         ),
         OperationTestConfig(
             jnp.arccosh,
-            lambda rng: (1 + rng.gamma(5, size=(17,))).astype(numpy.float32),
+            lambda key: 1 + random.gamma(key, 5.0, (17,)),
         ),
         OperationTestConfig(
             jnp.arctanh,
-            lambda rng: rng.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.cbrt,
-            lambda rng: rng.standard_normal((17,)).astype(numpy.float32),
+            lambda key: random.normal(key, (17,)),
         ),
         OperationTestConfig(
             special.erfinv,
-            lambda rng: rng.uniform(-0.9, 0.9, (17,)).astype(numpy.float32),
+            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.logical_not,

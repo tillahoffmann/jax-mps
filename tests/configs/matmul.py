@@ -6,7 +6,7 @@ the dot_general batch dimension handling.
 
 import numpy
 import pytest
-from jax import lax
+from jax import lax, random
 from jax import numpy as jnp
 
 from .util import OperationTestConfig, xfail_match
@@ -19,48 +19,48 @@ def make_matmul_op_configs():
         # Basic 2D matmul (M, K) @ (K, N) -> (M, N)
         yield OperationTestConfig(
             jnp.matmul,
-            lambda rng: rng.standard_normal((4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((5, 3)).astype(numpy.float32),
+            lambda key: random.normal(key, (4, 5)),
+            lambda key: random.normal(key, (5, 3)),
             name="2d_basic",
         )
 
         # Single batch dimension: (B, M, K) @ (B, K, N) -> (B, M, N)
         yield OperationTestConfig(
             jnp.matmul,
-            lambda rng: rng.standard_normal((2, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((2, 5, 3)).astype(numpy.float32),
+            lambda key: random.normal(key, (2, 4, 5)),
+            lambda key: random.normal(key, (2, 5, 3)),
             name="batched_1d",
         )
 
         # Multiple batch dimensions: (B1, B2, M, K) @ (B1, B2, K, N) -> (B1, B2, M, N)
         yield OperationTestConfig(
             jnp.matmul,
-            lambda rng: rng.standard_normal((2, 3, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((2, 3, 5, 6)).astype(numpy.float32),
+            lambda key: random.normal(key, (2, 3, 4, 5)),
+            lambda key: random.normal(key, (2, 3, 5, 6)),
             name="batched_2d",
         )
 
         # Three batch dimensions
         yield OperationTestConfig(
             jnp.matmul,
-            lambda rng: rng.standard_normal((2, 2, 2, 3, 4)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((2, 2, 2, 4, 5)).astype(numpy.float32),
+            lambda key: random.normal(key, (2, 2, 2, 3, 4)),
+            lambda key: random.normal(key, (2, 2, 2, 4, 5)),
             name="batched_3d",
         )
 
         # Test with einsum for more explicit control
         yield OperationTestConfig(
             lambda x, y: jnp.einsum("bij,bjk->bik", x, y),
-            lambda rng: rng.standard_normal((3, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((3, 5, 6)).astype(numpy.float32),
+            lambda key: random.normal(key, (3, 4, 5)),
+            lambda key: random.normal(key, (3, 5, 6)),
             name="einsum_batched",
         )
 
         # Einsum with two batch dimensions
         yield OperationTestConfig(
             lambda x, y: jnp.einsum("abij,abjk->abik", x, y),
-            lambda rng: rng.standard_normal((2, 3, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((2, 3, 5, 6)).astype(numpy.float32),
+            lambda key: random.normal(key, (2, 3, 4, 5)),
+            lambda key: random.normal(key, (2, 3, 5, 6)),
             name="einsum_batched_2d",
         )
 
@@ -72,8 +72,8 @@ def make_matmul_op_configs():
                 y,
                 dimension_numbers=(((2,), (1,)), ((0,), (0,))),  # (contract, batch)
             ),
-            lambda rng: rng.standard_normal((3, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((3, 5, 6)).astype(numpy.float32),
+            lambda key: random.normal(key, (3, 4, 5)),
+            lambda key: random.normal(key, (3, 5, 6)),
             name="dot_general_batched",
         )
 
@@ -84,8 +84,8 @@ def make_matmul_op_configs():
                 y,
                 dimension_numbers=(((3,), (2,)), ((0, 1), (0, 1))),
             ),
-            lambda rng: rng.standard_normal((2, 3, 4, 5)).astype(numpy.float32),
-            lambda rng: rng.standard_normal((2, 3, 5, 6)).astype(numpy.float32),
+            lambda key: random.normal(key, (2, 3, 4, 5)),
+            lambda key: random.normal(key, (2, 3, 5, 6)),
             name="dot_general_batched_2d",
         )
 
@@ -96,12 +96,8 @@ def make_matmul_op_configs():
                 y,
                 dimension_numbers=(((1,), (1,)), ((0,), (0,))),
             ),
-            lambda rng: rng.standard_normal((3, 5, 4)).astype(
-                numpy.float32
-            ),  # (B, K, M)
-            lambda rng: rng.standard_normal((3, 5, 6)).astype(
-                numpy.float32
-            ),  # (B, K, N)
+            lambda key: random.normal(key, (3, 5, 4)),  # (B, K, M)
+            lambda key: random.normal(key, (3, 5, 6)),  # (B, K, N)
             name="dot_general_lhs_transposed",
         )
 
@@ -112,12 +108,8 @@ def make_matmul_op_configs():
                 y,
                 dimension_numbers=(((2,), (2,)), ((0,), (0,))),
             ),
-            lambda rng: rng.standard_normal((3, 4, 5)).astype(
-                numpy.float32
-            ),  # (B, M, K)
-            lambda rng: rng.standard_normal((3, 6, 5)).astype(
-                numpy.float32
-            ),  # (B, N, K)
+            lambda key: random.normal(key, (3, 4, 5)),  # (B, M, K)
+            lambda key: random.normal(key, (3, 6, 5)),  # (B, N, K)
             name="dot_general_rhs_transposed",
         )
 
@@ -128,12 +120,8 @@ def make_matmul_op_configs():
                 y,
                 dimension_numbers=(((1,), (2,)), ((0,), (0,))),
             ),
-            lambda rng: rng.standard_normal((3, 5, 4)).astype(
-                numpy.float32
-            ),  # (B, K, M)
-            lambda rng: rng.standard_normal((3, 6, 5)).astype(
-                numpy.float32
-            ),  # (B, N, K)
+            lambda key: random.normal(key, (3, 5, 4)),  # (B, K, M)
+            lambda key: random.normal(key, (3, 6, 5)),  # (B, N, K)
             name="dot_general_both_transposed",
         )
 
@@ -151,8 +139,8 @@ def make_matmul_op_configs():
                         ((0,), (0,)),
                     ),  # contract dim 3/1, batch dim 0
                 ),
-                lambda rng: rng.standard_normal((2, 3, 4, 5)).astype(numpy.float32),
-                lambda rng: rng.standard_normal((2, 5, 6, 7)).astype(numpy.float32),
+                lambda key: random.normal(key, (2, 3, 4, 5)),
+                lambda key: random.normal(key, (2, 5, 6, 7)),
                 name="dot_general_multiple_free_dims",
             ),
             marks=[xfail_match("batched operations with multiple free dimensions")],

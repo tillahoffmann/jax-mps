@@ -6,6 +6,7 @@ import jax
 import numpy
 import pytest
 from jax import dtypes, random
+from jax import numpy as jnp
 
 from .configs import (
     OperationTestConfig,
@@ -87,7 +88,11 @@ def assert_allclose_with_path(path, actual, desired):
         desired = random.key_data(desired)
 
     try:
-        numpy.testing.assert_allclose(actual, desired, atol=1e-5, rtol=1e-5)
+        # Use exact comparison for exact dtypes, tolerance-based for inexact.
+        if jnp.issubdtype(actual.dtype, jnp.inexact):
+            numpy.testing.assert_allclose(actual, desired, atol=1e-5, rtol=1e-5)
+        else:
+            numpy.testing.assert_array_equal(actual, desired)
     except AssertionError as ex:
         raise AssertionError(f"Values are not close at path '{path}'.") from ex
 

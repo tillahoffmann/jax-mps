@@ -1,5 +1,5 @@
 import numpy
-from jax import lax
+from jax import lax, random
 from jax import numpy as jnp
 
 from .util import OperationTestConfig
@@ -33,7 +33,7 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.bool_(True),
-                lambda rng: rng.standard_normal((5,)).astype(numpy.float32),
+                lambda key: random.normal(key, (5,)),
                 differentiable_argnums=(),
                 name="lax.cond.array",
             ),
@@ -45,7 +45,7 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.int32(1),
-                lambda rng: rng.standard_normal((4,)).astype(numpy.float32),
+                lambda key: random.normal(key, (4,)),
                 differentiable_argnums=(),
                 name="lax.switch",
             ),
@@ -60,7 +60,7 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.int32(2),
-                lambda rng: rng.standard_normal((4, 4)).astype(numpy.float32),
+                lambda key: random.normal(key, (4, 4)),
                 differentiable_argnums=(),
                 name="lax.switch.multiaxis",
             ),
@@ -229,7 +229,7 @@ def make_control_flow_op_configs():
                     ),
                     (numpy.int32(0), init),
                 )[1],
-                lambda rng: rng.standard_normal((3, 5)).astype(numpy.float32),
+                lambda key: random.normal(key, (3, 5)),
                 differentiable_argnums=(),
                 name="lax.while_loop.axis1",
             ),
@@ -243,7 +243,7 @@ def make_control_flow_op_configs():
                     ),
                     (numpy.int32(0), init),
                 )[1],
-                lambda rng: rng.standard_normal((3, 5)).astype(numpy.float32),
+                lambda key: random.normal(key, (3, 5)),
                 differentiable_argnums=(),
                 name="lax.while_loop.axis0",
             ),
@@ -307,7 +307,7 @@ def make_control_flow_op_configs():
                     ),
                     (numpy.int32(0), init),
                 )[1],
-                lambda rng: rng.standard_normal((3, 5)).astype(numpy.float32),
+                lambda key: random.normal(key, (3, 5)),
                 differentiable_argnums=(),
                 name="lax.while_loop.nested_axis1",
             ),
@@ -330,7 +330,7 @@ def make_control_flow_op_configs():
                     lambda i, val: val + jnp.roll(val, i),
                     x,
                 ),
-                lambda rng: rng.standard_normal((5,)).astype(numpy.float32),
+                lambda key: random.normal(key, (5,)),
                 differentiable_argnums=(),
                 name="lax.fori_loop.array",
             ),

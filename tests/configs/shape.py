@@ -1,4 +1,5 @@
 from jax import numpy as jnp
+from jax import random
 
 from .util import OperationTestConfig, complex_standard_normal
 
@@ -12,32 +13,32 @@ def make_shape_op_configs():
             yield from [
                 OperationTestConfig(
                     jnp.flip,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17,), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.fliplr,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 13), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17, 13), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.flipud,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 13), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17, 13), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.transpose,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 8, 9), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17, 8, 9), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.transpose,
-                    lambda rng, complex=complex: complex_standard_normal(
-                        rng, (17, 8, 9), complex
+                    lambda key, complex=complex: complex_standard_normal(
+                        key, (17, 8, 9), complex
                     ),
                     (1, 0, 2),
                     static_argnums=(1,),
@@ -48,16 +49,16 @@ def make_shape_op_configs():
         yield from [
             OperationTestConfig(
                 lambda x, y: jnp.concatenate([x, y], axis=0),
-                lambda rng: rng.normal(size=(3, 4)),
-                lambda rng: rng.normal(size=(5, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                lambda key: random.normal(key, (5, 4)),
             ),
             OperationTestConfig(
                 lambda x: jnp.reshape(x, (20,)),
-                lambda rng: rng.normal(size=(4, 5)),
+                lambda key: random.normal(key, (4, 5)),
             ),
             OperationTestConfig(
                 lambda x: jnp.pad(x, ((1, 1), (2, 2))),
-                lambda rng: rng.normal(size=(3, 3)),
+                lambda key: random.normal(key, (3, 3)),
                 # Grad crashes with fatal Metal abort (sliceUpdateDataTensor shape mismatch).
                 differentiable_argnums=(),
             ),
