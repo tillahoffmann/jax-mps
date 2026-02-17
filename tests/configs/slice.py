@@ -153,4 +153,59 @@ def make_slice_op_configs():
                 numpy.array([0, 2, 5], dtype=numpy.int32),
                 lambda key: random.normal(key, (3, 4)),
             ),
+            # Large integer gather tests: verify integers > 2^24 are preserved
+            # These test the bitcast workaround for MPS gather operations
+            OperationTestConfig(
+                lambda x, idx: x[idx],
+                numpy.array([16777217, 2**30, 2**31 - 1], dtype=numpy.uint32),
+                numpy.int32(1),
+                name="large_uint32_gather",
+            ),
+            OperationTestConfig(
+                lambda x, idx: x[idx],
+                numpy.array([16777217, 2**30, 2**31 - 1], dtype=numpy.int32),
+                numpy.int32(0),
+                name="large_int32_gather",
+            ),
+            OperationTestConfig(
+                lambda x, idx: x[idx],
+                numpy.array([2**40, 2**50, 2**62], dtype=numpy.uint64),
+                numpy.int32(1),
+                name="large_uint64_gather",
+            ),
+            OperationTestConfig(
+                lambda x, idx: x[idx],
+                numpy.array([2**40, 2**50, 2**62], dtype=numpy.int64),
+                numpy.int32(2),
+                name="large_int64_gather",
+            ),
+            # Large integer scatter tests: verify integers > 2^24 are preserved in scatter
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                numpy.zeros((5,), dtype=numpy.uint32),
+                numpy.int32(2),
+                numpy.uint32(16777217),
+                name="large_uint32_scatter",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                numpy.zeros((5,), dtype=numpy.int32),
+                numpy.int32(1),
+                numpy.int32(2**30),
+                name="large_int32_scatter",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                numpy.zeros((5,), dtype=numpy.uint64),
+                numpy.int32(3),
+                numpy.uint64(2**50),
+                name="large_uint64_scatter",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                numpy.zeros((5,), dtype=numpy.int64),
+                numpy.int32(0),
+                numpy.int64(2**62),
+                name="large_int64_scatter",
+            ),
         ]
