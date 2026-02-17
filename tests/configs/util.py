@@ -142,14 +142,18 @@ class OperationTestConfig:
 
         key = random.key(self.seed)
         differentiable_argnums: list[int] = []
-        for argnum, arg in enumerate(self.get_args(key)):
-            if isinstance(arg, float):
-                differentiable_argnums.append(argnum)
-            elif isinstance(arg, nnx.Module):
-                differentiable_argnums.append(argnum)
-            elif isinstance(arg, jnp.ndarray):
-                if jnp.issubdtype(arg.dtype, jnp.inexact):
+        for argnum, arg_func in enumerate(self.args):
+            key, subkey = random.split(key)
+            # Use eval_shape to get dtype without materializing the full array.
+            arg_struct = jax.eval_shape(arg_func, subkey)
+            if hasattr(arg_struct, "dtype"):
+                # ShapeDtypeStruct or array-like with dtype attribute.
+                if jnp.issubdtype(arg_struct.dtype, jnp.inexact):
                     differentiable_argnums.append(argnum)
+            elif isinstance(arg_struct, float):
+                differentiable_argnums.append(argnum)
+            elif isinstance(arg_struct, nnx.Module):
+                differentiable_argnums.append(argnum)
         return tuple(differentiable_argnums)
 
     def evaluate_value(self, jit: bool):

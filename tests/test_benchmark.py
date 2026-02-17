@@ -88,7 +88,7 @@ def test_benchmark_grad(
         if isinstance(result, (tuple, list)):
             result = result[0]
         # Handle complex outputs (same as OperationTestConfig.evaluate_grad).
-        if result.dtype == jax.numpy.complex64:
+        if jax.numpy.issubdtype(result.dtype, jax.numpy.complexfloating):
             result = jax.numpy.abs(result)
         if result.shape != ():
             result = result.mean()
