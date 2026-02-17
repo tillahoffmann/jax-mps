@@ -14,31 +14,31 @@ def make_shape_op_configs():
                 OperationTestConfig(
                     jnp.flip,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.fliplr,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17, 13), complex
+                        key, (8, 16), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.flipud,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17, 13), complex
+                        key, (8, 16), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.transpose,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17, 8, 9), complex
+                        key, (4, 8, 16), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.transpose,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17, 8, 9), complex
+                        key, (4, 8, 16), complex
                     ),
                     (1, 0, 2),
                     static_argnums=(1,),

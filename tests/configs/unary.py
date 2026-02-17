@@ -15,94 +15,94 @@ def make_unary_op_configs():
                 OperationTestConfig(
                     jnp.abs,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.cos,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.exp,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.negative,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sign,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sin,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.square,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.tan,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.tanh,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.real,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.imag,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.log,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
                 OperationTestConfig(
                     jnp.log1p,
                     lambda key, complex=complex: (
-                        0.5 * complex_standard_normal(key, (17,), complex)
+                        0.5 * complex_standard_normal(key, (16,), complex)
                         if complex
-                        else random.gamma(key, 5.0, (17,)) - 1
+                        else random.gamma(key, 5.0, (16,)) - 1
                     ),
                 ),
                 OperationTestConfig(
                     jnp.sqrt,
                     lambda key, complex=complex: complex_standard_normal(
-                        key, (17,), complex
+                        key, (16,), complex
                     ),
                 ),
             ]
     yield from [
-        OperationTestConfig(jnp.ceil, lambda key: random.normal(key, (17,))),
-        OperationTestConfig(jnp.floor, lambda key: random.normal(key, (17,))),
-        OperationTestConfig(jnp.round, lambda key: random.normal(key, (17,))),
+        OperationTestConfig(jnp.ceil, lambda key: random.normal(key, (16,))),
+        OperationTestConfig(jnp.floor, lambda key: random.normal(key, (16,))),
+        OperationTestConfig(jnp.round, lambda key: random.normal(key, (16,))),
     ]
 
     # Ops that don't trivially generalize across real/complex.
@@ -111,42 +111,42 @@ def make_unary_op_configs():
         OperationTestConfig(
             jnp.isfinite, numpy.asarray([1, jnp.nan, 1 + 1j * jnp.inf, -jnp.inf + 1j])
         ),
-        OperationTestConfig(lax.rsqrt, lambda key: random.gamma(key, 5.0, (17,))),
+        OperationTestConfig(lax.rsqrt, lambda key: random.gamma(key, 5.0, (16,))),
         OperationTestConfig(
             jnp.arcsin,
-            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
+            lambda key: random.uniform(key, (16,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.arccos,
-            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
+            lambda key: random.uniform(key, (16,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.sinh,
-            lambda key: random.normal(key, (17,)),
+            lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
             jnp.cosh,
-            lambda key: random.normal(key, (17,)),
+            lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
             jnp.arcsinh,
-            lambda key: random.normal(key, (17,)),
+            lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
             jnp.arccosh,
-            lambda key: 1 + random.gamma(key, 5.0, (17,)),
+            lambda key: 1 + random.gamma(key, 5.0, (16,)),
         ),
         OperationTestConfig(
             jnp.arctanh,
-            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
+            lambda key: random.uniform(key, (16,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.cbrt,
-            lambda key: random.normal(key, (17,)),
+            lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
             special.erfinv,
-            lambda key: random.uniform(key, (17,), minval=-0.9, maxval=0.9),
+            lambda key: random.uniform(key, (16,), minval=-0.9, maxval=0.9),
         ),
         OperationTestConfig(
             jnp.logical_not,
