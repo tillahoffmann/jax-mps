@@ -14,7 +14,7 @@ def make_conversion_op_configs():
             ),
             OperationTestConfig(
                 lambda x: x.astype(jnp.float16),
-                lambda key: random.normal(key, (4, 5)),
+                lambda key: random.normal(key, (4, 8)),
                 differentiable_argnums=(),
             ),
             # Use deterministic input for bitcast tests since random.normal can
@@ -22,7 +22,7 @@ def make_conversion_op_configs():
             # visible when bitcasting to integers.
             OperationTestConfig(
                 lambda x: lax.bitcast_convert_type(x, jnp.int32),
-                numpy.arange(20, dtype=numpy.float32).reshape(4, 5),
+                numpy.arange(32, dtype=numpy.float32).reshape(4, 8),
                 differentiable_argnums=(),
             ),
         ]

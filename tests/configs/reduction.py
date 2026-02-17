@@ -14,14 +14,14 @@ def make_reduction_op_configs():
                     OperationTestConfig(
                         reduction,
                         lambda key, complex=complex: complex_standard_normal(
-                            key, (4, 5), complex
+                            key, (4, 8), complex
                         ),
                     ),
                     # Explicit argument because capture doesn't work.
                     OperationTestConfig(
                         lambda x, reduction=reduction: reduction(x, axis=1),
                         lambda key, complex=complex: complex_standard_normal(
-                            key, (4, 5), complex
+                            key, (4, 8), complex
                         ),
                     ),
                 ]
@@ -30,12 +30,12 @@ def make_reduction_op_configs():
             yield from [
                 OperationTestConfig(
                     lambda x: jnp.max(x, axis=0),
-                    lambda key: random.normal(key, (4, 5)),
+                    lambda key: random.normal(key, (4, 8)),
                     differentiable_argnums=(),
                 ),
                 OperationTestConfig(
                     lambda x: jnp.min(x, axis=-1),
-                    lambda key: random.normal(key, (4, 5)),
+                    lambda key: random.normal(key, (4, 8)),
                     differentiable_argnums=(),
                 ),
             ]

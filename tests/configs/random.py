@@ -5,7 +5,7 @@ from .util import MPS_DEVICE, OperationTestConfig
 
 def make_random_op_configs():
     with OperationTestConfig.module_name("random"):
-        for shape in [(), (3,), (7, 8)]:
+        for shape in [(), (3,), (4, 8)]:
             yield from [
                 OperationTestConfig(
                     random.normal, random.key(17), shape, static_argnums=(1,)
