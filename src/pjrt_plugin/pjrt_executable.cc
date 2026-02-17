@@ -9,6 +9,11 @@
 // ============================================================================
 
 PJRT_Error* MPS_Executable_Destroy(PJRT_Executable_Destroy_Args* args) {
+    // Skip deletion if executable is owned by a LoadedExecutable
+    // (will be deleted when LoadedExecutable is destroyed)
+    if (args->executable && args->executable->owned_by_loaded) {
+        return nullptr;
+    }
     delete args->executable;
     return nullptr;
 }
@@ -127,6 +132,10 @@ PJRT_Error* MPS_Executable_Fingerprint(PJRT_Executable_Fingerprint_Args* args) {
 // ============================================================================
 
 PJRT_Error* MPS_LoadedExecutable_Destroy(PJRT_LoadedExecutable_Destroy_Args* args) {
+    if (args->executable) {
+        // Delete the owned PJRT_Executable first (owns MpsExecutable with MLIR context)
+        delete args->executable->executable;
+    }
     delete args->executable;
     return nullptr;
 }

@@ -220,6 +220,7 @@ PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
     auto* executable = new PJRT_Executable();
     executable->executable = std::move(mps_exec);
     executable->client = client;
+    executable->owned_by_loaded = true;  // Mark as owned by LoadedExecutable
 
     // Wrap in LoadedExecutable
     auto* loaded_executable = new PJRT_LoadedExecutable();

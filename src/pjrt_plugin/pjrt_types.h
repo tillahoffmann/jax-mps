@@ -61,6 +61,10 @@ struct PJRT_Executable {
     std::unique_ptr<jax_mps::MpsExecutable> executable;
     PJRT_Client* client;
 
+    // Ownership flag: when true, this executable is owned by a PJRT_LoadedExecutable
+    // and should not be deleted directly by PJRT_Executable_Destroy
+    bool owned_by_loaded = false;
+
     // Dynamic storage for output metadata (lazily initialized)
     mutable std::vector<const char*> output_memory_kinds;
     mutable std::vector<size_t> output_memory_kind_sizes;

@@ -806,6 +806,25 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         }
 
         // Pre-allocate intermediate MTLBuffers for graph-step target slots.
+        // Track which slots we allocated so we can release them on error or completion.
+        std::vector<SlotId> allocated_slots;
+
+        // Helper to release intermediate buffers (called on error paths and completion)
+        auto release_intermediates = [&](bool exclude_outputs) {
+            std::unordered_set<SlotId> output_slots_set;
+            if (exclude_outputs) {
+                output_slots_set.insert(plan_->output_slots.begin(), plan_->output_slots.end());
+            }
+            for (SlotId slot : allocated_slots) {
+                if (!exclude_outputs || output_slots_set.find(slot) == output_slots_set.end()) {
+                    if (slot_bufs[slot]) {
+                        CFRelease((__bridge CFTypeRef)slot_bufs[slot]);
+                        slot_bufs[slot] = nil;
+                    }
+                }
+            }
+        };
+
         for (const auto& gs : plan_->graph_steps) {
             for (const auto& [slot, tensor] : gs.targets) {
                 if (slot_bufs[slot])
@@ -814,10 +833,12 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 id<MTLBuffer> buf = [mtl_device newBufferWithLength:byte_size
                                                             options:MTLResourceStorageModeShared];
                 if (!buf) {
+                    release_intermediates(false);  // Release all allocated so far
                     return ExecutionResult::Error("Failed to pre-allocate slot buffer of " +
                                                   std::to_string(byte_size) + " bytes");
                 }
                 slot_bufs[slot] = buf;
+                allocated_slots.push_back(slot);
             }
         }
 
@@ -826,6 +847,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         // via id<MTLCommandBuffer> conformance.
         MPSCommandBuffer* cmdBuf = [MPSCommandBuffer commandBufferFromCommandQueue:commandQueue];
         if (!cmdBuf) {
+            release_intermediates(false);
             return ExecutionResult::Error("Failed to create command buffer");
         }
 
@@ -841,6 +863,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                               gs.feeds.size(), gs.targets.size());
                 MPSGraph* graph = (__bridge MPSGraph*)gs.graph;
                 if (!graph) {
+                    release_intermediates(false);
                     return ExecutionResult::Error("Graph is nil at step " +
                                                   std::to_string(step_idx));
                 }
@@ -852,20 +875,22 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                 for (auto& [slot, tensor_ptr] : gs.feeds) {
                     MPS_LOG_DEBUG("    Feed slot=%d, tensor_ptr=%p\n", slot, tensor_ptr);
                     if (!slot_bufs[slot]) {
+                        release_intermediates(false);
                         return ExecutionResult::Error("Slot buffer " + std::to_string(slot) +
                                                       " is nil during feed construction");
                     }
                     MPSGraphTensor* tensor = (__bridge MPSGraphTensor*)tensor_ptr;
                     if (!tensor) {
+                        release_intermediates(false);
                         return ExecutionResult::Error("Feed tensor is nil for slot " +
                                                       std::to_string(slot));
                     }
                     MPS_LOG_DEBUG("    Tensor shape: %s, dtype: %d\n",
                                   [[tensor.shape description] UTF8String], (int)tensor.dataType);
-                    MPSGraphTensorData* data =
-                        [[MPSGraphTensorData alloc] initWithMTLBuffer:slot_bufs[slot]
-                                                                shape:tensor.shape
-                                                             dataType:tensor.dataType];
+                    MPSGraphTensorData* data = [[[MPSGraphTensorData alloc]
+                        initWithMTLBuffer:slot_bufs[slot]
+                                    shape:tensor.shape
+                                 dataType:tensor.dataType] autorelease];
                     feeds[tensor] = data;
                 }
                 MPS_LOG_DEBUG("  Feeds built: %lu entries\n", (unsigned long)[feeds count]);
@@ -877,6 +902,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     MPS_LOG_DEBUG("    Target slot=%d, tensor_ptr=%p\n", slot, tensor_ptr);
                     MPSGraphTensor* tensor = (__bridge MPSGraphTensor*)tensor_ptr;
                     if (!tensor) {
+                        release_intermediates(false);
                         return ExecutionResult::Error("Target tensor is nil for slot " +
                                                       std::to_string(slot));
                     }
@@ -903,6 +929,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                            executionDescriptor:nil];
                     MPS_LOG_DEBUG("  encodeToCommandBuffer returned\n");
                 } @catch (NSException* exception) {
+                    release_intermediates(false);
                     return ExecutionResult::Error("MPS graph execution failed: " +
                                                   std::string([[exception reason] UTF8String]));
                 }
@@ -916,6 +943,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     MPS_LOG_DEBUG("    Exporting target %zu, slot=%d\n", i, slot);
                     MPSGraphTensorData* result_data = result_dict[target_tensor];
                     if (!result_data) {
+                        release_intermediates(false);
                         return ExecutionResult::Error(
                             "MPS graph execution produced no result for output " +
                             std::to_string(i));
@@ -923,6 +951,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
 
                     MPSNDArray* ndarray = [result_data mpsndarray];
                     if (!ndarray) {
+                        release_intermediates(false);
                         return ExecutionResult::Error("Failed to get MPSNDArray from result data");
                     }
                     [ndarray exportDataWithCommandBuffer:cmdBuf
@@ -944,6 +973,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
 
                 NativeResult result = ns.handler(mtl_device, cmdBuf, ns.op, input_bufs);
                 if (!result.ok()) {
+                    release_intermediates(false);
                     return ExecutionResult::Error(result.error);
                 }
 
@@ -955,6 +985,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
         if (cmdBuf.status == MTLCommandBufferStatusError) {
+            release_intermediates(false);
             NSString* desc = cmdBuf.error ? cmdBuf.error.localizedDescription : @"unknown error";
             return ExecutionResult::Error("Metal command buffer error: " +
                                           std::string([desc UTF8String]));
@@ -970,6 +1001,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             mlir::Type elemType = tensorType.getElementType();
             int dtype = MlirTypeToPjrtDtype(elemType);
             if (dtype < 0) {
+                release_intermediates(false);
                 return ExecutionResult::Error("Unsupported output type for result " +
                                               std::to_string(i));
             }
@@ -990,6 +1022,7 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                                              length:byte_size
                                                             options:MTLResourceStorageModeShared];
                 if (!copy) {
+                    release_intermediates(false);
                     return ExecutionResult::Error("Failed to allocate output buffer copy");
                 }
                 result.buffers.push_back(
@@ -999,8 +1032,14 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
             } else {
                 result.buffers.push_back(
                     std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
+                // MpsBuffer retains, release our +1 from newBufferWithLength
+                CFRelease((__bridge CFTypeRef)buf);
             }
         }
+
+        // Release intermediate buffers we allocated (excluding outputs which are now
+        // owned by MpsBuffer - we've already released our reference to them above).
+        release_intermediates(true);
 
         return result;
     }
