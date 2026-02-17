@@ -1034,6 +1034,8 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                     std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
                 // MpsBuffer retains, release our +1 from newBufferWithLength
                 CFRelease((__bridge CFTypeRef)buf);
+                // Nil out so release_intermediates won't double-free on error
+                slot_bufs[slot] = nil;
             }
         }
 
