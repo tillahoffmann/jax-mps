@@ -103,7 +103,7 @@ PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args) {
 
 PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args) {
     if (args->src && args->src->buffer && args->dst) {
-        args->src->buffer->ToHostBuffer(args->dst, nullptr);
+        args->src->buffer->ToHostBuffer(args->dst);
     }
 
     auto* event = new PJRT_Event();

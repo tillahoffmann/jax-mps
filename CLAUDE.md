@@ -3,12 +3,11 @@
 - You may NEVER skip or xfail tests without my explicit approval.
 - You MUST use `uv` to manage dependencies.
 - You MUST use `uv run ...` to execute commands.
-- You MUST check the comprehensive list of MPS Graph operations in `mps_ops/` before implementing a custom operation.
 - You may NEVER use `--no-verify` for git commits.
 - You may NEVER push to `main` unless explicitly requested.
 - You may NEVER delete operations or tests without my explicit approval.
 - For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See `tests/configs/unary.py` for an example and `tests/configs/util.py` for the signature of `OperationTestConfig`.
-- You may NEVER create new op registries. Use `OpRegistry` for all ops and `CustomCallRegistry` for custom call targets. See `src/pjrt_plugin/ops/registry.h`.
+- You may NEVER create new op registries. Use `OpRegistry` for all ops. See `src/pjrt_plugin/ops/registry.h`.
 
 # CI is Always Green
 
@@ -16,19 +15,36 @@ Tests, linting, and compilation on the `main` branch and in Continuous Integrati
 
 # Naming Conventions
 
-- Handler functions MUST use PascalCase: `HandleSort`, `HandleTopK`, `HandleDotGeneral`
-- This follows Objective-C conventions for C functions in `.mm` files
-- Macro-generated handlers also use PascalCase: `HandleMlir##suffix`, `HandleCc##suffix`
+- Handler functions MUST use PascalCase: `HandleAdd`, `HandleExp`, `HandleBroadcastInDim`
 
 # Adding New Ops
 
-1. Identify an op to implement and find its StableHLO op name (e.g., `stablehlo.cosine`). The simplest approach is to implement a test for the op and look for failures (the error message includes the StableHLO op name).
-2. Find the matching MPS Graph method in `mps_ops/` (e.g., `cosWithTensor:name:` in `mps_ops/arithmetic.txt`).
-3. For simple unary ops, add a `REGISTER_MLIR_UNARY_OP` line in `src/pjrt_plugin/ops/unary_ops.mm`:
-   `REGISTER_MLIR_UNARY_OP("stablehlo.<name>", <mpsMethod>, <Suffix>);`
-   where `<mpsMethod>` is the method prefix before `WithTensor:name:` and `<Suffix>` is PascalCase.
-4. For binary/complex ops, write a handler function (e.g., `HandleMyOp`) and use `REGISTER_MPS_OP` (see existing examples in `src/pjrt_plugin/ops/`).
-5. Rebuild with `uv pip install -e .` and run `uv run pytest` to confirm the XFAILs become PASSes.
+1. Identify the StableHLO op name (e.g., `stablehlo.multiply`). Run a test and look for the error message which includes the op name.
+
+2. Find the matching MLX function in the [MLX documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (e.g., `mlx::core::multiply`).
+
+3. Add a handler function in `src/pjrt_plugin/mlx_executable.mm`:
+   ```cpp
+   bool HandleMultiply(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+       auto lhs_opt = GetValue(values, op->getOperand(0));
+       auto rhs_opt = GetValue(values, op->getOperand(1));
+       if (!lhs_opt || !rhs_opt) {
+           MPS_LOG_ERROR("stablehlo.multiply: operand not found\\n");
+           return false;
+       }
+       values.emplace(ToKey(op->getResult(0)), mlx::core::multiply(lhs_opt->get(), rhs_opt->get()));
+       return true;
+   }
+   ```
+
+4. Register the handler in `GetOpHandlers()`:
+   ```cpp
+   {"stablehlo.multiply", HandleMultiply},
+   ```
+
+5. Register the op name in `src/pjrt_plugin/ops/registry.h` in `GetRegisteredOps()`.
+
+6. Rebuild with `uv pip install -e .` and run tests.
 
 # Build and Test
 

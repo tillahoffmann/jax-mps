@@ -23,19 +23,37 @@ Pre-commit hooks run clang-format, ruff, pyright, a rebuild, and the full test s
 
 ## Adding a new operation
 
-1. **Find the MPS Graph method matching the operation you want to implement.** The `mps_ops/` directory contains a categorised list of all MPSGraph methods, extracted from the framework headers under `MPSGraph.framework/Headers/`. Apple's [MPSGraph documentation](https://developer.apple.com/documentation/metalperformanceshadersgraph) is the authoritative reference.
+> **Note:** The backend is being migrated from MPSGraph to MLX. On the `mlx-migration-*` branches, follow the MLX pattern below. On `main`, follow the MPSGraph pattern (see git history).
 
-2. **Register the op.** For simple unary ops, a one-liner in `src/pjrt_plugin/ops/unary_ops.mm` is enough (see [#12](https://github.com/tillahoffmann/jax-mps/pull/12) for an example):
+### MLX Backend (current development)
 
-```objc
-REGISTER_MLIR_UNARY_OP("stablehlo.cosine", cos, cosine);
+1. **Find the MLX function matching the operation.** See the [MLX C++ documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (Python API mirrors C++).
+
+2. **Add a handler function** in `src/pjrt_plugin/mlx_executable.mm`:
+
+```cpp
+bool HandleCosine(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs) {
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.cosine: operand not found\n");
+        return false;
+    }
+    values.emplace(ToKey(op->getResult(0)), mlx::core::cos(input_opt->get()));
+    return true;
+}
 ```
 
-The second argument is the MPS method prefix (before `WithTensor:name:`), and the third is a unique suffix for the registration symbol. There is an analogous `REGISTER_MLIR_BINARY_OP` macro for binary ops. For anything more involved, write a handler function and use `REGISTER_MPS_OP` — see the existing handlers for examples.
+3. **Register the handler** in `GetOpHandlers()`:
 
-3. **Add a test config.** Every op needs an `OperationTestConfig` entry in the appropriate file under `tests/configs/`. See `tests/configs/unary.py` for the pattern.
+```cpp
+{"stablehlo.cosine", HandleCosine},
+```
 
-4. **Rebuild and test.** C++ changes require a rebuild.
+4. **Register the op name** in `src/pjrt_plugin/ops/registry.h` in `GetRegisteredOps()`.
+
+5. **Add a test config.** Every op needs an `OperationTestConfig` entry in the appropriate file under `tests/configs/`. See `tests/configs/unary.py` for the pattern.
+
+6. **Rebuild and test.** C++ changes require a rebuild.
 
 ```bash
 uv pip install -e .

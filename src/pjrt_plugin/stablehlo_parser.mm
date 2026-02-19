@@ -19,6 +19,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/ops/registry.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/Serialization.h"
@@ -30,15 +31,9 @@ namespace mps {
 
 namespace {
 
-// Set of supported operation names - derived from OpRegistry plus runtime-lowered ops
+// Set of supported operation names - derived from GetOpHandlers in mlx_executable.mm
 const std::unordered_set<std::string>& getSupportedOps() {
-    static std::unordered_set<std::string> supported = []() {
-        auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Add ops handled directly in mps_executable.mm (not via OpRegistry).
-        ops.insert("func.return");
-        ops.insert("func.call");
-        return ops;
-    }();
+    static std::unordered_set<std::string> supported = jax_mps::OpRegistry::GetRegisteredOps();
     return supported;
 }
 
@@ -97,8 +92,10 @@ bool runInlinerPass(mlir::MLIRContext& context, mlir::ModuleOp module) {
     mlir::PassManager pm(&context);
     pm.addPass(mlir::createInlinerPass());
 
-    // Ignore errors from inliner - we'll handle func.call at runtime
-    (void)pm.run(module);
+    // If inliner fails, log but continue - we handle func.call at runtime
+    if (mlir::failed(pm.run(module))) {
+        MPS_LOG_DEBUG("Inliner pass failed, func.call ops will be handled at runtime\n");
+    }
     return true;
 }
 

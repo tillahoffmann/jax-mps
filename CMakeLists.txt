@@ -105,6 +105,24 @@ find_library(STABLEHLO_PASS_UTILS_LIB StablehloPassUtils HINTS ${CMAKE_PREFIX_PA
 find_library(STABLEHLO_TYPE_CONVERSION_LIB StablehloTypeConversion HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 find_library(VERSION_LIB Version HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 
+# MLX as external project
+include(FetchContent)
+
+# Set MLX_VERSION before FetchContent so it's available during MLX's project() call
+set(MLX_VERSION "0.30.0" CACHE STRING "MLX version" FORCE)
+set(MLX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    mlx
+    GIT_REPOSITORY https://github.com/ml-explore/mlx.git
+    GIT_TAG v0.30.0
+)
+FetchContent_MakeAvailable(mlx)
+
 # Source files
 set(PJRT_SOURCES
     src/pjrt_plugin/pjrt_api.cc
@@ -235,6 +253,7 @@ target_link_libraries(pjrt_plugin_mps PRIVATE
     protobuf::libprotobuf
     ${UTF8_LIBS}
     ${ABSL_LIBS}
+    mlx
 )
 
 # For wheel distribution: ensure RPATH is set correctly

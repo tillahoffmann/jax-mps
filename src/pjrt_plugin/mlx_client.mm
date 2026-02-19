@@ -1,8 +1,10 @@
-// Stub implementation for MLX client
-// TODO: Phase 1 - implement MLX backend
+// MLX client implementation
 
 #include "pjrt_plugin/mlx_client.h"
 
+#include <mlx/mlx.h>
+
+#include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/mlx_buffer.h"
 #include "pjrt_plugin/mlx_device.h"
 #include "pjrt_plugin/mlx_executable.h"
@@ -11,8 +13,13 @@
 namespace jax_mps {
 
 MlxClient::MlxClient() {
-    // Create a single device for now
+    // Create a single device
     devices_.push_back(std::make_unique<MlxDevice>(0));
+
+    // Set MLX to use GPU (Metal) device
+    mlx::core::set_default_device(mlx::core::Device::gpu);
+
+    MPS_LOG_DEBUG("MlxClient initialized with MLX GPU backend\n");
 }
 
 MlxClient::~MlxClient() = default;
@@ -29,22 +36,23 @@ MlxDevice* MlxClient::device(int index) {
 }
 
 void* MlxClient::metal_device() const {
-    // TODO: Phase 1 - return actual Metal device
-    return nullptr;
+    // MLX manages its own Metal device internally
+    // Return non-null to indicate we have a valid device
+    return reinterpret_cast<void*>(1);
 }
 
 std::unique_ptr<MlxExecutable> MlxClient::CompileStableHLO(mps::ParsedModule parsed_module,
                                                            void* options) {
-    // TODO: Phase 1 - implement compilation
-    return std::make_unique<MlxExecutable>();
+    MPS_LOG_DEBUG("Compiling StableHLO module\n");
+    return MlxExecutable::Create(std::move(parsed_module));
 }
 
 std::unique_ptr<MlxBuffer> MlxClient::BufferFromHostBuffer(const void* data, int dtype,
                                                            const std::vector<int64_t>& dims,
                                                            const std::vector<int64_t>& byte_strides,
                                                            MlxDevice* device) {
-    // TODO: Phase 1 - implement buffer creation
-    return std::make_unique<MlxBuffer>();
+    MPS_LOG_DEBUG("Creating buffer from host: dtype=%d, ndims=%zu\n", dtype, dims.size());
+    return MlxBuffer::FromHostBuffer(data, dtype, dims, byte_strides);
 }
 
 }  // namespace jax_mps

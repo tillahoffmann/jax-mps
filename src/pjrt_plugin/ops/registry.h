@@ -1,5 +1,6 @@
-// Stub op registry for Phase 0
-// TODO: Phase 1 - implement MLX op registry
+// MLX op registry
+// Single source of truth: ops are registered in GetOpHandlers() in mlx_executable.mm
+// This file provides access to the op names for parsing/validation
 
 #pragma once
 
@@ -8,11 +9,15 @@
 
 namespace jax_mps {
 
+// Forward declaration - implemented in mlx_executable.mm
+// Returns the set of op names that have handlers
+std::unordered_set<std::string> GetSupportedOpNames();
+
 class OpRegistry {
 public:
-    // Returns empty set - no ops registered in Phase 0 stub
+    // Returns the set of supported ops (delegates to GetSupportedOpNames)
     static std::unordered_set<std::string> GetRegisteredOps() {
-        return {};
+        return GetSupportedOpNames();
     }
 };
 

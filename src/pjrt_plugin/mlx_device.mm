@@ -1,5 +1,4 @@
-// Stub implementation for MLX device
-// TODO: Phase 1 - implement MLX backend
+// MLX device implementation
 
 #include "pjrt_plugin/mlx_device.h"
 

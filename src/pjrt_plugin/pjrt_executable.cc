@@ -1,5 +1,8 @@
 // PJRT Executable and LoadedExecutable API implementation for Metal backend
 
+#include <string>
+#include <vector>
+
 #include "device_assignment.pb.h"
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/pjrt_types.h"
@@ -193,9 +196,67 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
         return MakeError("No executable to execute");
     }
 
-    // TODO: Phase 1 - implement actual MLX execution
-    // For now, return an error indicating the stub is not implemented
-    return MakeError("MLX backend not implemented (Phase 0 stub)", PJRT_Error_Code_UNIMPLEMENTED);
+    auto* mlx_executable = args->executable->executable->executable.get();
+    if (!mlx_executable || !mlx_executable->IsValid()) {
+        std::string error = mlx_executable ? mlx_executable->error() : "null executable";
+        return MakeError("Invalid executable: " + error);
+    }
+
+    // Get the client and device
+    auto* client = args->executable->client;
+    if (!client || !client->client) {
+        return MakeError("No client for execution");
+    }
+
+    // Gather input buffers
+    std::vector<jax_mps::MlxBuffer*> inputs;
+    size_t num_args = args->num_args;
+    MPS_LOG_DEBUG("Execute: num_args=%zu\n", num_args);
+
+    for (size_t i = 0; i < num_args; ++i) {
+        // Each argument list has args->num_args buffers
+        // For single device, we just use the first device's arguments
+        PJRT_Buffer* const* arg_buffers = args->argument_lists[0];
+        if (arg_buffers[i] && arg_buffers[i]->buffer) {
+            inputs.push_back(arg_buffers[i]->buffer.get());
+        } else {
+            return MakeError("Null input buffer at index " + std::to_string(i));
+        }
+    }
+
+    // Execute
+    auto result = mlx_executable->Execute(inputs);
+
+    // Check for execution errors - validate output count matches expected
+    size_t expected_outputs = mlx_executable->num_outputs();
+    if (result.buffers.size() != expected_outputs) {
+        return MakeError("Output count mismatch: expected " + std::to_string(expected_outputs) +
+                         ", got " + std::to_string(result.buffers.size()));
+    }
+
+    // Allocate output buffer array
+    size_t num_outputs = result.buffers.size();
+    MPS_LOG_DEBUG("Execute: num_outputs=%zu\n", num_outputs);
+
+    // For single device execution, we have 1 device and num_outputs buffers
+    // args->output_lists[0] is pre-allocated array of PJRT_Buffer* with num_outputs entries
+    PJRT_Buffer** output_list = args->output_lists[0];
+
+    for (size_t i = 0; i < num_outputs; ++i) {
+        // Create new PJRT_Buffer wrapping the MlxBuffer
+        auto* pjrt_buffer = new PJRT_Buffer();
+        pjrt_buffer->buffer = std::move(result.buffers[i]);
+        pjrt_buffer->client = client;
+        output_list[i] = pjrt_buffer;
+    }
+
+    // Set the ready event (execution is synchronous for now)
+    if (args->device_complete_events) {
+        args->device_complete_events[0] = new PJRT_Event{.ready = true};
+    }
+
+    MPS_LOG_INFO("Execution complete\n");
+    return nullptr;
 }
 
 PJRT_Error* MPS_Executable_DeserializeAndLoad(PJRT_Executable_DeserializeAndLoad_Args* args) {
