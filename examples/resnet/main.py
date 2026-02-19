@@ -60,11 +60,14 @@ def main():
     # Precompute batches on device.
     num_batches = num_samples // BATCH_SIZE
     print(f"Preparing {num_batches} batches on device...")
+    # Use .copy() to ensure contiguous memory layout (required for MPS backend)
     batched_images = jnp.array(
-        images[: num_batches * BATCH_SIZE].reshape(num_batches, BATCH_SIZE, 32, 32, 3)
+        images[: num_batches * BATCH_SIZE]
+        .reshape(num_batches, BATCH_SIZE, 32, 32, 3)
+        .copy()
     )
     batched_labels = jax.nn.one_hot(
-        labels[: num_batches * BATCH_SIZE].reshape(num_batches, BATCH_SIZE), 10
+        labels[: num_batches * BATCH_SIZE].reshape(num_batches, BATCH_SIZE).copy(), 10
     )
 
     # Training loop.

@@ -1,22 +1,22 @@
 # jax-mps [![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/)
 
-A JAX backend for Apple Metal Performance Shaders (MPS), enabling GPU-accelerated JAX computations on Apple Silicon.
+A JAX backend for Apple Silicon using [MLX](https://github.com/ml-explore/mlx), enabling GPU-accelerated JAX computations on Mac.
 
 ## Example
 
-jax-mps achieves a modest 3x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using an M4 MacBook Air.
+jax-mps achieves a ~3.7x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using an M4 MacBook Air.
 
 ```bash
 $ JAX_PLATFORMS=cpu uv run examples/resnet/main.py --steps=30
-loss = 0.029: 100%|██████████| 30/30 [01:29<00:00,  2.99s/it]
+loss = 0.029: 100%|██████████| 30/30 [01:41<00:00,  3.37s/it]
 Final training loss: 0.029
-Time per step (second half): 3.041
+Time per step (second half): 3.437
 
 $ JAX_PLATFORMS=mps uv run examples/resnet/main.py --steps=30
-WARNING:2026-01-26 17:32:53,989:jax._src.xla_bridge:905: Platform 'mps' is experimental and not all JAX functionality may be correctly supported!
-loss = 0.028: 100%|██████████| 30/30 [00:30<00:00,  1.03s/it]
-Final training loss: 0.028
-Time per step (second half): 0.991
+WARNING:...:jax._src.xla_bridge:905: Platform 'mps' is experimental and not all JAX functionality may be correctly supported!
+loss = 0.029: 100%|██████████| 30/30 [00:27<00:00,  1.07it/s]
+Final training loss: 0.029
+Time per step (second half): 0.928
 ```
 
 ## Installation
@@ -33,11 +33,11 @@ jax-mps is built against the StableHLO bytecode format matching jaxlib 0.9.x. Us
 
 ## Architecture
 
-This project implements a [PJRT plugin](https://openxla.org/xla/pjrt) to offload evaluation of JAX expressions to a [Metal Performance Shaders Graph](https://developer.apple.com/documentation/metalperformanceshadersgraph). The evaluation proceeds in several stages:
+This project implements a [PJRT plugin](https://openxla.org/xla/pjrt) that uses [MLX](https://github.com/ml-explore/mlx) to execute JAX programs on Apple Silicon GPUs. The evaluation proceeds in several stages:
 
 1. The JAX program is lowered to [StableHLO](https://openxla.org/stablehlo), a set of high-level operations for machine learning applications.
-2. The plugin parses the StableHLO representation of the program and builds the corresponding MPS graph. The graph is cached to avoid re-construction on invocation of the same program, e.g., repeated training steps.
-3. The MPS graph is executed, using native [MPS operations](./mps_ops/) where possible, and the results are returned to the caller.
+2. The plugin parses the StableHLO representation and maps operations to MLX equivalents. Compiled programs are cached to avoid re-parsing on repeated invocations.
+3. The MLX operations are executed on the GPU and results are returned to the caller.
 
 ## Building
 
@@ -84,8 +84,8 @@ jax-mps/
 │   ├── pjrt_plugin/             # C++ PJRT implementation
 │   │   ├── pjrt_api.cc          # PJRT C API entry point
 │   │   ├── mps_client.h/mm      # Metal client management
-│   │   ├── mps_executable.h/mm  # StableHLO compilation & execution
-│   │   └── ops/                 # Operation implementations
+│   │   ├── mlx_executable.h/mm  # StableHLO compilation & MLX execution
+│   │   └── ops/                 # Operation registry
 │   └── proto/                   # Protobuf definitions
 └── tests/
 ```
@@ -97,14 +97,15 @@ jax-mps/
 PJRT (Portable JAX Runtime) is JAX's abstraction for hardware backends. The plugin implements:
 
 - `PJRT_Client_Create` - Initialize Metal device
-- `PJRT_Client_Compile` - Parse HLO and prepare MPSGraph
+- `PJRT_Client_Compile` - Parse StableHLO and build MLX operation graph
 - `PJRT_Client_BufferFromHostBuffer` - Transfer data to GPU
 - `PJRT_LoadedExecutable_Execute` - Run computation on GPU
 
-### MPSGraph Execution
+### MLX Execution
 
-Operations are mapped to MPSGraph equivalents, e.g.,:
+StableHLO operations are mapped to MLX equivalents, e.g.:
 
-- `add` → `additionWithPrimaryTensor:secondaryTensor:`
-- `dot` → `matrixMultiplicationWithPrimaryTensor:secondaryTensor:`
-- `tanh` → `tanhWithTensor:`
+- `stablehlo.add` → `mlx::core::add()`
+- `stablehlo.dot_general` → `mlx::core::matmul()`
+- `stablehlo.convolution` → `mlx::core::conv_general()`
+- `stablehlo.reduce` → `mlx::core::sum/max/min/prod()`

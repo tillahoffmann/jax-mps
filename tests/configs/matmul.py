@@ -126,24 +126,19 @@ def make_matmul_op_configs():
         )
 
         # Edge case: multiple free dimensions (not matmul-like)
-        # This tests the validation that rejects batched dot_general when operands
-        # don't have exactly one free dimension each.
         # LHS: (B, M1, M2, K), RHS: (B, K, N1, N2) -> contracts K, 2 free dims each
-        yield pytest.param(
-            OperationTestConfig(
-                lambda x, y: lax.dot_general(
-                    x,
-                    y,
-                    dimension_numbers=(
-                        ((3,), (1,)),
-                        ((0,), (0,)),
-                    ),  # contract dim 3/1, batch dim 0
-                ),
-                lambda key: random.normal(key, (2, 3, 4, 5)),
-                lambda key: random.normal(key, (2, 5, 6, 7)),
-                name="dot_general_multiple_free_dims",
+        yield OperationTestConfig(
+            lambda x, y: lax.dot_general(
+                x,
+                y,
+                dimension_numbers=(
+                    ((3,), (1,)),
+                    ((0,), (0,)),
+                ),  # contract dim 3/1, batch dim 0
             ),
-            marks=[xfail_match("batched operations with multiple free dimensions")],
+            lambda key: random.normal(key, (2, 3, 4, 5)),
+            lambda key: random.normal(key, (2, 5, 6, 7)),
+            name="dot_general_multiple_free_dims",
         )
 
         # Matrix-vector: (M, K) @ (K,) -> (M,)

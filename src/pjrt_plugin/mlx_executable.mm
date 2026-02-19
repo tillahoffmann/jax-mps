@@ -987,6 +987,463 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
     return true;
 }
 
+// Handler for stablehlo.reverse
+bool HandleReverse(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                   ExecContext& ctx) {
+    auto reverseOp = mlir::dyn_cast<mlir::stablehlo::ReverseOp>(op);
+    if (!reverseOp) {
+        MPS_LOG_ERROR("stablehlo.reverse: failed to cast\n");
+        return false;
+    }
+
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.reverse: operand not found in value map\n");
+        return false;
+    }
+
+    auto dimensions = reverseOp.getDimensions();
+    auto& input = input_opt->get();
+    auto ndim = static_cast<int>(input.ndim());
+
+    // Build set of dimensions to reverse
+    std::unordered_set<int64_t> reverseDims(dimensions.begin(), dimensions.end());
+
+    // Use slice with negative strides to reverse dimensions
+    // For each dimension, if it's in reverseDims, use step=-1 and swap start/stop
+    mlx::core::Shape starts(ndim, 0);
+    mlx::core::Shape stops;
+    mlx::core::Shape steps(ndim, 1);
+
+    for (int i = 0; i < ndim; ++i) {
+        int dimSize = input.shape(i);
+        if (reverseDims.count(i)) {
+            // Reverse: start at end, go to beginning with step -1
+            starts[i] = dimSize - 1;
+            stops.push_back(-dimSize - 1);  // Past the beginning
+            steps[i] = -1;
+        } else {
+            stops.push_back(dimSize);
+        }
+    }
+
+    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(input, starts, stops, steps));
+    return true;
+}
+
+// Handler for stablehlo.transpose
+bool HandleTranspose(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                     ExecContext& ctx) {
+    auto transposeOp = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(op);
+    if (!transposeOp) {
+        MPS_LOG_ERROR("stablehlo.transpose: failed to cast\n");
+        return false;
+    }
+
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.transpose: operand not found in value map\n");
+        return false;
+    }
+
+    auto permAttr = transposeOp.getPermutation();
+    std::vector<int> axes;
+    for (int64_t dim : permAttr) {
+        axes.push_back(static_cast<int>(dim));
+    }
+
+    values.emplace(ToKey(op->getResult(0)), mlx::core::transpose(input_opt->get(), axes));
+    return true;
+}
+
+// Handler for stablehlo.power
+bool HandlePower(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                 ExecContext& ctx) {
+    auto lhs_opt = GetValue(values, op->getOperand(0));
+    auto rhs_opt = GetValue(values, op->getOperand(1));
+    if (!lhs_opt || !rhs_opt) {
+        MPS_LOG_ERROR("stablehlo.power: operand not found in value map\n");
+        return false;
+    }
+    values.emplace(ToKey(op->getResult(0)), mlx::core::power(lhs_opt->get(), rhs_opt->get()));
+    return true;
+}
+
+// Helper to detect reduction type by analyzing the body region
+enum class ReduceType { Sum, Max, Min, Prod, Unknown };
+
+ReduceType DetectReduceType(mlir::Region& body) {
+    if (body.empty())
+        return ReduceType::Unknown;
+
+    auto& block = body.front();
+    for (auto& op : block.getOperations()) {
+        auto opName = op.getName().getStringRef();
+        if (opName == "stablehlo.add")
+            return ReduceType::Sum;
+        if (opName == "stablehlo.maximum")
+            return ReduceType::Max;
+        if (opName == "stablehlo.minimum")
+            return ReduceType::Min;
+        if (opName == "stablehlo.multiply")
+            return ReduceType::Prod;
+    }
+    return ReduceType::Unknown;
+}
+
+// Handler for stablehlo.reduce
+bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                  ExecContext& ctx) {
+    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
+    if (!reduceOp) {
+        MPS_LOG_ERROR("stablehlo.reduce: failed to cast\n");
+        return false;
+    }
+
+    // Get reduction dimensions
+    auto dimensions = reduceOp.getDimensions();
+    std::vector<int> axes;
+    for (int64_t dim : dimensions) {
+        axes.push_back(static_cast<int>(dim));
+    }
+
+    // Detect reduction type from body
+    auto& body = reduceOp.getBody();
+    ReduceType reduceType = DetectReduceType(body);
+
+    // Get number of inputs (reduce can have multiple inputs)
+    size_t numInputs = reduceOp.getInputs().size();
+
+    // Handle each input-output pair
+    for (size_t i = 0; i < numInputs; ++i) {
+        auto input_opt = GetValue(values, reduceOp.getInputs()[i]);
+        if (!input_opt) {
+            MPS_LOG_ERROR("stablehlo.reduce: input %zu not found in value map\n", i);
+            return false;
+        }
+
+        std::optional<mlx::core::array> result;
+        switch (reduceType) {
+            case ReduceType::Sum:
+                result = mlx::core::sum(input_opt->get(), axes);
+                break;
+            case ReduceType::Max:
+                result = mlx::core::max(input_opt->get(), axes);
+                break;
+            case ReduceType::Min:
+                result = mlx::core::min(input_opt->get(), axes);
+                break;
+            case ReduceType::Prod:
+                result = mlx::core::prod(input_opt->get(), axes);
+                break;
+            default:
+                MPS_LOG_ERROR("stablehlo.reduce: unsupported reduction type\n");
+                return false;
+        }
+
+        values.emplace(ToKey(op->getResult(i)), std::move(*result));
+    }
+
+    return true;
+}
+
+// Handler for stablehlo.dot_general
+bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                      ExecContext& ctx) {
+    auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
+    if (!dotOp) {
+        MPS_LOG_ERROR("stablehlo.dot_general: failed to cast\n");
+        return false;
+    }
+
+    auto lhs_opt = GetValue(values, op->getOperand(0));
+    auto rhs_opt = GetValue(values, op->getOperand(1));
+    if (!lhs_opt || !rhs_opt) {
+        MPS_LOG_ERROR("stablehlo.dot_general: operand not found in value map\n");
+        return false;
+    }
+
+    auto& lhs = lhs_opt->get();
+    auto& rhs = rhs_opt->get();
+    auto dimNumbers = dotOp.getDotDimensionNumbers();
+
+    auto lhsContractDims = dimNumbers.getLhsContractingDimensions();
+    auto rhsContractDims = dimNumbers.getRhsContractingDimensions();
+    auto lhsBatchDims = dimNumbers.getLhsBatchingDimensions();
+    auto rhsBatchDims = dimNumbers.getRhsBatchingDimensions();
+
+    auto lhsRank = static_cast<int>(lhs.ndim());
+    auto rhsRank = static_cast<int>(rhs.ndim());
+
+    // Build sets for quick lookup
+    std::unordered_set<int> lhsContractSet(lhsContractDims.begin(), lhsContractDims.end());
+    std::unordered_set<int> rhsContractSet(rhsContractDims.begin(), rhsContractDims.end());
+    std::unordered_set<int> lhsBatchSet(lhsBatchDims.begin(), lhsBatchDims.end());
+    std::unordered_set<int> rhsBatchSet(rhsBatchDims.begin(), rhsBatchDims.end());
+
+    // Find free dimensions (not batch, not contract)
+    std::vector<int> lhsFreeDims;
+    std::vector<int> rhsFreeDims;
+    for (int i = 0; i < lhsRank; ++i) {
+        if (lhsBatchSet.count(i) == 0 && lhsContractSet.count(i) == 0) {
+            lhsFreeDims.push_back(i);
+        }
+    }
+    for (int i = 0; i < rhsRank; ++i) {
+        if (rhsBatchSet.count(i) == 0 && rhsContractSet.count(i) == 0) {
+            rhsFreeDims.push_back(i);
+        }
+    }
+
+    // For standard matmul, we need exactly one free dimension each
+    // LHS: [batch..., M, K] -> free = M, contract = K
+    // RHS: [batch..., K, N] -> free = N, contract = K
+    // Result: [batch..., M, N]
+
+    // Build permutation for LHS: [batch dims..., free dims..., contract dims...]
+    std::vector<int> lhsPerm;
+    for (int64_t d : lhsBatchDims)
+        lhsPerm.push_back(static_cast<int>(d));
+    for (int d : lhsFreeDims)
+        lhsPerm.push_back(d);
+    for (int64_t d : lhsContractDims)
+        lhsPerm.push_back(static_cast<int>(d));
+
+    // Build permutation for RHS: [batch dims..., contract dims..., free dims...]
+    std::vector<int> rhsPerm;
+    for (int64_t d : rhsBatchDims)
+        rhsPerm.push_back(static_cast<int>(d));
+    for (int64_t d : rhsContractDims)
+        rhsPerm.push_back(static_cast<int>(d));
+    for (int d : rhsFreeDims)
+        rhsPerm.push_back(d);
+
+    // Transpose to standard form
+    auto lhsT = mlx::core::transpose(lhs, lhsPerm);
+    auto rhsT = mlx::core::transpose(rhs, rhsPerm);
+
+    // Get shapes for reshape
+    int numBatch = static_cast<int>(lhsBatchDims.size());
+    int numLhsFree = static_cast<int>(lhsFreeDims.size());
+    int numContract = static_cast<int>(lhsContractDims.size());
+
+    // Calculate combined dimensions
+    int64_t batchSize = 1;
+    for (int i = 0; i < numBatch; ++i) {
+        batchSize *= lhsT.shape(i);
+    }
+
+    int64_t lhsFreeSize = 1;
+    for (int i = numBatch; i < numBatch + numLhsFree; ++i) {
+        lhsFreeSize *= lhsT.shape(i);
+    }
+
+    int64_t contractSize = 1;
+    for (int i = numBatch + numLhsFree; i < static_cast<int>(lhsT.ndim()); ++i) {
+        contractSize *= lhsT.shape(i);
+    }
+
+    int64_t rhsFreeSize = 1;
+    for (int i = numBatch + numContract; i < static_cast<int>(rhsT.ndim()); ++i) {
+        rhsFreeSize *= rhsT.shape(i);
+    }
+
+    // Save original batch/free shapes for final reshape
+    std::vector<int> batchShape;
+    batchShape.reserve(numBatch);
+    for (int i = 0; i < numBatch; ++i) {
+        batchShape.push_back(lhsT.shape(i));
+    }
+    std::vector<int> lhsFreeShape;
+    lhsFreeShape.reserve(numLhsFree);
+    for (int i = numBatch; i < numBatch + numLhsFree; ++i) {
+        lhsFreeShape.push_back(lhsT.shape(i));
+    }
+    std::vector<int> rhsFreeShape;
+    rhsFreeShape.reserve(static_cast<int>(rhsT.ndim()) - numBatch - numContract);
+    for (int i = numBatch + numContract; i < static_cast<int>(rhsT.ndim()); ++i) {
+        rhsFreeShape.push_back(rhsT.shape(i));
+    }
+
+    // Reshape to 3D for matmul: [batch, M, K] @ [batch, K, N]
+    mlx::core::Shape lhsShape3d = {static_cast<int>(batchSize), static_cast<int>(lhsFreeSize),
+                                   static_cast<int>(contractSize)};
+    mlx::core::Shape rhsShape3d = {static_cast<int>(batchSize), static_cast<int>(contractSize),
+                                   static_cast<int>(rhsFreeSize)};
+
+    auto lhs3d = mlx::core::reshape(lhsT, lhsShape3d);
+    auto rhs3d = mlx::core::reshape(rhsT, rhsShape3d);
+
+    // Perform batched matmul
+    auto result3d = mlx::core::matmul(lhs3d, rhs3d);
+
+    // Reshape back to [batch..., lhsFree..., rhsFree...]
+    mlx::core::Shape finalShape;
+    for (int s : batchShape)
+        finalShape.push_back(s);
+    for (int s : lhsFreeShape)
+        finalShape.push_back(s);
+    for (int s : rhsFreeShape)
+        finalShape.push_back(s);
+
+    auto result = mlx::core::reshape(result3d, finalShape);
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
+// Handler for stablehlo.convolution
+bool HandleConvolution(mlir::Operation* op, ValueMap& values,
+                       std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
+    if (!convOp) {
+        MPS_LOG_ERROR("stablehlo.convolution: failed to cast\n");
+        return false;
+    }
+
+    auto input_opt = GetValue(values, op->getOperand(0));
+    auto kernel_opt = GetValue(values, op->getOperand(1));
+    if (!input_opt || !kernel_opt) {
+        MPS_LOG_ERROR("stablehlo.convolution: operand not found in value map\n");
+        return false;
+    }
+
+    auto& input = input_opt->get();
+    auto& kernel = kernel_opt->get();
+    auto dimNumbers = convOp.getDimensionNumbers();
+
+    // Get dimension mappings
+    int64_t inputBatchDim = dimNumbers.getInputBatchDimension();
+    int64_t inputFeatureDim = dimNumbers.getInputFeatureDimension();
+    auto inputSpatialDims = dimNumbers.getInputSpatialDimensions();
+
+    int64_t kernelInputFeatureDim = dimNumbers.getKernelInputFeatureDimension();
+    int64_t kernelOutputFeatureDim = dimNumbers.getKernelOutputFeatureDimension();
+    auto kernelSpatialDims = dimNumbers.getKernelSpatialDimensions();
+
+    int64_t outputBatchDim = dimNumbers.getOutputBatchDimension();
+    int64_t outputFeatureDim = dimNumbers.getOutputFeatureDimension();
+    auto outputSpatialDims = dimNumbers.getOutputSpatialDimensions();
+
+    int numSpatialDims = static_cast<int>(inputSpatialDims.size());
+
+    // MLX conv_general expects:
+    // Input: [N, spatial..., C_in] (NHWC for 2D, NWC for 1D)
+    // Weight: [C_out, spatial..., C_in] (OHWI for 2D)
+    // Output: [N, spatial..., C_out]
+
+    // Build input permutation to [N, spatial..., C_in] format
+    std::vector<int> inputPerm(input.ndim());
+    inputPerm[0] = static_cast<int>(inputBatchDim);
+    for (int i = 0; i < numSpatialDims; ++i) {
+        inputPerm[1 + i] = static_cast<int>(inputSpatialDims[i]);
+    }
+    inputPerm[1 + numSpatialDims] = static_cast<int>(inputFeatureDim);
+
+    // Build kernel permutation to [C_out, spatial..., C_in] format
+    // MLX weight format: (C_out, spatial..., C_in)
+    std::vector<int> kernelPerm(kernel.ndim());
+    kernelPerm[0] = static_cast<int>(kernelOutputFeatureDim);
+    for (int i = 0; i < numSpatialDims; ++i) {
+        kernelPerm[1 + i] = static_cast<int>(kernelSpatialDims[i]);
+    }
+    kernelPerm[1 + numSpatialDims] = static_cast<int>(kernelInputFeatureDim);
+
+    // Check if transposition is needed
+    bool inputNeedsTranspose = false;
+    for (int i = 0; i < static_cast<int>(inputPerm.size()); ++i) {
+        if (inputPerm[i] != i) {
+            inputNeedsTranspose = true;
+            break;
+        }
+    }
+
+    bool kernelNeedsTranspose = false;
+    for (int i = 0; i < static_cast<int>(kernelPerm.size()); ++i) {
+        if (kernelPerm[i] != i) {
+            kernelNeedsTranspose = true;
+            break;
+        }
+    }
+
+    auto inputT = inputNeedsTranspose ? mlx::core::transpose(input, inputPerm) : input;
+    auto kernelT = kernelNeedsTranspose ? mlx::core::transpose(kernel, kernelPerm) : kernel;
+
+    // Extract strides
+    std::vector<int> strides;
+    if (auto stridesAttr = convOp.getWindowStrides()) {
+        for (int64_t s : *stridesAttr) {
+            strides.push_back(static_cast<int>(s));
+        }
+    } else {
+        strides.resize(numSpatialDims, 1);
+    }
+
+    // Extract padding
+    std::vector<int> paddingLow(numSpatialDims, 0);
+    std::vector<int> paddingHigh(numSpatialDims, 0);
+    if (auto paddingAttr = convOp.getPadding()) {
+        auto paddingValues = paddingAttr->getValues<int64_t>();
+        auto it = paddingValues.begin();
+        for (int i = 0; i < numSpatialDims; ++i) {
+            paddingLow[i] = static_cast<int>(*it++);
+            paddingHigh[i] = static_cast<int>(*it++);
+        }
+    }
+
+    // Extract dilation
+    std::vector<int> kernelDilation;
+    if (auto dilationAttr = convOp.getRhsDilation()) {
+        for (int64_t d : *dilationAttr) {
+            kernelDilation.push_back(static_cast<int>(d));
+        }
+    } else {
+        kernelDilation.resize(numSpatialDims, 1);
+    }
+
+    std::vector<int> inputDilation;
+    if (auto dilationAttr = convOp.getLhsDilation()) {
+        for (int64_t d : *dilationAttr) {
+            inputDilation.push_back(static_cast<int>(d));
+        }
+    } else {
+        inputDilation.resize(numSpatialDims, 1);
+    }
+
+    // Handle feature_group_count for grouped/depthwise convolutions
+    auto featureGroupCount = static_cast<int>(convOp.getFeatureGroupCount());
+
+    // Call MLX conv_general
+    // MLX signature: conv_general(input, weight, stride, padding_lo, padding_hi, kernel_dilation,
+    //                             input_dilation, groups, flip)
+    auto convResult =
+        mlx::core::conv_general(inputT, kernelT, strides, paddingLow, paddingHigh, kernelDilation,
+                                inputDilation, featureGroupCount, false);
+
+    // Check if output needs transposition
+    // MLX outputs in [N, spatial..., C_out] format, but StableHLO might expect different layout
+    // MLX positions: 0=batch, 1..numSpatialDims=spatial, numSpatialDims+1=feature
+    // We need to map MLX positions to StableHLO positions
+    std::vector<int> outputPerm(convResult.ndim());
+    outputPerm[outputBatchDim] = 0;  // batch from MLX position 0
+    for (int i = 0; i < numSpatialDims; ++i) {
+        outputPerm[outputSpatialDims[i]] = 1 + i;  // spatial[i] from MLX position 1+i
+    }
+    outputPerm[outputFeatureDim] =
+        1 + numSpatialDims;  // feature from MLX position numSpatialDims+1
+
+    bool outputNeedsTranspose = false;
+    for (int i = 0; i < static_cast<int>(outputPerm.size()); ++i) {
+        if (outputPerm[i] != i) {
+            outputNeedsTranspose = true;
+            break;
+        }
+    }
+
+    auto result = outputNeedsTranspose ? mlx::core::transpose(convResult, outputPerm) : convResult;
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
 // Handler for stablehlo.custom_call
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -1026,6 +1483,21 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
         }
         values.emplace(ToKey(op->getResult(0)), input_opt->get());
+        return true;
+    }
+
+    // Handle mhlo.erf - error function
+    if (callTargetName == "mhlo.erf") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("stablehlo.custom_call mhlo.erf: expected 1 input and 1 output\n");
+            return false;
+        }
+        auto input_opt = GetValue(values, op->getOperand(0));
+        if (!input_opt) {
+            MPS_LOG_ERROR("stablehlo.custom_call mhlo.erf: operand not found\n");
+            return false;
+        }
+        values.emplace(ToKey(op->getResult(0)), mlx::core::erf(input_opt->get()));
         return true;
     }
 
@@ -1102,6 +1574,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"stablehlo.sine", HandleSine},
         {"stablehlo.cosine", HandleCosine},
         {"stablehlo.clamp", HandleClamp},
+        {"stablehlo.power", HandlePower},
         // Bitwise
         {"stablehlo.and", HandleAnd},
         {"stablehlo.or", HandleOr},
@@ -1118,9 +1591,16 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"stablehlo.reshape", HandleReshape},
         {"stablehlo.broadcast_in_dim", HandleBroadcastInDim},
         {"stablehlo.concatenate", HandleConcatenate},
+        {"stablehlo.transpose", HandleTranspose},
+        {"stablehlo.reverse", HandleReverse},
         {"stablehlo.iota", HandleIota},
         {"stablehlo.slice", HandleSlice},
         {"stablehlo.dynamic_slice", HandleDynamicSlice},
+        // Linear algebra
+        {"stablehlo.dot_general", HandleDotGeneral},
+        {"stablehlo.convolution", HandleConvolution},
+        // Reduction
+        {"stablehlo.reduce", HandleReduce},
         // Control flow
         {"func.return", HandleReturn},
         {"func.call", HandleCall},
