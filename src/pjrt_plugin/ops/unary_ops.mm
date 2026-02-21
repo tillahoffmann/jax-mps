@@ -168,14 +168,10 @@ static ProcessResult HandleLogPlusOne(HandlerContext& ctx) {
         return ProcessResult::Error("log_plus_one: missing input tensor");
 
     MPSGraphTensor* one = [ctx.graph constantWithScalar:1.0 dataType:x.dataType];
-    MPSGraphTensor* u = [ctx.graph additionWithPrimaryTensor:one
-                                              secondaryTensor:x
-                                                         name:nil];
+    MPSGraphTensor* u = [ctx.graph additionWithPrimaryTensor:one secondaryTensor:x name:nil];
 
     // Guard: when u == 1, (u - 1) is zero so we return x directly.
-    MPSGraphTensor* uEqualsOne = [ctx.graph equalWithPrimaryTensor:u
-                                                    secondaryTensor:one
-                                                               name:nil];
+    MPSGraphTensor* uEqualsOne = [ctx.graph equalWithPrimaryTensor:u secondaryTensor:one name:nil];
 
     MPSGraphTensor* logU = [ctx.graph logarithmWithTensor:u name:nil];
     MPSGraphTensor* uMinusOne = [ctx.graph subtractionWithPrimaryTensor:u
