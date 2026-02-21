@@ -30,6 +30,14 @@ Tests, linting, and compilation on the `main` branch and in Continuous Integrati
 4. For binary/complex ops, write a handler function (e.g., `HandleMyOp`) and use `REGISTER_MPS_OP` (see existing examples in `src/pjrt_plugin/ops/`).
 5. Rebuild with `uv pip install -e .` and run `uv run pytest` to confirm the XFAILs become PASSes.
 
+# C++ Formatting
+
+All C++ source files (`*.cc`, `*.mm`, `*.h`) MUST pass `clang-format`. Before committing, run:
+
+```bash
+find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format -i
+```
+
 # Build and Test
 
 ```bash

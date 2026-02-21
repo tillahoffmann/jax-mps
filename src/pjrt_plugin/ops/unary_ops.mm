@@ -151,18 +151,44 @@ static ProcessResult HandleExpm1(HandlerContext& ctx) {
 }
 REGISTER_MPS_OP("stablehlo.exponential_minus_one", HandleExpm1);
 
-// log_plus_one: log(1+x) - matches PyTorch MPS implementation
+// log_plus_one: log(1+x) using compensated formula for numerical stability.
+//
+// The naive log(1+x) loses precision for small |x| because 1.0 + x rounds away
+// the low-order bits of x. The compensated formula (Kahan / Cephes / musl libc):
+//
+//   u = 1 + x
+//   if u == 1:  result = x            (x so small that 1+x rounds to 1)
+//   else:       result = log(u) * x / (u - 1)
+//
+// The ratio x/(u-1) corrects for the rounding error introduced in computing u.
+// See https://github.com/jkitchin/jax-mps/issues/38
 static ProcessResult HandleLogPlusOne(HandlerContext& ctx) {
-    MPSGraphTensor* input = GetInputTensor(ctx, 0);
-    if (!input)
+    MPSGraphTensor* x = GetInputTensor(ctx, 0);
+    if (!x)
         return ProcessResult::Error("log_plus_one: missing input tensor");
 
-    // FIXME: This naive implementation is numerically unstable for small inputs.
-    MPSGraphTensor* one = [ctx.graph constantWithScalar:1.0 dataType:input.dataType];
-    MPSGraphTensor* onePlusX = [ctx.graph additionWithPrimaryTensor:input
-                                                    secondaryTensor:one
-                                                               name:nil];
-    MPSGraphTensor* result = [ctx.graph logarithmWithTensor:onePlusX name:nil];
+    MPSGraphTensor* one = [ctx.graph constantWithScalar:1.0 dataType:x.dataType];
+    MPSGraphTensor* u = [ctx.graph additionWithPrimaryTensor:one secondaryTensor:x name:nil];
+
+    // Guard: when u == 1, (u - 1) is zero so we return x directly.
+    MPSGraphTensor* uEqualsOne = [ctx.graph equalWithPrimaryTensor:u secondaryTensor:one name:nil];
+
+    MPSGraphTensor* logU = [ctx.graph logarithmWithTensor:u name:nil];
+    MPSGraphTensor* uMinusOne = [ctx.graph subtractionWithPrimaryTensor:u
+                                                        secondaryTensor:one
+                                                                   name:nil];
+    // correction = x / (u - 1) compensates for rounding in u = 1 + x
+    MPSGraphTensor* correction = [ctx.graph divisionWithPrimaryTensor:x
+                                                      secondaryTensor:uMinusOne
+                                                                 name:nil];
+    MPSGraphTensor* compensated = [ctx.graph multiplicationWithPrimaryTensor:logU
+                                                             secondaryTensor:correction
+                                                                        name:nil];
+
+    MPSGraphTensor* result = [ctx.graph selectWithPredicateTensor:uEqualsOne
+                                              truePredicateTensor:x
+                                             falsePredicateTensor:compensated
+                                                             name:nil];
     return Result(ctx, result, "log_plus_one");
 }
 REGISTER_MPS_OP("stablehlo.log_plus_one", HandleLogPlusOne);
