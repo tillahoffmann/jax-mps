@@ -145,6 +145,11 @@ def make_unary_op_configs():
             lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
+            jnp.log1p,
+            numpy.asarray([1e-7, 1e-10, 1e-15, -1e-7, -1e-10, -1e-15]),
+            name="log1p-small",
+        ),
+        OperationTestConfig(
             special.erfinv,
             lambda key: random.uniform(key, (16,), minval=-0.9, maxval=0.9),
         ),
