@@ -31,7 +31,7 @@ MpsClient::~MpsClient() {
 }
 
 std::unique_ptr<MpsClient> MpsClient::Create() {
-    auto client = std::unique_ptr<MpsClient>(new MpsClient());
+    auto client = std::unique_ptr<MpsClient>(new MpsClient());  // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
     if (!client->Initialize()) {
         return nullptr;
     }
@@ -187,6 +187,12 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
     }
     size_t element_size = DtypeByteSize(dtype);
     size_t byte_size = element_count * element_size;
+
+    // Zero-sized tensors (any dimension is 0): return MpsBuffer with nil metal buffer
+    if (byte_size == 0) {
+        MpsDevice* target_device = device ? device : devices_[0].get();
+        return std::make_unique<MpsBuffer>(target_device, nullptr, dtype, dims);
+    }
 
     id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)metal_device_;
     id<MTLBuffer> buffer = nil;
