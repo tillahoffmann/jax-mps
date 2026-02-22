@@ -1,8 +1,9 @@
 import numpy
+import pytest
 from jax import lax, random
 from jax import numpy as jnp
 
-from .util import OperationTestConfig
+from .util import OperationTestConfig, xfail_match
 
 
 def make_slice_op_configs():
@@ -207,5 +208,26 @@ def make_slice_op_configs():
                 numpy.int32(0),
                 numpy.int64(2**62),
                 name="large_int64_scatter",
+            ),
+            # Multi-dim index scatter: scatter values along diagonal of a matrix
+            # Exercises general ScatterND with multi-point, multi-dim index vectors
+            # indices shape [N, K] where N=4 scatter points, K=2 index dims
+            OperationTestConfig(
+                lambda x, vals: x.at[numpy.arange(4), numpy.arange(4)].add(vals),
+                lambda key: jnp.zeros((4, 4), dtype=jnp.float32),
+                lambda key: random.normal(key, (4,)),
+                differentiable_argnums=(0,),
+                name="scatter_multi_dim_diagonal_add",
+            ),
+            # Grad of multi-dim scatter requires unsupported gather pattern
+            pytest.param(
+                OperationTestConfig(
+                    lambda x, vals: x.at[numpy.arange(4), numpy.arange(4)].add(vals),
+                    lambda key: jnp.zeros((4, 4), dtype=jnp.float32),
+                    lambda key: random.normal(key, (4,)),
+                    differentiable_argnums=(1,),
+                    name="scatter_multi_dim_diagonal_add_grad_updates",
+                ),
+                marks=[xfail_match("gather:.+unsupported gather pattern")],
             ),
         ]

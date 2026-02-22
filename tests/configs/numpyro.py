@@ -232,6 +232,6 @@ def make_numpyro_op_configs():
                             key, 5.0, bs + (4,)
                         ),  # cov_diag
                     ),
-                    marks=[xfail_match("scatter:.+unsupported scatter pattern")],
+                    marks=[xfail_match("gather:.+unsupported gather pattern")],
                 ),
             ]
