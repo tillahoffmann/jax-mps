@@ -237,7 +237,7 @@ def make_numpyro_op_configs():
                             lambda key: jnp.linalg.cholesky(
                                 jnp.eye(4) + jnp.ones((4, 4))
                             ),
-                            differentiable_argnums=(),
+                            grad_xfail="scatter:.+unsupported scatter pattern",
                         ),
                     ]
                 ),

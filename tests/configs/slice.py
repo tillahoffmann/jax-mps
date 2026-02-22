@@ -155,14 +155,13 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3, 4)),
             ),
             # Multi-index point gather: x[arange(n), arange(n)] extracts diagonal
-            # (grad excluded: corresponding scatter pattern not yet supported)
             OperationTestConfig(
                 lambda x: x[jnp.arange(4), jnp.arange(4)],
                 lambda key: random.normal(key, (4, 4)),
                 name="multi_index_point_gather",
-                differentiable_argnums=(),
+                grad_xfail="scatter:.+unsupported scatter pattern",
             ),
-            # Batched gather via vmap (grad excluded: batched scatter not yet supported)
+            # Batched gather via vmap
             OperationTestConfig(
                 lambda x, idx: jax.vmap(
                     lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
@@ -170,7 +169,7 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3, 10)),
                 lambda key: random.randint(key, (3,), 0, 10),
                 name="batched_single_axis_gather",
-                differentiable_argnums=(),
+                grad_xfail="scatter:.+unsupported scatter pattern",
             ),
             # Large integer gather tests: verify integers > 2^24 are preserved
             # These test the bitcast workaround for MPS gather operations

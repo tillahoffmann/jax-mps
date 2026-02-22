@@ -91,6 +91,7 @@ class OperationTestConfig:
         differentiable_argnums: Sequence[int] | None = None,
         static_argnums: Sequence[int] | None = None,
         grad_transform: Callable | None = None,
+        grad_xfail: str | None = None,
         name: str | None = None,
         seed: int = 42,
         **kwargs: Any,
@@ -99,6 +100,7 @@ class OperationTestConfig:
         self.differentiable_argnums = differentiable_argnums
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
+        self.grad_xfail = grad_xfail
         self.seed = seed
         # Wrap non-callables in lambdas that accept (and ignore) key
         self.args = [
