@@ -415,6 +415,57 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
     auto offsetDims = dimNumbers.getOffsetDims();
     auto startIndexMap = dimNumbers.getStartIndexMap();
     int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
+    auto operandBatchingDims = dimNumbers.getOperandBatchingDims();
+    auto startIndicesBatchingDims = dimNumbers.getStartIndicesBatchingDims();
+
+    NSArray<NSNumber*>* indicesShape = startIndices.shape;
+    NSUInteger indicesRank = indicesShape.count;
+
+    // Handle batched gather pattern (e.g., from vmap over dynamic_index_in_dim):
+    // Pattern: gather with batching dimensions where each batch element gathers independently
+    // Example: operand [3,10], indices [3,1]
+    //   - operand_batching_dims = [0], start_indices_batching_dims = [0]
+    //   - For each batch i, gather operand[i,:] at indices[i,0]
+    if (!operandBatchingDims.empty() && !startIndicesBatchingDims.empty() &&
+        operandBatchingDims.size() == startIndicesBatchingDims.size() &&
+        operandBatchingDims == startIndicesBatchingDims &&
+        startIndexMap.size() == 1 && indexVectorDim == (int64_t)indicesRank - 1 &&
+        [indicesShape[indicesRank - 1] integerValue] == 1) {
+        int64_t gatherAxis = startIndexMap[0];
+
+        // Build indices shape matching operand rank: insert size-1 dims for non-batch, non-axis dims
+        // For operand [batch, D] with axis=1, indices should be [batch, 1]
+        NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray array];
+        NSUInteger operandRank = operand.shape.count;
+        for (NSUInteger d = 0; d < operandRank; d++) {
+            bool isBatchDim = false;
+            for (auto bd : operandBatchingDims) {
+                if ((NSUInteger)bd == d) {
+                    isBatchDim = true;
+                    break;
+                }
+            }
+            if (isBatchDim) {
+                [expandedShape addObject:operand.shape[d]];
+            } else {
+                [expandedShape addObject:@1];
+            }
+        }
+
+        MPSGraphTensor* reshapedIndices = [ctx.graph reshapeTensor:startIndices
+                                                         withShape:expandedShape
+                                                              name:nil];
+        reshapedIndices = EnsureInt32(ctx.graph, reshapedIndices);
+
+        MPSGraphTensor* result =
+            SafeGatherAlongAxis(ctx.graph, (NSInteger)gatherAxis, operand, reshapedIndices);
+
+        // Reshape to expected output shape
+        auto outputShape = GetOutputShape(ctx.op);
+        result = [ctx.graph reshapeTensor:result withShape:outputShape name:nil];
+
+        return Result(ctx, result, "gather");
+    }
 
     // Handle common embedding lookup pattern:
     // operand: [num_embeddings, embedding_dim]
@@ -422,9 +473,6 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
     // offset_dims: [last_dim] - the embedding dimension
     // collapsed_slice_dims: [0] - the looked-up dimension
     // start_index_map: [0] - indices point into dim 0
-
-    NSArray<NSNumber*>* indicesShape = startIndices.shape;
-    NSUInteger indicesRank = indicesShape.count;
 
     // Check if index_vector_dim is the last dimension and has size 1
     // This is the common embedding pattern
@@ -499,6 +547,57 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             gathered = [ctx.graph reshapeTensor:gathered withShape:@[] name:nil];
         }
         return Result(ctx, gathered, "gather");
+    }
+
+    // Handle multi-index point gather pattern (e.g., x[arange(n), arange(n)] for diagonal):
+    // - indices: [N, k] where each row is a k-dimensional coordinate
+    // - index_vector_dim is the last dimension
+    // - collapsed_slice_dims matches start_index_map (same set of dims)
+    // - all mapped slice_sizes are 1
+    // - offset_dims is empty (pure point gather)
+    // - no batching dimensions
+    if (operandBatchingDims.empty() && startIndicesBatchingDims.empty() &&
+        indexVectorDim == (int64_t)indicesRank - 1 &&
+        collapsedSliceDims.size() == startIndexMap.size() && offsetDims.empty() &&
+        startIndexMap.size() > 1) {
+        // Verify collapsed_slice_dims and start_index_map contain the same dims
+        llvm::SmallVector<int64_t> sortedCollapsed(collapsedSliceDims.begin(),
+                                                    collapsedSliceDims.end());
+        llvm::SmallVector<int64_t> sortedMap(startIndexMap.begin(), startIndexMap.end());
+        llvm::sort(sortedCollapsed);
+        llvm::sort(sortedMap);
+
+        bool dimsMatch = (sortedCollapsed == sortedMap);
+
+        // Verify all mapped slice_sizes are 1
+        auto sliceSizes = gatherOp.getSliceSizes();
+        bool allOnes = true;
+        for (int64_t dim : startIndexMap) {
+            if (sliceSizes[dim] != 1) {
+                allOnes = false;
+                break;
+            }
+        }
+
+        if (dimsMatch && allOnes) {
+            // Check if startIndexMap covers all dims [0, ..., rank-1]
+            bool coversAllDims = (startIndexMap.size() == operand.shape.count);
+            if (coversAllDims) {
+                for (NSUInteger d = 0; d < operand.shape.count; ++d) {
+                    if (sortedMap[d] != (int64_t)d) {
+                        coversAllDims = false;
+                        break;
+                    }
+                }
+            }
+
+            if (coversAllDims) {
+                // Indices are [N, rank] — use gatherND directly
+                MPSGraphTensor* ndIndices = EnsureInt32(ctx.graph, startIndices);
+                MPSGraphTensor* gathered = SafeGatherND(ctx.graph, operand, ndIndices, 0);
+                return Result(ctx, gathered, "gather");
+            }
+        }
     }
 
     // For now, log unsupported patterns

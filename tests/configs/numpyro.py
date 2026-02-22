@@ -203,21 +203,43 @@ def make_numpyro_op_configs():
                     ),  # concentration
                 ),
                 # Multivariate distributions.
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.MultivariateNormal,
-                        lambda key, bs=batch_shape: random.normal(
-                            key, bs + (4,)
-                        ),  # loc
-                        None,  # covariance_matrix
-                        None,  # precision_matrix
-                        lambda key: jnp.linalg.cholesky(jnp.eye(4) + jnp.ones((4, 4))),
-                    ),
-                    marks=[
-                        xfail_match(
-                            "gather:.+unsupported gather pattern|Native op handler returned nil"
+                *(
+                    [
+                        pytest.param(
+                            NumpyroDistributionTestConfig(
+                                dists.MultivariateNormal,
+                                lambda key, bs=batch_shape: random.normal(
+                                    key, bs + (4,)
+                                ),  # loc
+                                None,  # covariance_matrix
+                                None,  # precision_matrix
+                                lambda key: jnp.linalg.cholesky(
+                                    jnp.eye(4) + jnp.ones((4, 4))
+                                ),
+                            ),
+                            marks=[
+                                xfail_match(
+                                    "gather:.+unsupported gather pattern"
+                                    "|scatter:.+unsupported scatter pattern"
+                                )
+                            ],
                         )
-                    ],
+                    ]
+                    if batch_shape != ()
+                    else [
+                        NumpyroDistributionTestConfig(
+                            dists.MultivariateNormal,
+                            lambda key, bs=batch_shape: random.normal(
+                                key, bs + (4,)
+                            ),  # loc
+                            None,  # covariance_matrix
+                            None,  # precision_matrix
+                            lambda key: jnp.linalg.cholesky(
+                                jnp.eye(4) + jnp.ones((4, 4))
+                            ),
+                            grad_xfail="scatter:.+unsupported scatter pattern",
+                        ),
+                    ]
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(

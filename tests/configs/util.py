@@ -10,9 +10,10 @@ from jax import numpy as jnp
 from jax import random
 
 CPU_DEVICE = jax.devices("cpu")[0]
-MPS_DEVICE = (
-    jax.devices("mps")[0] if "mps" in {d.platform for d in jax.devices()} else None
-)
+try:
+    MPS_DEVICE = jax.devices("mps")[0]
+except (RuntimeError, IndexError):
+    MPS_DEVICE = None
 STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
 
 
@@ -90,6 +91,7 @@ class OperationTestConfig:
         differentiable_argnums: Sequence[int] | None = None,
         static_argnums: Sequence[int] | None = None,
         grad_transform: Callable | None = None,
+        grad_xfail: str | None = None,
         name: str | None = None,
         seed: int = 42,
         **kwargs: Any,
@@ -98,6 +100,7 @@ class OperationTestConfig:
         self.differentiable_argnums = differentiable_argnums
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
+        self.grad_xfail = grad_xfail
         self.seed = seed
         # Wrap non-callables in lambdas that accept (and ignore) key
         self.args = [
