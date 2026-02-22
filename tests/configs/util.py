@@ -10,9 +10,10 @@ from jax import numpy as jnp
 from jax import random
 
 CPU_DEVICE = jax.devices("cpu")[0]
-MPS_DEVICE = (
-    jax.devices("mps")[0] if "mps" in {d.platform for d in jax.devices()} else None
-)
+try:
+    MPS_DEVICE = jax.devices("mps")[0]
+except (RuntimeError, IndexError):
+    MPS_DEVICE = None
 STABLEHLO_OP_RE = re.compile(r"(?<![\#\!])(?:stablehlo|chlo)\.[\w\.]+")
 
 

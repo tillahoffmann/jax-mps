@@ -1,3 +1,4 @@
+import jax
 import numpy
 from jax import lax, random
 from jax import numpy as jnp
@@ -152,6 +153,24 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (10, 4)),
                 numpy.array([0, 2, 5], dtype=numpy.int32),
                 lambda key: random.normal(key, (3, 4)),
+            ),
+            # Multi-index point gather: x[arange(n), arange(n)] extracts diagonal
+            # (grad excluded: corresponding scatter pattern not yet supported)
+            OperationTestConfig(
+                lambda x: x[jnp.arange(4), jnp.arange(4)],
+                lambda key: random.normal(key, (4, 4)),
+                name="multi_index_point_gather",
+                differentiable_argnums=(),
+            ),
+            # Batched gather via vmap (grad excluded: batched scatter not yet supported)
+            OperationTestConfig(
+                lambda x, idx: jax.vmap(
+                    lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
+                )(x, idx),
+                lambda key: random.normal(key, (3, 10)),
+                lambda key: random.randint(key, (3,), 0, 10),
+                name="batched_single_axis_gather",
+                differentiable_argnums=(),
             ),
             # Large integer gather tests: verify integers > 2^24 are preserved
             # These test the bitcast workaround for MPS gather operations
