@@ -726,12 +726,27 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                           std::to_string(inputs.size()));
         }
 
-        // Check for zero-sized tensors (MPS framework doesn't support them)
-        for (size_t i = 0; i < plan_->slots.size(); i++) {
-            if (plan_->slots[i].byte_size == 0) {
-                return ExecutionResult::Error("Zero-sized tensors are not supported by MPS. "
-                                              "Tensor at slot " +
-                                              std::to_string(i) + " has size 0 bytes.");
+        // Short-circuit for zero-sized tensors: MPS cannot operate on them,
+        // but the correct result is an empty tensor with the right shape.
+        {
+            bool has_zero_sized = false;
+            for (const auto& slot : plan_->slots) {
+                if (slot.byte_size == 0) {
+                    has_zero_sized = true;
+                    break;
+                }
+            }
+            if (has_zero_sized) {
+                ExecutionResult result;
+                for (size_t i = 0; i < plan_->output_slots.size(); i++) {
+                    auto tensorType = mlir::cast<mlir::RankedTensorType>(plan_->return_types[i]);
+                    std::vector<int64_t> dims(tensorType.getShape().begin(),
+                                              tensorType.getShape().end());
+                    int dtype = MlirTypeToPjrtDtype(tensorType.getElementType());
+                    result.buffers.push_back(
+                        std::make_unique<MpsBuffer>(device, nullptr, dtype, dims));
+                }
+                return result;
             }
         }
 

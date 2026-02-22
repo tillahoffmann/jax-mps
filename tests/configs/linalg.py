@@ -1,10 +1,9 @@
 import numpy
-import pytest
 from jax import numpy as jnp
 from jax import random
 from jax.scipy.linalg import solve_triangular
 
-from .util import OperationTestConfig, xfail_match
+from .util import OperationTestConfig
 
 
 def _random_posdef(key, n: int, batch_shape: tuple[int, ...] = ()):
@@ -165,21 +164,14 @@ def make_linalg_op_configs():
 
         # Edge case: zero batch size (empty batch dimension)
         # CPU handles this correctly, returning empty arrays with the right shape.
-        # MPS doesn't support zero-sized tensors.
-        yield pytest.param(
-            OperationTestConfig(
-                jnp.linalg.cholesky,
-                numpy.zeros((0, 3, 3), dtype=numpy.float32),
-                name="cholesky_zero_batch",
-            ),
-            marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
+        yield OperationTestConfig(
+            jnp.linalg.cholesky,
+            numpy.zeros((0, 3, 3), dtype=numpy.float32),
+            name="cholesky_zero_batch",
         )
-        yield pytest.param(
-            OperationTestConfig(
-                _solve_triangular_lower,
-                numpy.zeros((0, 3, 3), dtype=numpy.float32),
-                numpy.zeros((0, 3, 1), dtype=numpy.float32),
-                name="triangular_solve_zero_batch",
-            ),
-            marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
+        yield OperationTestConfig(
+            _solve_triangular_lower,
+            numpy.zeros((0, 3, 3), dtype=numpy.float32),
+            numpy.zeros((0, 3, 1), dtype=numpy.float32),
+            name="triangular_solve_zero_batch",
         )
