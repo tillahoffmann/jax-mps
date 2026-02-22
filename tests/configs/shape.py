@@ -1,3 +1,4 @@
+import jax
 from jax import numpy as jnp
 from jax import random
 
@@ -60,6 +61,12 @@ def make_shape_op_configs():
                 lambda x: jnp.pad(x, ((1, 1), (2, 2))),
                 lambda key: random.normal(key, (3, 3)),
                 # Grad crashes with fatal Metal abort (sliceUpdateDataTensor shape mismatch).
+                differentiable_argnums=(),
+            ),
+            # Pad with interior padding
+            OperationTestConfig(
+                lambda x: jax.lax.pad(x, 0.0, [(1, 1, 1), (0, 0, 2)]),
+                lambda key: random.normal(key, (3, 4)),
                 differentiable_argnums=(),
             ),
         ]
