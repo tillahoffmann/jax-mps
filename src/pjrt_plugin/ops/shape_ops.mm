@@ -292,24 +292,13 @@ static ProcessResult HandlePad(HandlerContext& ctx) {
     auto edgePaddingLow = padOp.getEdgePaddingLow();
     auto interiorPadding = padOp.getInteriorPadding();
 
-    // Check if interior padding is all zeros (simple edge padding case)
-    bool hasInteriorPadding = false;
-    for (int64_t p : interiorPadding) {
-        if (p != 0) {
-            hasInteriorPadding = true;
-            break;
-        }
-    }
-
-    if (hasInteriorPadding) {
-        return ProcessResult::Error("pad: interior padding not yet supported");
-    }
-
     // Get output shape and create a tensor filled with padding value
     NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
     MPSGraphTensor* padded = [ctx.graph broadcastTensor:paddingValue toShape:outputShape name:nil];
 
-    // Calculate starts and ends for sliceUpdate (where to place the input)
+    // Calculate starts, ends, and strides for sliceUpdate (where to place the input)
+    // Interior padding of N means N padding elements between each input element,
+    // which corresponds to a stride of N+1 in the output tensor.
     NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
     NSMutableArray<NSNumber*>* ends = [NSMutableArray array];
     NSMutableArray<NSNumber*>* strides = [NSMutableArray array];
@@ -318,9 +307,11 @@ static ProcessResult HandlePad(HandlerContext& ctx) {
     for (NSUInteger i = 0; i < edgePaddingLow.size(); i++) {
         int64_t start = edgePaddingLow[i];
         int64_t inputDim = [inputShape[i] longLongValue];
+        int64_t interior = interiorPadding[i];
+        int64_t stride = interior + 1;
         [starts addObject:@(start)];
-        [ends addObject:@(start + inputDim)];
-        [strides addObject:@1];
+        [ends addObject:@(start + (inputDim - 1) * stride + 1)];
+        [strides addObject:@(stride)];
     }
 
     // Use sliceUpdateDataTensor to insert input into the padded tensor
