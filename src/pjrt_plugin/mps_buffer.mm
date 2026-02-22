@@ -71,6 +71,14 @@ void MpsBuffer::ToHostBuffer(void* dst, std::function<void()> on_done) {
             on_done();
         return;
     }
+
+    // Zero-sized tensor: nothing to copy
+    if (byte_size() == 0) {
+        if (on_done)
+            on_done();
+        return;
+    }
+
     if (!metal_buffer_) {
         NSLog(@"ERROR: ToHostBuffer called with null Metal buffer");
         if (on_done)
