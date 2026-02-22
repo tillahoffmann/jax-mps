@@ -703,7 +703,178 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         return Result(ctx, result, "scatter");
     }
 
-    return ProcessResult::Error("scatter: unsupported scatter pattern");
+    // General ScatterND fallback: handles arbitrary scatter dimension numbers
+    // by reshaping indices and updates into the [batch..., N, K] / [batch..., N, window...]
+    // layout expected by MPS scatterNDWithDataTensor.
+    //
+    // Handles two sources of "batch" dimensions:
+    //   1. StableHLO batching dims (inputBatchingDims / scatterIndicesBatchingDims)
+    //   2. Leading update_window_dims that correspond to leading operand dims before
+    //      the scattered dims — these become MPS batch dims, and the indices tensor
+    //      is broadcast to include them.
+    //
+    // Requirements:
+    //   - indexVectorDim is the last dim of the indices tensor
+    //   - scatterDimsToOperandDims maps to contiguous operand dims
+    //   - insertedWindowDims matches the scattered operand dims
+    {
+        // updateWindowDims was already extracted above for the full-rank pattern
+        NSUInteger numStableHLOBatch = inputBatchingDims.size();
+        NSUInteger K = scatterDimsToOperandDims.size();  // index vector size
+
+        // Verify index_vector_dim is the last dimension of the indices tensor
+        if (indexVectorDim != (int64_t)indicesRank - 1) {
+            return ProcessResult::Error(
+                "scatter: general fallback requires index_vector_dim == last dim of indices");
+        }
+
+        // Verify the index vector size matches K
+        if ([indicesShape[indicesRank - 1] integerValue] != (NSInteger)K) {
+            return ProcessResult::Error(
+                "scatter: index vector size mismatch in general fallback");
+        }
+
+        // Find the first scattered operand dim to determine MPS batch dim count.
+        // All operand dims before min(scatterDimsToOperandDims) that are NOT in
+        // insertedWindowDims are leading window dims that become MPS batch dims.
+        int64_t minScatterDim = scatterDimsToOperandDims[0];
+        for (NSUInteger i = 1; i < K; ++i) {
+            minScatterDim = std::min(minScatterDim, scatterDimsToOperandDims[i]);
+        }
+        NSUInteger mpsBatchDims = (NSUInteger)minScatterDim;
+
+        // StableHLO batching dims must precede the scatter dims in the operand.
+        if (mpsBatchDims < numStableHLOBatch) {
+            return ProcessResult::Error(
+                "scatter: general fallback requires scatter dims after batching dims");
+        }
+
+        // Verify scatterDimsToOperandDims maps to contiguous dims
+        // [mpsBatchDims, mpsBatchDims+1, ..., mpsBatchDims+K-1]
+        bool contiguousDims = true;
+        for (NSUInteger i = 0; i < K; ++i) {
+            if (scatterDimsToOperandDims[i] != (int64_t)(mpsBatchDims + i)) {
+                contiguousDims = false;
+                break;
+            }
+        }
+        if (!contiguousDims) {
+            return ProcessResult::Error(
+                "scatter: general fallback requires contiguous scatterDimsToOperandDims");
+        }
+
+        // Verify insertedWindowDims matches the scattered operand dims
+        bool insertedMatch = insertedWindowDims.size() == K;
+        if (insertedMatch) {
+            for (NSUInteger i = 0; i < K; ++i) {
+                if (insertedWindowDims[i] != (int64_t)(mpsBatchDims + i)) {
+                    insertedMatch = false;
+                    break;
+                }
+            }
+        }
+        if (!insertedMatch) {
+            return ProcessResult::Error(
+                "scatter: general fallback requires insertedWindowDims to match indexed dims");
+        }
+
+        // Identify scatter dims vs window dims in the updates tensor.
+        // update_window_dims lists which update dims are window dims; the rest are scatter dims.
+        NSUInteger updatesRank = updates.shape.count;
+        std::vector<NSUInteger> updateScatterDims;
+        for (NSUInteger d = 0; d < updatesRank; ++d) {
+            bool isWindow = false;
+            for (auto wd : updateWindowDims) {
+                if (wd == (int64_t)d) { isWindow = true; break; }
+            }
+            if (!isWindow) {
+                updateScatterDims.push_back(d);
+            }
+        }
+
+        // Count leading window dims (window dims before the first scatter dim in updates).
+        // These correspond to leading operand dims and become MPS batch dims.
+        NSUInteger leadingWindowDims = updateScatterDims.empty()
+            ? updatesRank
+            : updateScatterDims[0];
+        if (leadingWindowDims != mpsBatchDims) {
+            return ProcessResult::Error(
+                "scatter: general fallback requires leading update window dims "
+                "to match operand batch dims");
+        }
+
+        // Compute total scatter points N from the updates scatter dims
+        int64_t N = 1;
+        for (auto sd : updateScatterDims) {
+            N *= [updates.shape[sd] integerValue];
+        }
+
+        // Compute N from indices scatter dims for verification
+        int64_t indicesN = 1;
+        NSUInteger idxScatterStart = numStableHLOBatch;
+        NSUInteger idxScatterEnd = indicesRank - 1;
+        for (NSUInteger i = idxScatterStart; i < idxScatterEnd; ++i) {
+            indicesN *= [indicesShape[i] integerValue];
+        }
+        if (N != indicesN) {
+            return ProcessResult::Error(
+                "scatter: general fallback N mismatch between updates and indices");
+        }
+
+        // Build the MPS batch shape from the operand's leading dims
+        NSMutableArray<NSNumber*>* batchShape = [NSMutableArray array];
+        for (NSUInteger d = 0; d < mpsBatchDims; ++d) {
+            [batchShape addObject:input.shape[d]];
+        }
+
+        // Reshape indices: [stablehlo_batch..., scatter_dims..., K] -> [N, K]
+        // Then broadcast to [mps_batch..., N, K] if there are window-based batch dims.
+        MPSGraphTensor* ndIndices = [ctx.graph reshapeTensor:scatterIndices
+                                                   withShape:@[@(indicesN), @(K)]
+                                                        name:nil];
+        ndIndices = EnsureInt32(ctx.graph, ndIndices);
+
+        if (mpsBatchDims > numStableHLOBatch) {
+            // Leading window dims in the operand don't appear in the indices tensor.
+            // Broadcast indices to include these batch dims: [N, K] -> [batch..., N, K]
+            NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray array];
+            for (NSUInteger d = 0; d < mpsBatchDims; ++d) {
+                [expandedShape addObject:@1];
+            }
+            [expandedShape addObject:@(N)];
+            [expandedShape addObject:@(K)];
+            ndIndices = [ctx.graph reshapeTensor:ndIndices withShape:expandedShape name:nil];
+
+            NSMutableArray<NSNumber*>* broadcastShape = [NSMutableArray arrayWithArray:batchShape];
+            [broadcastShape addObject:@(N)];
+            [broadcastShape addObject:@(K)];
+            ndIndices = [ctx.graph broadcastTensor:ndIndices toShape:broadcastShape name:nil];
+        }
+
+        // Reshape updates to [mps_batch..., N, trailing_window...].
+        // The updates tensor has layout:
+        //   [leading_window_dims..., scatter_dims..., trailing_window_dims...]
+        // Leading window dims match the MPS batch shape. Scatter dims flatten to N.
+        // Trailing window dims stay as-is.
+        NSMutableArray<NSNumber*>* ndUpdatesShape = [NSMutableArray arrayWithArray:batchShape];
+        [ndUpdatesShape addObject:@(N)];
+        NSUInteger trailingStart = updateScatterDims.empty()
+            ? updatesRank
+            : (NSUInteger)(updateScatterDims.back() + 1);
+        NSArray<NSNumber*>* updatesShape = updates.shape;
+        for (NSUInteger d = trailingStart; d < updatesRank; ++d) {
+            [ndUpdatesShape addObject:updatesShape[d]];
+        }
+
+        MPSGraphTensor* ndUpdates = [ctx.graph reshapeTensor:updates
+                                                   withShape:ndUpdatesShape
+                                                        name:nil];
+
+        MPSGraphScatterMode mode = GetScatterMode(scatterOp);
+        MPSGraphTensor* result =
+            SafeScatterND(ctx.graph, input, ndUpdates, ndIndices, mpsBatchDims, mode);
+        return Result(ctx, result, "scatter");
+    }
 }
 REGISTER_MPS_OP("stablehlo.scatter", HandleScatter);
 
