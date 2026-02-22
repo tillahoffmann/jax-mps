@@ -447,8 +447,6 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             }
             if (isBatchDim) {
                 [expandedShape addObject:operand.shape[d]];
-            } else if ((int64_t)d == gatherAxis) {
-                [expandedShape addObject:@1];
             } else {
                 [expandedShape addObject:@1];
             }
