@@ -31,6 +31,7 @@ MpsClient::~MpsClient() {
 }
 
 std::unique_ptr<MpsClient> MpsClient::Create() {
+    // Note: MpsClient constructor is private, so we can't use make_unique.
     // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
     auto client = std::unique_ptr<MpsClient>(new MpsClient());
     if (!client->Initialize()) {
@@ -176,10 +177,6 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
         NSLog(@"ERROR: BufferFromHostBuffer called with no Metal device");
         return nullptr;
     }
-    if (!data) {
-        NSLog(@"ERROR: BufferFromHostBuffer called with null data pointer");
-        return nullptr;
-    }
 
     // Calculate buffer size
     int64_t element_count = 1;
@@ -193,6 +190,12 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
     if (byte_size == 0) {
         MpsDevice* target_device = device ? device : devices_[0].get();
         return std::make_unique<MpsBuffer>(target_device, nullptr, dtype, dims);
+    }
+
+    // For non-zero-sized tensors, data pointer must be non-null
+    if (!data) {
+        NSLog(@"ERROR: BufferFromHostBuffer called with null data pointer for non-zero sized tensor");
+        return nullptr;
     }
 
     id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)metal_device_;

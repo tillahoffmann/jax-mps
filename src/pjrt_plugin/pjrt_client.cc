@@ -252,11 +252,22 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
         return MakeError(
             "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
     }
-    if (!args->data) {
-        return MakeError("Cannot create buffer: null data pointer provided");
-    }
 
     std::vector<int64_t> dims(args->dims, args->dims + args->num_dims);
+
+    // Compute byte size to check if this is a zero-sized tensor
+    int64_t element_count = 1;
+    for (int64_t dim : dims) {
+        element_count *= dim;
+    }
+    size_t element_size = jax_mps::DtypeByteSize(static_cast<int>(args->type));
+    size_t byte_size = element_count * element_size;
+
+    // Only require non-null data for non-zero-sized tensors
+    if (byte_size > 0 && !args->data) {
+        return MakeError("Cannot create buffer: null data pointer provided for non-zero sized tensor");
+    }
+
     std::vector<int64_t> byte_strides;
     if (args->byte_strides && args->num_byte_strides > 0) {
         byte_strides.assign(args->byte_strides, args->byte_strides + args->num_byte_strides);

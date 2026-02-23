@@ -728,15 +728,18 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
 
         // Short-circuit for zero-sized tensors: MPS cannot operate on them,
         // but the correct result is an empty tensor with the right shape.
+        // Only short-circuit when ALL outputs are zero-sized. Some ops may
+        // produce non-empty outputs from empty inputs (e.g., reductions).
         {
-            bool has_zero_sized = false;
-            for (const auto& slot : plan_->slots) {
-                if (slot.byte_size == 0) {
-                    has_zero_sized = true;
+            bool all_outputs_zero_sized = true;
+            for (auto output_slot_id : plan_->output_slots) {
+                const SlotInfo& slot_info = plan_->slots[output_slot_id];
+                if (slot_info.byte_size != 0) {
+                    all_outputs_zero_sized = false;
                     break;
                 }
             }
-            if (has_zero_sized) {
+            if (all_outputs_zero_sized && !plan_->output_slots.empty()) {
                 ExecutionResult result;
                 for (size_t i = 0; i < plan_->output_slots.size(); i++) {
                     auto tensorType = mlir::cast<mlir::RankedTensorType>(plan_->return_types[i]);
