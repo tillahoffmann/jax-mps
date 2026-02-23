@@ -194,7 +194,8 @@ std::unique_ptr<MpsBuffer> MpsClient::BufferFromHostBuffer(const void* data, int
 
     // For non-zero-sized tensors, data pointer must be non-null
     if (!data) {
-        NSLog(@"ERROR: BufferFromHostBuffer called with null data pointer for non-zero sized tensor");
+        NSLog(
+            @"ERROR: BufferFromHostBuffer called with null data pointer for non-zero sized tensor");
         return nullptr;
     }
 

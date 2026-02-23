@@ -265,7 +265,8 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
 
     // Only require non-null data for non-zero-sized tensors
     if (byte_size > 0 && !args->data) {
-        return MakeError("Cannot create buffer: null data pointer provided for non-zero sized tensor");
+        return MakeError(
+            "Cannot create buffer: null data pointer provided for non-zero sized tensor");
     }
 
     std::vector<int64_t> byte_strides;
