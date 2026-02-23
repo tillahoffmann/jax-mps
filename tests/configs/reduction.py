@@ -116,4 +116,22 @@ def make_reduction_op_configs():
                 # Grad requires pad with interior dilation (not yet supported)
                 differentiable_argnums=(),
             ),
+            # Max pool 2D with window dilation: window=(1,2,2,1), stride=(1,1,1,1),
+            # window_dilation=(1,2,2,1) and VALID padding.
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x,
+                    -jnp.inf,
+                    lax.max,
+                    (1, 2, 2, 1),
+                    (1, 1, 1, 1),
+                    "valid",
+                    None,
+                    (1, 2, 2, 1),
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="maxpool2d-window-dilation",
+                # Grad requires pad with interior/window dilation (not yet supported)
+                differentiable_argnums=(),
+            ),
         ]
