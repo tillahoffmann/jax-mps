@@ -245,7 +245,8 @@ static ProcessResult HandleCumulativeReduceWindow(HandlerContext& ctx,
         return ProcessResult::Error("reduce_window: no cumulative axis found");
 
     // Check padding to determine forward/reverse and exclusive/inclusive.
-    int64_t padLow = 0, padHigh = 0;
+    int64_t padLow = 0;
+    int64_t padHigh = 0;
     if (paddingAttr) {
         auto values = paddingAttr.getValues<int64_t>();
         padLow = values[{(uint64_t)cumAxis, 0}];
@@ -480,26 +481,20 @@ static ProcessResult HandleReduceWindow(HandlerContext& ctx) {
                     bool valid = false;
                     if (mlir::isa<mlir::FloatType>(elemType)) {
                         double val = denseAttr.getSplatValue<llvm::APFloat>().convertToDouble();
-                        if (reductionType == "stablehlo.add" && val == 0.0)
-                            valid = true;
-                        else if (reductionType == "stablehlo.multiply" && val == 1.0)
-                            valid = true;
-                        else if (reductionType == "stablehlo.maximum" && std::isinf(val) && val < 0)
-                            valid = true;
-                        else if (reductionType == "stablehlo.minimum" && std::isinf(val) && val > 0)
-                            valid = true;
+                        valid =
+                            (reductionType == "stablehlo.add" && val == 0.0) ||
+                            (reductionType == "stablehlo.multiply" && val == 1.0) ||
+                            (reductionType == "stablehlo.maximum" && std::isinf(val) && val < 0) ||
+                            (reductionType == "stablehlo.minimum" && std::isinf(val) && val > 0);
                     } else if (mlir::isa<mlir::IntegerType>(elemType)) {
                         int64_t val = denseAttr.getSplatValue<llvm::APInt>().getSExtValue();
-                        if (reductionType == "stablehlo.add" && val == 0)
-                            valid = true;
-                        else if (reductionType == "stablehlo.multiply" && val == 1)
-                            valid = true;
                         // For integer max/min, the init should be the type's
                         // min/max value respectively. Accept any value here since
                         // verifying exact type bounds is complex for all int widths.
-                        else if (reductionType == "stablehlo.maximum" ||
-                                 reductionType == "stablehlo.minimum")
-                            valid = true;
+                        valid = (reductionType == "stablehlo.add" && val == 0) ||
+                                (reductionType == "stablehlo.multiply" && val == 1) ||
+                                reductionType == "stablehlo.maximum" ||
+                                reductionType == "stablehlo.minimum";
                     }
                     if (!valid)
                         return ProcessResult::Error(
@@ -514,7 +509,7 @@ static ProcessResult HandleReduceWindow(HandlerContext& ctx) {
     if (!inputType)
         return ProcessResult::Error("reduce_window: unranked input");
     auto inputShape = inputType.getShape();
-    int64_t rank = inputShape.size();
+    int64_t rank = static_cast<int64_t>(inputShape.size());
 
     auto windowDims = rwOp.getWindowDimensions();
     auto stridesOpt = rwOp.getWindowStrides();
