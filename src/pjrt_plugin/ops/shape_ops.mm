@@ -752,7 +752,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         // [mpsBatchDims, mpsBatchDims+1, ..., mpsBatchDims+K-1]
         bool contiguousDims = true;
         for (NSUInteger i = 0; i < K; ++i) {
-            if (scatterDimsToOperandDims[i] != (int64_t)(mpsBatchDims + i)) {
+            if (scatterDimsToOperandDims[i] != static_cast<int64_t>(mpsBatchDims) + i) {
                 contiguousDims = false;
                 break;
             }
@@ -766,7 +766,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         bool insertedMatch = insertedWindowDims.size() == K;
         if (insertedMatch) {
             for (NSUInteger i = 0; i < K; ++i) {
-                if (insertedWindowDims[i] != (int64_t)(mpsBatchDims + i)) {
+                if (insertedWindowDims[i] != static_cast<int64_t>(mpsBatchDims) + i) {
                     insertedMatch = false;
                     break;
                 }

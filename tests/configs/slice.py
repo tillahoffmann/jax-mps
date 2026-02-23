@@ -3,7 +3,7 @@ import pytest
 from jax import lax, random
 from jax import numpy as jnp
 
-from .util import OperationTestConfig, xfail_match
+from .util import MPS_DEVICE, OperationTestConfig
 
 
 def make_slice_op_configs():
@@ -219,7 +219,8 @@ def make_slice_op_configs():
                 differentiable_argnums=(0,),
                 name="scatter_multi_dim_diagonal_add",
             ),
-            # Grad of multi-dim scatter requires unsupported gather pattern
+            # Grad of multi-dim scatter with respect to updates
+            # Forward pass works but gradient requires unsupported gather pattern
             pytest.param(
                 OperationTestConfig(
                     lambda x, vals: x.at[numpy.arange(4), numpy.arange(4)].add(vals),
@@ -228,6 +229,13 @@ def make_slice_op_configs():
                     differentiable_argnums=(1,),
                     name="scatter_multi_dim_diagonal_add_grad_updates",
                 ),
-                marks=[xfail_match("gather:.+unsupported gather pattern")],
+                marks=[
+                    pytest.mark.xfail(
+                        reason="gather: unsupported gather pattern",
+                        strict=False,
+                    )
+                ]
+                if MPS_DEVICE
+                else [],
             ),
         ]

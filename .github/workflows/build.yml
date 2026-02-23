@@ -98,6 +98,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
       - name: Restore deps from cache
         uses: actions/cache/restore@v4
         with:
@@ -105,18 +110,18 @@ jobs:
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           fail-on-cache-miss: true
 
-      - name: Install llvm and clang-format
+      - name: Install llvm
         uses: tecolicom/actions-use-homebrew-tools@v1
         with:
-          tools: llvm clang-format
+          tools: llvm
+
+      - name: clang-format
+        run: uvx pre-commit run clang-format --all-files
 
       - name: cmake configure
         run: |
           mkdir -p build && cd build
           cmake .. -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.jax-mps-deps"
-
-      - name: clang-format
-        run: find src -type f \( -name "*.cc" -o -name "*.mm" -o -name "*.h" \) | xargs clang-format --dry-run --Werror
 
       - name: clang-tidy
         run: |
