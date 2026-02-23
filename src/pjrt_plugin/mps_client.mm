@@ -31,7 +31,8 @@ MpsClient::~MpsClient() {
 }
 
 std::unique_ptr<MpsClient> MpsClient::Create() {
-    auto client = std::unique_ptr<MpsClient>(new MpsClient());  // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
+    auto client = std::unique_ptr<MpsClient>(new MpsClient());
     if (!client->Initialize()) {
         return nullptr;
     }
