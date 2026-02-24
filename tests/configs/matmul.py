@@ -146,6 +146,38 @@ def make_matmul_op_configs():
             marks=[xfail_match("batched operations with multiple free dimensions")],
         )
 
+        # Matrix-vector: (M, K) @ (K,) -> (M,)
+        yield OperationTestConfig(
+            jnp.matmul,
+            lambda key: random.normal(key, (4, 5)),
+            lambda key: random.normal(key, (5,)),
+            name="matvec",
+        )
+
+        # Vector-matrix: (K,) @ (K, N) -> (N,)
+        yield OperationTestConfig(
+            jnp.matmul,
+            lambda key: random.normal(key, (5,)),
+            lambda key: random.normal(key, (5, 3)),
+            name="vecmat",
+        )
+
+        # Vector-vector (dot product): (K,) @ (K,) -> ()
+        yield OperationTestConfig(
+            jnp.dot,
+            lambda key: random.normal(key, (5,)),
+            lambda key: random.normal(key, (5,)),
+            name="vecdot",
+        )
+
+        # Exact example from issue #53: jnp.dot(ones((3,4)), ones(4))
+        yield OperationTestConfig(
+            jnp.dot,
+            lambda key: jnp.ones((3, 4)),
+            lambda key: jnp.ones((4,)),
+            name="issue_53_matvec",
+        )
+
         # Edge case: zero batch size (empty batch dimension)
         # CPU handles this correctly, returning empty arrays with the right shape.
         # MPS doesn't support zero-sized tensors.
