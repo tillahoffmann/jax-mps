@@ -43,3 +43,7 @@ WarningsAsErrors: '*'
 # Only show warnings from our own headers, not third-party or system headers
 HeaderFilterRegex: '.*/src/pjrt_plugin/.*'
 SystemHeaders: false
+
+CheckOptions:
+  # Ignore macOS SDK framework headers for circular include detection
+  misc-header-include-cycle.IgnoredFilesList: '.*/Frameworks/.*\.framework/.*'
