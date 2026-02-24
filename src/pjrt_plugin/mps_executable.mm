@@ -726,28 +726,55 @@ ExecutionResult MpsExecutable::Execute(const std::vector<MpsBuffer*>& inputs, Mp
                                           std::to_string(inputs.size()));
         }
 
-        // Short-circuit for zero-sized tensors: MPS cannot operate on them,
-        // but the correct result is an empty tensor with the right shape.
-        // Only short-circuit when ALL outputs are zero-sized. Some ops may
-        // produce non-empty outputs from empty inputs (e.g., reductions).
+        // Short-circuit for zero-sized tensors: MPS cannot operate on them.
+        // We must short-circuit when any input OR output has a zero dimension,
+        // because MPS does not support zero-sized tensors at all.
+        // For zero-sized outputs, we return empty buffers (nullptr).
+        // For non-zero outputs produced from zero-sized inputs (e.g., reductions),
+        // we return zero-filled buffers since there are no elements to operate on.
         {
-            bool all_outputs_zero_sized = true;
+            bool any_zero_sized = false;
             for (auto output_slot_id : plan_->output_slots) {
                 const SlotInfo& slot_info = plan_->slots[output_slot_id];
-                if (slot_info.byte_size != 0) {
-                    all_outputs_zero_sized = false;
+                if (slot_info.byte_size == 0) {
+                    any_zero_sized = true;
                     break;
                 }
             }
-            if (all_outputs_zero_sized && !plan_->output_slots.empty()) {
+            if (!any_zero_sized) {
+                for (size_t i = 0; i < num_args; i++) {
+                    MpsBuffer* input = inputs[i];
+                    if (input && input->byte_size() == 0) {
+                        any_zero_sized = true;
+                        break;
+                    }
+                }
+            }
+            if (any_zero_sized && !plan_->output_slots.empty()) {
                 ExecutionResult result;
                 for (size_t i = 0; i < plan_->output_slots.size(); i++) {
                     auto tensorType = mlir::cast<mlir::RankedTensorType>(plan_->return_types[i]);
                     std::vector<int64_t> dims(tensorType.getShape().begin(),
                                               tensorType.getShape().end());
                     int dtype = MlirTypeToPjrtDtype(tensorType.getElementType());
-                    result.buffers.push_back(
-                        std::make_unique<MpsBuffer>(device, nullptr, dtype, dims));
+                    size_t byte_size = 1;
+                    for (auto d : dims)
+                        byte_size *= d;
+                    byte_size *= DtypeByteSize(dtype);
+                    if (byte_size == 0) {
+                        // Zero-sized output: no Metal buffer needed
+                        result.buffers.push_back(
+                            std::make_unique<MpsBuffer>(device, nullptr, dtype, dims));
+                    } else {
+                        // Non-zero output from zero-sized input: return zero-filled buffer
+                        id<MTLBuffer> buf =
+                            [mtl_device newBufferWithLength:byte_size
+                                                    options:MTLResourceStorageModeShared];
+                        memset([buf contents], 0, byte_size);
+                        result.buffers.push_back(
+                            std::make_unique<MpsBuffer>(device, (__bridge void*)buf, dtype, dims));
+                        CFRelease((__bridge CFTypeRef)buf);
+                    }
                 }
                 return result;
             }
