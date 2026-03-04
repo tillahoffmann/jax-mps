@@ -132,4 +132,41 @@ def make_reduction_op_configs():
                 # Grad requires pad with interior/window dilation (not yet supported)
                 differentiable_argnums=(),
             ),
+            # Overlapping max pool: window=3, stride=1 (common in CNNs)
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, -jnp.inf, lax.max, (1, 3, 3, 1), (1, 1, 1, 1), "valid"
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="maxpool2d-overlapping",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
+            # Non-square window: 2x3 window
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, -jnp.inf, lax.max, (1, 2, 3, 1), (1, 2, 3, 1), "valid"
+                ),
+                lambda key: random.normal(key, (2, 8, 9, 3)),
+                name="maxpool2d-nonsquare",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
+            # Sum pool with SAME padding
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 0.0, lax.add, (1, 3, 3, 1), (1, 1, 1, 1), "same"
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="sumpool2d-same",
+            ),
+            # Average pool 2D (sum pool divided by window area)
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 0.0, lax.add, (1, 2, 2, 1), (1, 2, 2, 1), "valid"
+                )
+                / 4.0,
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="avgpool2d-valid",
+            ),
         ]
