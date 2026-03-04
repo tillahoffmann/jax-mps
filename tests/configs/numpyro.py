@@ -121,7 +121,10 @@ def make_numpyro_op_configs():
                         name="Categorical",
                     ),
                     marks=[
-                        xfail_match("Unsupported operation.+stablehlo.reduce_window")
+                        pytest.mark.xfail(
+                            reason="Batched gather bug (#60)",
+                            strict=False,
+                        )
                     ],
                 ),
                 NumpyroDistributionTestConfig(
@@ -156,7 +159,10 @@ def make_numpyro_op_configs():
                         name="Multinomial",
                     ),
                     marks=[
-                        xfail_match("Unsupported operation.+stablehlo.reduce_window")
+                        pytest.mark.xfail(
+                            reason="Batched gather bug (#60)",
+                            strict=False,
+                        )
                     ],
                 ),
                 # Additional continuous distributions.

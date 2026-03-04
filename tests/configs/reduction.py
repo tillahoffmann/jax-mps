@@ -83,7 +83,7 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8)),
                 name="maxpool1d-valid",
-                # Grad requires pad with interior dilation (not yet supported)
+                # Grad requires select_and_scatter (not yet supported)
                 differentiable_argnums=(),
             ),
             # Max pool 2D: window=(1,2,2,1), stride=(1,2,2,1) VALID
@@ -93,7 +93,7 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-valid",
-                # Grad requires pad with interior dilation (not yet supported)
+                # Grad requires select_and_scatter (not yet supported)
                 differentiable_argnums=(),
             ),
             # Sum pool 2D: window=(1,2,2,1), stride=(1,2,2,1) VALID
@@ -103,8 +103,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="sumpool2d-valid",
-                # Grad requires pad with interior dilation (not yet supported)
-                differentiable_argnums=(),
             ),
             # Max pool 2D SAME padding: window=(1,3,3,1), stride=(1,1,1,1)
             OperationTestConfig(
@@ -113,7 +111,7 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-same",
-                # Grad requires pad with interior dilation (not yet supported)
+                # Grad requires select_and_scatter (not yet supported)
                 differentiable_argnums=(),
             ),
             # Max pool 2D with window dilation: window=(1,2,2,1), stride=(1,1,1,1),
