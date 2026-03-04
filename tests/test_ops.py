@@ -25,6 +25,7 @@ from .configs import (
     make_slice_op_configs,
     make_sort_op_configs,
     make_unary_op_configs,
+    make_zero_sized_op_configs,
 )
 
 # Test mode configuration via environment variable:
@@ -62,6 +63,7 @@ OPERATION_TEST_CONFIGS = [
     *make_slice_op_configs(),
     *make_sort_op_configs(),
     *make_unary_op_configs(),
+    *make_zero_sized_op_configs(),
 ]
 
 

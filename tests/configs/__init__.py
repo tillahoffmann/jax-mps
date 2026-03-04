@@ -15,6 +15,7 @@ from .slice import make_slice_op_configs
 from .sort import make_sort_op_configs
 from .unary import make_unary_op_configs
 from .util import OperationTestConfig
+from .zero_sized import make_zero_sized_op_configs
 
 __all__ = [
     "OperationTestConfig",
@@ -34,4 +35,5 @@ __all__ = [
     "make_slice_op_configs",
     "make_sort_op_configs",
     "make_unary_op_configs",
+    "make_zero_sized_op_configs",
 ]
