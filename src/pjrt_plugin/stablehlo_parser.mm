@@ -22,6 +22,12 @@
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/dialect/VhloOps.h"
 
+// Forward declaration for StableHLO optimization pass
+// The header requires generated .inc files, so we declare the function directly
+namespace mlir::stablehlo {
+std::unique_ptr<mlir::Pass> createStablehloTargetIndependentOptimizationPass();
+}  // namespace mlir::stablehlo
+
 namespace mps {
 
 namespace {
@@ -49,6 +55,20 @@ void registerDialects(mlir::MLIRContext& context) {
     context.loadAllAvailableDialects();
     // Allow unknown dialects (e.g., sdy/Shardy for sharding) to pass through
     context.allowUnregisteredDialects();
+}
+
+// Run StableHLO optimization passes (algebraic simplification and constant folding)
+// This optimizes the IR before execution, e.g., x*1 -> x, x+0 -> x, x/x -> 1
+bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
+    mlir::PassManager pm(&context);
+    // Target-independent optimization combines aggressive simplification and folding
+    pm.addPass(mlir::stablehlo::createStablehloTargetIndependentOptimizationPass());
+
+    if (mlir::failed(pm.run(module))) {
+        // Optimization failures are non-fatal - we can still execute unoptimized IR
+        return false;
+    }
+    return true;
 }
 
 // Run the inliner pass to inline all func.call operations
@@ -113,6 +133,10 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
     if (!module) {
         return result;
     }
+
+    // Run StableHLO optimization passes (algebraic simplification, constant folding)
+    // This is non-fatal - we continue even if optimization fails
+    (void)runOptimizationPasses(*context, *module);
 
     // Run the inliner pass to inline all func.call operations
     if (!runInlinerPass(*context, *module)) {

@@ -252,10 +252,16 @@ print(re.sub(pattern, wrap, content, flags=re.DOTALL))
     echo "=== Installing StableHLO headers ==="
     mkdir -p "$PREFIX/include/stablehlo/dialect"
     mkdir -p "$PREFIX/include/stablehlo/api"
+    mkdir -p "$PREFIX/include/stablehlo/transforms"
+    mkdir -p "$PREFIX/include/stablehlo/transforms/optimization"
     cp "$STABLEHLO_DIR/stablehlo/dialect/"*.h "$PREFIX/include/stablehlo/dialect/"
     cp "$STABLEHLO_DIR/stablehlo/api/"*.h "$PREFIX/include/stablehlo/api/"
+    cp "$STABLEHLO_DIR/stablehlo/transforms/"*.h "$PREFIX/include/stablehlo/transforms/"
+    cp "$STABLEHLO_DIR/stablehlo/transforms/optimization/"*.h "$PREFIX/include/stablehlo/transforms/optimization/"
     # Copy generated tablegen headers
     cp "$STABLEHLO_BUILD_DIR/stablehlo/dialect/"*.inc "$PREFIX/include/stablehlo/dialect/" 2>/dev/null || true
+    cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/"*.inc "$PREFIX/include/stablehlo/transforms/" 2>/dev/null || true
+    cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/optimization/"*.inc "$PREFIX/include/stablehlo/transforms/optimization/" 2>/dev/null || true
 
     echo "StableHLO installed to $PREFIX"
 else
