@@ -278,6 +278,9 @@ static ProcessResult HandleSharding(HandlerContext& ctx) {
 REGISTER_CUSTOM_CALL("Sharding", HandleSharding, sharding);
 
 // Pad - add padding around tensor
+// Uses padTensor for edge padding (has correct MPS gradient support).
+// For interior padding, first applies interior padding via sliceUpdateDataTensor
+// (no edge padding at that stage), then applies edge padding via padTensor.
 static ProcessResult HandlePad(HandlerContext& ctx) {
     auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(ctx.op);
     if (!padOp) {
@@ -290,37 +293,105 @@ static ProcessResult HandlePad(HandlerContext& ctx) {
         return ProcessResult::Error("pad: missing input tensor");
 
     auto edgePaddingLow = padOp.getEdgePaddingLow();
+    auto edgePaddingHigh = padOp.getEdgePaddingHigh();
     auto interiorPadding = padOp.getInteriorPadding();
+    NSUInteger rank = edgePaddingLow.size();
 
-    // Get output shape and create a tensor filled with padding value
-    NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
-    MPSGraphTensor* padded = [ctx.graph broadcastTensor:paddingValue toShape:outputShape name:nil];
-
-    // Calculate starts, ends, and strides for sliceUpdate (where to place the input)
-    // Interior padding of N means N padding elements between each input element,
-    // which corresponds to a stride of N+1 in the output tensor.
-    NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
-    NSMutableArray<NSNumber*>* ends = [NSMutableArray array];
-    NSMutableArray<NSNumber*>* strides = [NSMutableArray array];
-
-    NSArray<NSNumber*>* inputShape = input.shape;
-    for (NSUInteger i = 0; i < edgePaddingLow.size(); i++) {
-        int64_t start = edgePaddingLow[i];
-        int64_t inputDim = [inputShape[i] longLongValue];
-        int64_t interior = interiorPadding[i];
-        int64_t stride = interior + 1;
-        [starts addObject:@(start)];
-        [ends addObject:@(start + (inputDim - 1) * stride + 1)];
-        [strides addObject:@(stride)];
+    bool hasInterior = false;
+    for (NSUInteger i = 0; i < rank; i++) {
+        if (interiorPadding[i] > 0) {
+            hasInterior = true;
+            break;
+        }
     }
 
-    // Use sliceUpdateDataTensor to insert input into the padded tensor
-    MPSGraphTensor* result = [ctx.graph sliceUpdateDataTensor:padded
-                                                 updateTensor:input
-                                                       starts:starts
-                                                         ends:ends
-                                                      strides:strides
-                                                         name:nil];
+    MPSGraphTensor* current = input;
+
+    if (hasInterior) {
+        // Apply interior padding only (no edge padding) using sliceUpdateDataTensor.
+        // The interior-expanded shape has no edge padding, so the slice update writes
+        // the full extent of the data tensor — avoiding the backward pass shape mismatch.
+        NSMutableArray<NSNumber*>* interiorShape = [NSMutableArray array];
+        NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
+        NSMutableArray<NSNumber*>* ends = [NSMutableArray array];
+        NSMutableArray<NSNumber*>* strides = [NSMutableArray array];
+
+        NSArray<NSNumber*>* inputShape = input.shape;
+        for (NSUInteger i = 0; i < rank; i++) {
+            int64_t inputDim = [inputShape[i] longLongValue];
+            int64_t interior = interiorPadding[i];
+            int64_t stride = interior + 1;
+            // Interior-only size: inputDim + (inputDim - 1) * interior
+            int64_t expandedDim = inputDim + (inputDim - 1) * interior;
+            [interiorShape addObject:@(expandedDim)];
+            [starts addObject:@0];
+            [ends addObject:@(expandedDim)];
+            [strides addObject:@(stride)];
+        }
+
+        MPSGraphTensor* interiorPadded = [ctx.graph broadcastTensor:paddingValue
+                                                            toShape:interiorShape
+                                                               name:nil];
+        current = [ctx.graph sliceUpdateDataTensor:interiorPadded
+                                      updateTensor:input
+                                            starts:starts
+                                              ends:ends
+                                           strides:strides
+                                              name:nil];
+    }
+
+    // Apply edge padding using padTensor (has correct MPS gradient support)
+    NSMutableArray<NSNumber*>* leftPad = [NSMutableArray array];
+    NSMutableArray<NSNumber*>* rightPad = [NSMutableArray array];
+    bool hasEdge = false;
+    for (NSUInteger i = 0; i < rank; i++) {
+        [leftPad addObject:@(edgePaddingLow[i])];
+        [rightPad addObject:@(edgePaddingHigh[i])];
+        if (edgePaddingLow[i] != 0 || edgePaddingHigh[i] != 0)
+            hasEdge = true;
+    }
+
+    MPSGraphTensor* result;
+    if (hasEdge) {
+        result = [ctx.graph padTensor:current
+                      withPaddingMode:MPSGraphPaddingModeConstant
+                          leftPadding:leftPad
+                         rightPadding:rightPad
+                        constantValue:0.0
+                                 name:nil];
+        // If constant value isn't 0, we need to fix up: fill padded regions with actual value.
+        // For the common case (padding with 0), this works directly.
+        // For non-zero padding, add: paddingValue * (result == 0 mask) — but stablehlo.pad
+        // with non-zero padding value is rare. Let's handle it by adding the padding value offset.
+        // Actually, padTensor always uses constantValue:0.0, so we need to add paddingValue to
+        // the padded regions. We do this by: result + paddingValue * (1 - mask), where mask is 1
+        // in the original data region and 0 in the padded region.
+        // Simpler approach: pad with 0, then add paddingValue to positions that should have it.
+        // The padded positions are where a zero-padded version of a ones tensor has zeros.
+        MPSGraphTensor* ones = [ctx.graph constantWithScalar:1.0
+                                                       shape:current.shape
+                                                    dataType:current.dataType];
+        MPSGraphTensor* mask = [ctx.graph padTensor:ones
+                                    withPaddingMode:MPSGraphPaddingModeConstant
+                                        leftPadding:leftPad
+                                       rightPadding:rightPad
+                                      constantValue:0.0
+                                               name:nil];
+        // result = result + paddingValue * (1 - mask)
+        MPSGraphTensor* invMask =
+            [ctx.graph subtractionWithPrimaryTensor:[ctx.graph constantWithScalar:1.0
+                                                                            shape:mask.shape
+                                                                         dataType:mask.dataType]
+                                    secondaryTensor:mask
+                                               name:nil];
+        MPSGraphTensor* padFill = [ctx.graph multiplicationWithPrimaryTensor:paddingValue
+                                                             secondaryTensor:invMask
+                                                                        name:nil];
+        result = [ctx.graph additionWithPrimaryTensor:result secondaryTensor:padFill name:nil];
+    } else {
+        result = current;
+    }
+
     return Result(ctx, result, "pad");
 }
 REGISTER_MPS_OP("stablehlo.pad", HandlePad);
