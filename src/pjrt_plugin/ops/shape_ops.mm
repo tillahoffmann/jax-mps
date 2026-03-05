@@ -359,35 +359,30 @@ static ProcessResult HandlePad(HandlerContext& ctx) {
                          rightPadding:rightPad
                         constantValue:0.0
                                  name:nil];
-        // If constant value isn't 0, we need to fix up: fill padded regions with actual value.
-        // For the common case (padding with 0), this works directly.
-        // For non-zero padding, add: paddingValue * (result == 0 mask) — but stablehlo.pad
-        // with non-zero padding value is rare. Let's handle it by adding the padding value offset.
-        // Actually, padTensor always uses constantValue:0.0, so we need to add paddingValue to
-        // the padded regions. We do this by: result + paddingValue * (1 - mask), where mask is 1
-        // in the original data region and 0 in the padded region.
-        // Simpler approach: pad with 0, then add paddingValue to positions that should have it.
-        // The padded positions are where a zero-padded version of a ones tensor has zeros.
+        // padTensor fills with 0; fix up padded regions with actual paddingValue.
+        // Build a bool mask (true in original data region, false in padded region)
+        // and use select to place paddingValue in the padded positions.
+        // This works for all types including bool (avoids arithmetic on booleans).
         MPSGraphTensor* ones = [ctx.graph constantWithScalar:1.0
                                                        shape:current.shape
-                                                    dataType:current.dataType];
+                                                    dataType:MPSDataTypeFloat32];
         MPSGraphTensor* mask = [ctx.graph padTensor:ones
                                     withPaddingMode:MPSGraphPaddingModeConstant
                                         leftPadding:leftPad
                                        rightPadding:rightPad
                                       constantValue:0.0
                                                name:nil];
-        // result = result + paddingValue * (1 - mask)
-        MPSGraphTensor* invMask =
-            [ctx.graph subtractionWithPrimaryTensor:[ctx.graph constantWithScalar:1.0
-                                                                            shape:mask.shape
-                                                                         dataType:mask.dataType]
-                                    secondaryTensor:mask
-                                               name:nil];
-        MPSGraphTensor* padFill = [ctx.graph multiplicationWithPrimaryTensor:paddingValue
-                                                             secondaryTensor:invMask
-                                                                        name:nil];
-        result = [ctx.graph additionWithPrimaryTensor:result secondaryTensor:padFill name:nil];
+        MPSGraphTensor* predicate = [ctx.graph castTensor:mask
+                                                   toType:MPSDataTypeBool
+                                                     name:@"pad_mask"];
+        // Where predicate is true (original data), keep result; otherwise use paddingValue
+        MPSGraphTensor* broadcastedPadVal = [ctx.graph broadcastTensor:paddingValue
+                                                               toShape:result.shape
+                                                                  name:nil];
+        result = [ctx.graph selectWithPredicateTensor:predicate
+                                  truePredicateTensor:result
+                                 falsePredicateTensor:broadcastedPadVal
+                                                 name:nil];
     } else {
         result = current;
     }

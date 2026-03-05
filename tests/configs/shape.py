@@ -66,4 +66,14 @@ def make_shape_op_configs():
                 lambda x: jax.lax.pad(x, 0.0, [(1, 1, 1), (0, 0, 2)]),
                 lambda key: random.normal(key, (3, 4)),
             ),
+            # Pad with non-zero padding value
+            OperationTestConfig(
+                lambda x: jax.lax.pad(x, 5.0, [(1, 1, 0), (2, 2, 0)]),
+                lambda key: random.normal(key, (3, 3)),
+            ),
+            # Pad with negative edge padding (cropping)
+            OperationTestConfig(
+                lambda x: jax.lax.pad(x, 0.0, [(-1, 0, 0), (0, -1, 0)]),
+                lambda key: random.normal(key, (4, 5)),
+            ),
         ]
