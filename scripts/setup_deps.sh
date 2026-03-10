@@ -215,6 +215,30 @@ else
     echo "=== LLVM/MLIR already installed ==="
 fi
 
+# StableHLO doesn't install headers by default, do it manually.
+# This is a function so it can run both on fresh builds and cached installs.
+install_stablehlo_headers() {
+    if [ ! -d "$STABLEHLO_DIR" ]; then
+        echo "WARNING: StableHLO source not available, skipping header install"
+        return
+    fi
+    echo "=== Installing StableHLO headers ==="
+    mkdir -p "$PREFIX/include/stablehlo/dialect"
+    mkdir -p "$PREFIX/include/stablehlo/api"
+    mkdir -p "$PREFIX/include/stablehlo/transforms"
+    mkdir -p "$PREFIX/include/stablehlo/transforms/optimization"
+    cp "$STABLEHLO_DIR/stablehlo/dialect/"*.h "$PREFIX/include/stablehlo/dialect/"
+    cp "$STABLEHLO_DIR/stablehlo/api/"*.h "$PREFIX/include/stablehlo/api/"
+    cp "$STABLEHLO_DIR/stablehlo/transforms/"*.h "$PREFIX/include/stablehlo/transforms/"
+    cp "$STABLEHLO_DIR/stablehlo/transforms/optimization/"*.h "$PREFIX/include/stablehlo/transforms/optimization/"
+    # Copy generated tablegen headers (only available after a build)
+    if [ -d "$STABLEHLO_BUILD_DIR" ]; then
+        cp "$STABLEHLO_BUILD_DIR/stablehlo/dialect/"*.inc "$PREFIX/include/stablehlo/dialect/" 2>/dev/null || true
+        cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/"*.inc "$PREFIX/include/stablehlo/transforms/" 2>/dev/null || true
+        cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/optimization/"*.inc "$PREFIX/include/stablehlo/transforms/optimization/" 2>/dev/null || true
+    fi
+}
+
 # Build StableHLO
 STABLEHLO_BUILD_DIR="$BUILD_DIR/stablehlo-build"
 if [ ! -f "$PREFIX/lib/libStablehloOps.a" ]; then
@@ -248,24 +272,13 @@ print(re.sub(pattern, wrap, content, flags=re.DOTALL))
     cmake --build "$STABLEHLO_BUILD_DIR" -j "$JOBS"
     cmake --install "$STABLEHLO_BUILD_DIR"
 
-    # StableHLO doesn't install headers by default, do it manually
-    echo "=== Installing StableHLO headers ==="
-    mkdir -p "$PREFIX/include/stablehlo/dialect"
-    mkdir -p "$PREFIX/include/stablehlo/api"
-    mkdir -p "$PREFIX/include/stablehlo/transforms"
-    mkdir -p "$PREFIX/include/stablehlo/transforms/optimization"
-    cp "$STABLEHLO_DIR/stablehlo/dialect/"*.h "$PREFIX/include/stablehlo/dialect/"
-    cp "$STABLEHLO_DIR/stablehlo/api/"*.h "$PREFIX/include/stablehlo/api/"
-    cp "$STABLEHLO_DIR/stablehlo/transforms/"*.h "$PREFIX/include/stablehlo/transforms/"
-    cp "$STABLEHLO_DIR/stablehlo/transforms/optimization/"*.h "$PREFIX/include/stablehlo/transforms/optimization/"
-    # Copy generated tablegen headers
-    cp "$STABLEHLO_BUILD_DIR/stablehlo/dialect/"*.inc "$PREFIX/include/stablehlo/dialect/" 2>/dev/null || true
-    cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/"*.inc "$PREFIX/include/stablehlo/transforms/" 2>/dev/null || true
-    cp "$STABLEHLO_BUILD_DIR/stablehlo/transforms/optimization/"*.inc "$PREFIX/include/stablehlo/transforms/optimization/" 2>/dev/null || true
+    install_stablehlo_headers
 
     echo "StableHLO installed to $PREFIX"
 else
     echo "=== StableHLO already installed ==="
+    # Ensure headers are up-to-date even when the library is cached
+    install_stablehlo_headers
 fi
 
 # Install XLA PJRT headers (only the C API header is needed)
