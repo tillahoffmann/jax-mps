@@ -498,14 +498,36 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
         return false;
     }
     // stablehlo.remainder is C-style fmod: a - trunc(a/b) * b
-    // trunc(x) = sign(x) * floor(abs(x))
     auto& a = lhs_opt->get();
     auto& b = rhs_opt->get();
-    auto quotient = mlx::core::divide(a, b);
-    auto truncated =
-        mlx::core::multiply(mlx::core::sign(quotient), mlx::core::floor(mlx::core::abs(quotient)));
-    auto result = mlx::core::subtract(a, mlx::core::multiply(truncated, b));
-    values.emplace(ToKey(op->getResult(0)), result);
+
+    auto dtype = a.dtype();
+    bool isUnsigned = (dtype == mlx::core::uint8 || dtype == mlx::core::uint16 ||
+                       dtype == mlx::core::uint32 || dtype == mlx::core::uint64);
+    bool isSigned = (dtype == mlx::core::int8 || dtype == mlx::core::int16 ||
+                     dtype == mlx::core::int32 || dtype == mlx::core::int64);
+
+    mlx::core::array result(0);
+    if (isUnsigned) {
+        // For unsigned integers, Python-style remainder == C-style remainder
+        result = mlx::core::remainder(a, b);
+    } else if (isSigned) {
+        // For signed integers, Python remainder (rounds toward -inf) needs correction
+        // to C-style remainder (truncates toward zero)
+        auto py_rem = mlx::core::remainder(a, b);
+        // Correction needed when a and b have different signs and py_rem != 0
+        auto zero = mlx::core::zeros_like(a);
+        auto diff_sign = mlx::core::not_equal(mlx::core::less(a, zero), mlx::core::less(b, zero));
+        auto needs_fix = mlx::core::logical_and(mlx::core::not_equal(py_rem, zero), diff_sign);
+        result = mlx::core::where(needs_fix, mlx::core::subtract(py_rem, b), py_rem);
+    } else {
+        // For float types, trunc(x) = sign(x) * floor(abs(x))
+        auto quotient = mlx::core::divide(a, b);
+        auto truncated = mlx::core::multiply(mlx::core::sign(quotient),
+                                             mlx::core::floor(mlx::core::abs(quotient)));
+        result = mlx::core::subtract(a, mlx::core::multiply(truncated, b));
+    }
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }
 
@@ -615,8 +637,21 @@ bool HandleShiftRightArithmetic(mlir::Operation* op, ValueMap& values,
         MPS_LOG_ERROR("stablehlo.shift_right_arithmetic: operand not found in value map\n");
         return false;
     }
-    // MLX right_shift is arithmetic for signed types
-    values.emplace(ToKey(op->getResult(0)), mlx::core::right_shift(lhs_opt->get(), rhs_opt->get()));
+    auto& lhs = lhs_opt->get();
+    auto& rhs = rhs_opt->get();
+    // StableHLO spec: shift < 0 or shift >= bit_width for arithmetic right shift:
+    // positive values → 0, negative values → -1 (sign bit propagation)
+    int bit_width = static_cast<int>(GetDtypeSize(lhs.dtype()) * 8);
+    auto oob = mlx::core::logical_or(
+        mlx::core::less(rhs, mlx::core::array(0, rhs.dtype())),
+        mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype())));
+    auto shifted =
+        mlx::core::right_shift(lhs, mlx::core::maximum(rhs, mlx::core::array(0, rhs.dtype())));
+    // For arithmetic shift, oob result depends on sign: 0 for positive, -1 for negative
+    auto oob_val =
+        mlx::core::where(mlx::core::less(lhs, mlx::core::array(0, lhs.dtype())),
+                         mlx::core::full(lhs.shape(), -1, lhs.dtype()), mlx::core::zeros_like(lhs));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(oob, oob_val, shifted));
     return true;
 }
 
@@ -630,9 +665,26 @@ bool HandlePopcount(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
     }
     auto& x = input_opt->get();
     // Implement popcount using bit manipulation for integer types
-    // Use the parallel bit count algorithm
     auto dtype = x.dtype();
-    auto val = mlx::core::astype(x, mlx::core::uint32);
+
+    // Determine bit width for masking after uint32 cast
+    size_t bit_width = GetDtypeSize(dtype) * 8;
+
+    // For signed types, first cast to unsigned of same width to avoid sign extension
+    mlx::core::array val = x;
+    if (dtype == mlx::core::int8) {
+        val = mlx::core::astype(val, mlx::core::uint8);
+    } else if (dtype == mlx::core::int16) {
+        val = mlx::core::astype(val, mlx::core::uint16);
+    }
+    val = mlx::core::astype(val, mlx::core::uint32);
+
+    // Mask to original bit width to ensure upper bits are zero
+    if (bit_width < 32) {
+        uint32_t mask = (1U << bit_width) - 1;
+        val = mlx::core::bitwise_and(val, mlx::core::array(mask, mlx::core::uint32));
+    }
+
     // Standard Hamming weight algorithm
     auto m1 = mlx::core::array(0x55555555U, mlx::core::uint32);
     auto m2 = mlx::core::array(0x33333333U, mlx::core::uint32);
@@ -801,6 +853,85 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             auto expectedShape = GetShape(resultType);
             auto actualShape = result.shape();
             if (actualShape != expectedShape) {
+                result = mlx::core::reshape(result, expectedShape);
+            }
+        }
+
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Multi-dim gather: all dims collapsed (full index gather)
+    // This handles patterns like operand[idx[0], idx[1], ..., idx[N-1]]
+    // where indexVectorDim points to the axis containing per-dim indices
+    if (startIndexMap.size() == collapsedSliceDims.size() && startIndexMap.size() > 1) {
+        // Extract per-axis indices by slicing along the index vector dim
+        auto indices = startIndices;
+
+        // Determine batch shape (all dims except indexVectorDim)
+        auto idxShape = indices.shape();
+
+        // Build per-axis index arrays
+        std::vector<mlx::core::array> idxVec;
+        std::vector<int> axes;
+        for (size_t i = 0; i < startIndexMap.size(); ++i) {
+            int axis = static_cast<int>(startIndexMap[i]);
+            axes.push_back(axis);
+
+            // Slice the index vector dim to get indices for this axis
+            mlx::core::Shape starts(indices.ndim(), 0);
+            mlx::core::Shape stops(idxShape.begin(), idxShape.end());
+            starts[indexVectorDim] = static_cast<int>(i);
+            stops[indexVectorDim] = static_cast<int>(i) + 1;
+            auto axisIndices =
+                mlx::core::squeeze(mlx::core::slice(indices, starts, stops), {indexVectorDim});
+            if (axisIndices.dtype() != mlx::core::int32) {
+                axisIndices = mlx::core::astype(axisIndices, mlx::core::int32);
+            }
+            idxVec.push_back(axisIndices);
+        }
+
+        // Use gather to extract values at the specified indices
+        // For full-index gather, each index set picks a single scalar from operand
+        // We need operand[idx0, idx1, ...] which is gather with all axes
+        auto result = operand;
+        // Apply takes sequentially for each axis
+        // Actually use the multi-axis indexing: reshape indices for advanced indexing
+        // For a scalar gather: idxVec has N scalar arrays, just do nested take
+        // For batched gather: each idxVec[i] has the same batch shape
+
+        // MLX doesn't have a multi-axis gather directly, but we can use
+        // sequential take_along_axis or flatten + single gather
+        // Flatten the operand and compute linear indices
+        auto flatOperand = mlx::core::flatten(operand);
+        auto linearIdx = idxVec[0];
+        // Clamp indices to valid range
+        for (size_t i = 0; i < axes.size(); ++i) {
+            auto clamped =
+                mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
+                                mlx::core::array(operand.shape(axes[i]) - 1, mlx::core::int32));
+            idxVec[i] = clamped;
+        }
+        // Compute linear index: idx[0] * stride[0] + idx[1] * stride[1] + ...
+        linearIdx = mlx::core::array(0, mlx::core::int32);
+        for (size_t i = 0; i < axes.size(); ++i) {
+            // Compute stride for this axis
+            int stride = 1;
+            for (int d = axes[i] + 1; d < operand.ndim(); ++d) {
+                stride *= operand.shape(d);
+            }
+            linearIdx = mlx::core::add(
+                linearIdx,
+                mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
+        }
+
+        result = mlx::core::take(flatOperand, linearIdx, 0);
+
+        // Reshape to expected output shape
+        auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        if (resultType) {
+            auto expectedShape = GetShape(resultType);
+            if (result.shape() != expectedShape) {
                 result = mlx::core::reshape(result, expectedShape);
             }
         }
@@ -1007,13 +1138,15 @@ bool HandleShiftRightLogical(mlir::Operation* op, ValueMap& values,
     auto& lhs = lhs_opt->get();
     auto& rhs = rhs_opt->get();
 
-    // StableHLO spec: shift >= bit_width gives 0 for logical right shift
-    // MLX may use shift % bit_width, so we need to handle this case
+    // StableHLO spec: shift < 0 or shift >= bit_width gives 0 for logical right shift
     int bit_width = static_cast<int>(GetDtypeSize(lhs.dtype()) * 8);
     auto zero = mlx::core::zeros_like(lhs);
-    auto mask = mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype()));
-    auto shifted = mlx::core::right_shift(lhs, rhs);
-    values.emplace(ToKey(op->getResult(0)), mlx::core::where(mask, zero, shifted));
+    auto oob = mlx::core::logical_or(
+        mlx::core::less(rhs, mlx::core::array(0, rhs.dtype())),
+        mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype())));
+    auto shifted =
+        mlx::core::right_shift(lhs, mlx::core::maximum(rhs, mlx::core::array(0, rhs.dtype())));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(oob, zero, shifted));
     return true;
 }
 
@@ -1068,12 +1201,15 @@ bool HandleShiftLeft(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     auto& lhs = lhs_opt->get();
     auto& rhs = rhs_opt->get();
 
-    // StableHLO spec: shift >= bit_width gives 0 for left shift
+    // StableHLO spec: shift < 0 or shift >= bit_width gives 0 for left shift
     int bit_width = static_cast<int>(GetDtypeSize(lhs.dtype()) * 8);
     auto zero = mlx::core::zeros_like(lhs);
-    auto mask = mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype()));
-    auto shifted = mlx::core::left_shift(lhs, rhs);
-    values.emplace(ToKey(op->getResult(0)), mlx::core::where(mask, zero, shifted));
+    auto oob = mlx::core::logical_or(
+        mlx::core::less(rhs, mlx::core::array(0, rhs.dtype())),
+        mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype())));
+    auto shifted =
+        mlx::core::left_shift(lhs, mlx::core::maximum(rhs, mlx::core::array(0, rhs.dtype())));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(oob, zero, shifted));
     return true;
 }
 
@@ -1570,7 +1706,13 @@ bool HandleReverse(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         }
     }
 
-    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(input, starts, stops, steps));
+    auto result = mlx::core::slice(input, starts, stops, steps);
+    // Force contiguous for complex types - MLX's non-contiguous views (from negative strides)
+    // can produce incorrect results for complex arrays in subsequent operations
+    if (result.dtype() == mlx::core::complex64) {
+        result = mlx::core::contiguous(result);
+    }
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }
 
@@ -2237,17 +2379,19 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         int k = static_cast<int>(resultType.getShape().back());
         int axis = static_cast<int>(input_opt->get().ndim()) - 1;  // topk always on last axis
 
-        // Use argsort descending (negate + argsort), take first k
-        auto negated = mlx::core::negative(input_opt->get());
-        auto indices = mlx::core::argsort(negated, axis);
+        // Use negate + argsort for descending order, then take first k
+        // Ensure input is contiguous (transposed views can cause incorrect argsort)
+        auto input = mlx::core::contiguous(input_opt->get());
+        auto negated = mlx::core::negative(input);
+        auto sortedIndices = mlx::core::argsort(negated, axis);
 
-        // Slice first k along the last axis
-        mlx::core::Shape starts(indices.ndim(), 0);
-        mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
+        // Slice first k along the axis
+        mlx::core::Shape starts(sortedIndices.ndim(), 0);
+        mlx::core::Shape stops(sortedIndices.shape().begin(), sortedIndices.shape().end());
         stops[axis] = k;
-        indices = mlx::core::slice(indices, starts, stops);
+        auto indices = mlx::core::slice(sortedIndices, starts, stops);
 
-        auto topValues = mlx::core::take_along_axis(input_opt->get(), indices, axis);
+        auto topValues = mlx::core::take_along_axis(input, indices, axis);
         values.emplace(ToKey(op->getResult(0)), std::move(topValues));
         values.emplace(ToKey(op->getResult(1)), mlx::core::astype(indices, mlx::core::int32));
         return true;
@@ -2360,12 +2504,11 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
             result = mlx::core::slice(result, starts, stops, steps);
         }
         values.emplace(ToKey(op->getResult(0)), std::move(result));
-    } else if (numInputs == 2) {
-        // Sort-by-key: sort first input, apply same permutation to second
+    } else {
+        // Sort-by-key: sort first input, apply same permutation to all others
         auto keys_opt = GetValue(values, sortOp.getInputs()[0]);
-        auto vals_opt = GetValue(values, sortOp.getInputs()[1]);
-        if (!keys_opt || !vals_opt) {
-            MPS_LOG_ERROR("stablehlo.sort: inputs not found\n");
+        if (!keys_opt) {
+            MPS_LOG_ERROR("stablehlo.sort: keys not found\n");
             return false;
         }
 
@@ -2373,20 +2516,23 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         auto sortKeys = ascending ? keys_opt->get() : mlx::core::negative(keys_opt->get());
         auto indices = mlx::core::argsort(sortKeys, dimension);
 
-        auto sortedKeys = mlx::core::take_along_axis(keys_opt->get(), indices, dimension);
-        auto sortedVals = mlx::core::take_along_axis(vals_opt->get(), indices, dimension);
-        values.emplace(ToKey(op->getResult(0)), std::move(sortedKeys));
-        values.emplace(ToKey(op->getResult(1)), std::move(sortedVals));
-    } else {
-        MPS_LOG_ERROR("stablehlo.sort: unsupported number of inputs: %zu\n", numInputs);
-        return false;
+        // Apply permutation to all inputs
+        for (size_t i = 0; i < numInputs; ++i) {
+            auto input_opt = GetValue(values, sortOp.getInputs()[i]);
+            if (!input_opt) {
+                MPS_LOG_ERROR("stablehlo.sort: input %zu not found\n", i);
+                return false;
+            }
+            auto sorted = mlx::core::take_along_axis(input_opt->get(), indices, dimension);
+            values.emplace(ToKey(op->getResult(i)), std::move(sorted));
+        }
     }
 
     return true;
 }
 
 // Detect scatter update type from the body region
-enum class ScatterType { Update, Add, Mul, Min, Max, Unknown };
+enum class ScatterType { Update, Add, Sub, Mul, Min, Max, Unknown };
 
 ScatterType DetectScatterType(mlir::Region& body) {
     if (body.empty())
@@ -2409,6 +2555,8 @@ ScatterType DetectScatterType(mlir::Region& body) {
         }
         if (opName == "stablehlo.add")
             return ScatterType::Add;
+        if (opName == "stablehlo.subtract")
+            return ScatterType::Sub;
         if (opName == "stablehlo.multiply")
             return ScatterType::Mul;
         if (opName == "stablehlo.minimum")
@@ -2537,6 +2685,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             case ScatterType::Add:
                 result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axes);
                 break;
+            case ScatterType::Sub:
+                result = mlx::core::scatter_add(operand, idxVec,
+                                                mlx::core::negative(reshapedUpdates), axes);
+                break;
             case ScatterType::Mul:
                 result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axes);
                 break;
@@ -2628,6 +2780,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             case ScatterType::Add:
                 result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
                 break;
+            case ScatterType::Sub:
+                result = mlx::core::scatter_add(operand, idxVec,
+                                                mlx::core::negative(reshapedUpdates), axesVec);
+                break;
             case ScatterType::Mul:
                 result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
                 break;
@@ -2689,6 +2845,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                 break;
             case ScatterType::Add:
                 result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Sub:
+                result = mlx::core::scatter_add(operand, idxVec,
+                                                mlx::core::negative(reshapedUpdates), axesVec);
                 break;
             case ScatterType::Mul:
                 result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);

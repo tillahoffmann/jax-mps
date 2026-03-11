@@ -229,7 +229,12 @@ def make_control_flow_op_configs():
                     ),
                     (numpy.int32(0), init),
                 )[1],
-                lambda key: random.normal(key, (4, 8)),
+                # Use deterministic numpy input so both platforms start from identical data
+                # (random generation on different devices can produce slightly different
+                # float32 values, and 3 iterations of cumulative sum compounds the error).
+                numpy.random.default_rng(42)
+                .standard_normal((4, 8))
+                .astype(numpy.float32),
                 differentiable_argnums=(),
                 name="lax.while_loop.axis1",
             ),
@@ -307,7 +312,9 @@ def make_control_flow_op_configs():
                     ),
                     (numpy.int32(0), init),
                 )[1],
-                lambda key: random.normal(key, (4, 8)),
+                numpy.random.default_rng(42)
+                .standard_normal((4, 8))
+                .astype(numpy.float32),
                 differentiable_argnums=(),
                 name="lax.while_loop.nested_axis1",
             ),
