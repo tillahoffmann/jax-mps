@@ -190,28 +190,42 @@ def assert_all_ops_tested():
     if TEST_MODE == "cpu":
         return
 
-    ops_dir = Path(__file__).parent.parent / "src/pjrt_plugin/ops"
-    assert ops_dir.is_dir()
+    pjrt_dir = Path(__file__).parent.parent / "src/pjrt_plugin"
+    assert pjrt_dir.is_dir()
 
-    # Patterns matching op registration calls
-    patterns = [
-        re.compile(r'REGISTER_MPS_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_NATIVE_MPS_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_MLIR_BINARY_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_MLIR_UNARY_OP\("([^"]+)"'),
-        re.compile(r'REGISTER_LOGICAL_BITWISE_OP\("([^"]+)"'),
-    ]
+    # Ops that appear in StableHLO IR but get lowered by MLIR/StableHLO
+    # optimization passes before reaching our handlers.
+    mlir_lowered_ops = {
+        "chlo.lgamma",
+        "chlo.digamma",
+        "chlo.bessel_i1e",
+        # CHLO ops lowered to StableHLO by optimization passes
+        "chlo.acos",
+        "chlo.acosh",
+        "chlo.asin",
+        "chlo.asinh",
+        "chlo.atanh",
+        "chlo.cosh",
+        "chlo.erf",
+        "chlo.erf_inv",
+        "chlo.next_after",
+        "chlo.sinh",
+        "chlo.square",
+        "chlo.top_k",
+        # StableHLO ops lowered to more primitive ops
+        "stablehlo.broadcast",
+        "stablehlo.dot",
+        "stablehlo.erf",
+    }
 
-    # Ops that appear in StableHLO IR but get lowered by MLIR before reaching
-    # our handlers. They work but don't need explicit registration.
-    mlir_lowered_ops = {"chlo.lgamma", "chlo.digamma", "chlo.bessel_i1e"}
-
+    # Discover ops from the dispatch table in mlx_executable.mm
+    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)"')
     op_names = set()
-    for mm_file in ops_dir.glob("*.mm"):
-        with mm_file.open() as fp:
-            content = fp.read()
-            for pattern in patterns:
-                op_names.update(pattern.findall(content))
+    executable_file = pjrt_dir / "mlx_executable.mm"
+    assert executable_file.is_file()
+    with executable_file.open() as fp:
+        content = fp.read()
+        op_names.update(dispatch_pattern.findall(content))
 
     assert op_names, "Failed to discover any ops."
     exercised = OperationTestConfig.EXERCISED_STABLEHLO_OPS - mlir_lowered_ops

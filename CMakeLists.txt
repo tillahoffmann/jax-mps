@@ -120,8 +120,13 @@ FetchContent_Declare(
     mlx
     GIT_REPOSITORY https://github.com/ml-explore/mlx.git
     GIT_TAG v0.30.0
+    PATCH_COMMAND git checkout -- . && git clean -fd && git apply --verbose
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx/patches/01-linalg-gpu-support.patch
 )
 FetchContent_MakeAvailable(mlx)
+
+# Link MetalPerformanceShaders to MLX for our GPU linalg patch.
+target_link_libraries(mlx PRIVATE ${MPS_FRAMEWORK})
 
 # Source files
 set(PJRT_SOURCES

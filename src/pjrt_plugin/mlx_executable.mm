@@ -2968,6 +2968,101 @@ bool HandleImag(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
     return true;
 }
 
+// Handler for stablehlo.cholesky
+bool HandleCholesky(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                    ExecContext& ctx) {
+    auto cholOp = mlir::dyn_cast<mlir::stablehlo::CholeskyOp>(op);
+    if (!cholOp) {
+        MPS_LOG_ERROR("stablehlo.cholesky: failed to cast\n");
+        return false;
+    }
+    auto input_opt = GetValue(values, cholOp.getA());
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.cholesky: operand not found in value map\n");
+        return false;
+    }
+    auto& a = input_opt->get();
+    bool lower = cholOp.getLower();
+    // MLX cholesky uses upper=!lower convention
+    auto result = mlx::core::linalg::cholesky(a, /*upper=*/!lower);
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
+// Handler for stablehlo.triangular_solve
+bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
+                           std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto triSolveOp = mlir::dyn_cast<mlir::stablehlo::TriangularSolveOp>(op);
+    if (!triSolveOp) {
+        MPS_LOG_ERROR("stablehlo.triangular_solve: failed to cast\n");
+        return false;
+    }
+    auto a_opt = GetValue(values, triSolveOp.getA());
+    auto b_opt = GetValue(values, triSolveOp.getB());
+    if (!a_opt || !b_opt) {
+        MPS_LOG_ERROR("stablehlo.triangular_solve: operand not found in value map\n");
+        return false;
+    }
+    auto& a = a_opt->get();
+    auto& b = b_opt->get();
+
+    bool left_side = triSolveOp.getLeftSide();
+    bool lower = triSolveOp.getLower();
+    bool unit_diagonal = triSolveOp.getUnitDiagonal();
+    auto transpose = triSolveOp.getTransposeA();
+
+    auto a_solve = a;
+    auto b_solve = b;
+
+    if (unit_diagonal) {
+        // Replace diagonal with 1s: zero out diagonal, add identity.
+        int n = a_solve.shape()[a_solve.ndim() - 1];
+        auto eye = mlx::core::eye(n, a_solve.dtype());
+        a_solve = a_solve * (1.0F - eye) + eye;
+    }
+
+    if (transpose == mlir::stablehlo::Transpose::TRANSPOSE ||
+        transpose == mlir::stablehlo::Transpose::ADJOINT) {
+        // Transpose A: swap last two dimensions.
+        auto ndim = a_solve.ndim();
+        std::vector<int> perm(ndim);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::swap(perm[ndim - 2], perm[ndim - 1]);
+        a_solve = mlx::core::transpose(a_solve, perm);
+        // Transposing flips lower/upper
+        lower = !lower;
+    }
+
+    if (!left_side) {
+        // Right-side solve: X * A = B
+        // Equivalent to: A^T * X^T = B^T (left-side solve)
+        auto ndim_a = a_solve.ndim();
+        std::vector<int> perm_a(ndim_a);
+        std::iota(perm_a.begin(), perm_a.end(), 0);
+        std::swap(perm_a[ndim_a - 2], perm_a[ndim_a - 1]);
+        a_solve = mlx::core::transpose(a_solve, perm_a);
+        lower = !lower;
+
+        auto ndim_b = b_solve.ndim();
+        std::vector<int> perm_b(ndim_b);
+        std::iota(perm_b.begin(), perm_b.end(), 0);
+        std::swap(perm_b[ndim_b - 2], perm_b[ndim_b - 1]);
+        b_solve = mlx::core::transpose(b_solve, perm_b);
+
+        auto x_t = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
+                                                       mlx::core::Device::cpu);
+        auto result = mlx::core::transpose(x_t, perm_b);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // MLX solve_triangular uses upper=!lower
+    auto result = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
+                                                      mlx::core::Device::cpu);
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
 // Op dispatch table - initialized once
 const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
     static const std::unordered_map<std::string, OpHandler> handlers = {
@@ -3031,6 +3126,8 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         // Linear algebra
         {"stablehlo.dot_general", HandleDotGeneral},
         {"stablehlo.convolution", HandleConvolution},
+        {"stablehlo.cholesky", HandleCholesky},
+        {"stablehlo.triangular_solve", HandleTriangularSolve},
         // Reduction
         {"stablehlo.reduce", HandleReduce},
         // Control flow

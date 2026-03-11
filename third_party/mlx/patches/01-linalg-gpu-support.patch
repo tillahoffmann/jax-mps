@@ -1,0 +1,124 @@
+diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
+index 11197570..658e1226 100644
+--- a/mlx/backend/metal/CMakeLists.txt
++++ b/mlx/backend/metal/CMakeLists.txt
+@@ -99,6 +99,7 @@ target_sources(
+           ${CMAKE_CURRENT_SOURCE_DIR}/fft.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/indexing.cpp
++          ${CMAKE_CURRENT_SOURCE_DIR}/linalg.mm
+           ${CMAKE_CURRENT_SOURCE_DIR}/logsumexp.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/matmul.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/scaled_dot_product_attention.cpp
+diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
+new file mode 100644
+index 00000000..b791d82d
+--- /dev/null
++++ b/mlx/backend/metal/linalg.mm
+@@ -0,0 +1,78 @@
++// GPU implementation of Cholesky using Metal Performance Shaders.
++
++#include "mlx/backend/gpu/copy.h"
++#include "mlx/backend/metal/device.h"
++#include "mlx/primitives.h"
++
++#import <Metal/Metal.h>
++#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
++
++namespace mlx::core {
++
++void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
++  const auto& a = inputs[0];
++
++  if (a.dtype() != float32) {
++    throw std::runtime_error(
++        "[Cholesky::eval_gpu] Only float32 is supported.");
++  }
++
++  // Copy input to output through the compute encoder.
++  copy_gpu(
++      a,
++      out,
++      a.flags().row_contiguous ? CopyType::Vector : CopyType::General);
++
++  int N = a.shape(-1);
++  if (N == 0) {
++    return;
++  }
++  size_t num_matrices = a.size() / (N * N);
++
++  auto& s = stream();
++  auto& d = metal::device(s.device);
++
++  // End the current compute encoder so we can encode MPS operations
++  // directly on the command buffer.
++  d.end_encoding(s.index);
++  auto* cb = d.get_command_buffer(s.index);
++  id<MTLCommandBuffer> cmd_buf =
++      (__bridge id<MTLCommandBuffer>)cb;
++  id<MTLDevice> mtl_dev =
++      (__bridge id<MTLDevice>)d.mtl_device();
++
++  BOOL lower = upper_ ? NO : YES;
++
++  for (size_t i = 0; i < num_matrices; i++) {
++    int64_t mat_offset = i * N * N;
++    id<MTLBuffer> buf =
++        (__bridge id<MTLBuffer>)(const_cast<void*>(out.buffer().ptr()));
++    size_t elem_size = out.itemsize();
++    size_t row_bytes = N * elem_size;
++    size_t byte_offset = (out.offset() + mat_offset) * elem_size;
++
++    MPSMatrixDescriptor* desc = [MPSMatrixDescriptor
++        matrixDescriptorWithRows:(NSUInteger)N
++                         columns:(NSUInteger)N
++                        rowBytes:row_bytes
++                        dataType:MPSDataTypeFloat32];
++
++    MPSMatrix* src_mat = [[MPSMatrix alloc] initWithBuffer:buf
++                                                    offset:byte_offset
++                                                descriptor:desc];
++    MPSMatrix* dst_mat = [[MPSMatrix alloc] initWithBuffer:buf
++                                                    offset:byte_offset
++                                                descriptor:desc];
++
++    MPSMatrixDecompositionCholesky* cholesky =
++        [[MPSMatrixDecompositionCholesky alloc] initWithDevice:mtl_dev
++                                                        lower:lower
++                                                        order:(NSUInteger)N];
++    [cholesky encodeToCommandBuffer:cmd_buf
++                       sourceMatrix:src_mat
++                       resultMatrix:dst_mat
++                             status:nil];
++  }
++}
++
++} // namespace mlx::core
+diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
+index 5f6376c5..1969adab 100644
+--- a/mlx/backend/metal/primitives.cpp
++++ b/mlx/backend/metal/primitives.cpp
+@@ -216,10 +216,7 @@ void Inverse::eval_gpu(const std::vector<array>& inputs, array& output) {
+   throw std::runtime_error("[Inverse::eval_gpu] Metal inversion NYI.");
+ }
+ 
+-void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
+-  throw std::runtime_error(
+-      "[Cholesky::eval_gpu] Metal Cholesky decomposition NYI.");
+-}
++// Cholesky::eval_gpu is in linalg.mm
+ 
+ void Eig::eval_gpu(
+     const std::vector<array>& inputs,
+diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
+index afa8e447..6a61d1cf 100644
+--- a/mlx/linalg.cpp
++++ b/mlx/linalg.cpp
+@@ -329,7 +329,6 @@ array cholesky(
+     const array& a,
+     bool upper /* = false */,
+     StreamOrDevice s /* = {} */) {
+-  check_cpu_stream(s, "[linalg::cholesky]");
+   check_float(a.dtype(), "[linalg::cholesky]");
+   if (a.ndim() < 2) {
+     std::ostringstream msg;
