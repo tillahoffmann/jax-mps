@@ -3,6 +3,9 @@
 
 #include "pjrt_plugin/stablehlo_parser.h"
 
+#import <Foundation/Foundation.h>
+
+#include <cstdlib>
 #include <unordered_set>
 
 #include "llvm/Support/MemoryBuffer.h"
@@ -21,6 +24,7 @@
 #include "stablehlo/dialect/Serialization.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/dialect/VhloOps.h"
+#include "stablehlo/transforms/optimization/Passes.h"
 
 namespace mps {
 
@@ -49,6 +53,34 @@ void registerDialects(mlir::MLIRContext& context) {
     context.loadAllAvailableDialects();
     // Allow unknown dialects (e.g., sdy/Shardy for sharding) to pass through
     context.allowUnregisteredDialects();
+}
+
+// Run StableHLO algebraic simplification passes (x*1 -> x, x+0 -> x, etc.)
+// Disable by setting JAX_MPS_NO_OPTIMIZE=1 if you encounter issues.
+bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
+    static const bool disabled = [] {
+        const char* env = std::getenv("JAX_MPS_NO_OPTIMIZE");
+        return env && std::string(env) == "1";
+    }();
+    if (disabled)
+        return true;
+
+    mlir::PassManager pm(&context);
+    // Algebraic simplification: x*1 -> x, x+0 -> x, etc.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        mlir::stablehlo::createStablehloAggressiveSimplificationPass());
+    // NOTE: The aggressive folder pass (constant folding) is intentionally excluded.
+    // It causes execution hangs with certain patterns (e.g., cholesky gradient in eager
+    // mode) due to folded broadcast_in_dim+constant patterns that create issues in the
+    // MPS Graph while-loop execution.
+
+    if (mlir::failed(pm.run(module))) {
+        NSLog(@"ERROR: StableHLO optimization pass failed. The module may be in a partially "
+              @"transformed state. Set JAX_MPS_NO_OPTIMIZE=1 to skip optimization passes.");
+        return false;
+    }
+
+    return true;
 }
 
 // Run the inliner pass to inline all func.call operations
@@ -116,6 +148,13 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
 
     // Run the inliner pass to inline all func.call operations
     if (!runInlinerPass(*context, *module)) {
+        return result;
+    }
+
+    // Run StableHLO algebraic simplification passes after inlining so the passes
+    // see fully-inlined IR without func.call ops. Fatal on failure because a
+    // failed pass may leave the module partially transformed.
+    if (!runOptimizationPasses(*context, *module)) {
         return result;
     }
 

@@ -57,12 +57,33 @@ NSArray<MPSGraphTensor*>* EvaluateWhileBody(MPSGraph* graph, mlir::Block& bodyBl
     }
 
     NSMutableArray<MPSGraphTensor*>* out = [NSMutableArray array];
-    for (mlir::Value value : bodyResult.return_values) {
+    for (size_t i = 0; i < bodyResult.return_values.size(); i++) {
+        mlir::Value value = bodyResult.return_values[i];
         MPSGraphTensor* tensor = GetTensor(bodyValues, value);
         if (!tensor) {
             *blockError = "while body return tensor not found";
             return bodyArgs;
         }
+
+        // MPS Graph may promote scalar () to rank-1 (1,) inside while loop
+        // bodies. Only reshape for that specific case to avoid masking real
+        // shape bugs.
+        if (i < bodyArgs.count) {
+            NSArray<NSNumber*>* expectedShape = bodyArgs[i].shape;
+            NSArray<NSNumber*>* actualShape = tensor.shape;
+            if (expectedShape && actualShape && ![actualShape isEqualToArray:expectedShape]) {
+                NSUInteger expectedRank = expectedShape.count;
+                NSUInteger actualRank = actualShape.count;
+                bool scalarToVector =
+                    (expectedRank == 0 && actualRank == 1 && [actualShape[0] isEqualToNumber:@1]);
+                bool vectorToScalar =
+                    (actualRank == 0 && expectedRank == 1 && [expectedShape[0] isEqualToNumber:@1]);
+                if (scalarToVector || vectorToScalar) {
+                    tensor = [graph reshapeTensor:tensor withShape:expectedShape name:nil];
+                }
+            }
+        }
+
         [out addObject:tensor];
     }
     return out;
