@@ -31,6 +31,7 @@ inline size_t GetMlxDtypeSize(mlx::core::Dtype dtype) {
             return 2;
         case mlx::core::int64:
         case mlx::core::uint64:
+        case mlx::core::complex64:
             return 8;
         case mlx::core::int8:
         case mlx::core::uint8:

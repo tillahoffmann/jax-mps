@@ -41,11 +41,10 @@ mlx::core::Dtype PjrtDtypeToMlx(int dtype) {
             MPS_LOG_ERROR("MLX does not support float64 (F64)\n");
             return mlx::core::float32;
         case PJRT_Buffer_Type_C64:
-            MPS_LOG_ERROR("MLX does not support complex64 (C64)\n");
-            return mlx::core::float32;
+            return mlx::core::complex64;
         case PJRT_Buffer_Type_C128:
-            MPS_LOG_ERROR("MLX does not support complex128 (C128)\n");
-            return mlx::core::float32;
+            MPS_LOG_WARN("MLX does not support complex128, downcast to complex64\n");
+            return mlx::core::complex64;
         default:
             MPS_LOG_ERROR("Unsupported PJRT dtype %d\n", dtype);
             return mlx::core::float32;
@@ -79,8 +78,7 @@ int MlxDtypeToPjrt(mlx::core::Dtype dtype) {
         case mlx::core::bool_:
             return PJRT_Buffer_Type_PRED;
         case mlx::core::complex64:
-            MPS_LOG_ERROR("MLX complex64 not supported by PJRT bridge\n");
-            return PJRT_Buffer_Type_F32;
+            return PJRT_Buffer_Type_C64;
         default:
             MPS_LOG_ERROR("Unsupported MLX dtype\n");
             return PJRT_Buffer_Type_F32;
@@ -181,6 +179,10 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
             break;
         case mlx::core::bool_:
             arr = mlx::core::array(static_cast<const bool*>(data), mlx_shape, mlx_dtype);
+            break;
+        case mlx::core::complex64:
+            arr = mlx::core::array(static_cast<const mlx::core::complex64_t*>(data), mlx_shape,
+                                   mlx_dtype);
             break;
         default:
             // Fallback - treat as float32

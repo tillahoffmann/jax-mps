@@ -4,6 +4,7 @@
 
 #include <mlx/compile.h>
 #include <mlx/einsum.h>
+#include <mlx/fft.h>
 #include <mlx/memory.h>
 #include <mlx/mlx.h>
 
@@ -235,6 +236,11 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
                 scalar_opt = mlx::core::array(reinterpret_cast<const uint16_t*>(rawData.data()),
                                               scalarShape, mlxDtype);
                 break;
+            case mlx::core::complex64:
+                scalar_opt = mlx::core::array(
+                    reinterpret_cast<const mlx::core::complex64_t*>(rawData.data()), scalarShape,
+                    mlxDtype);
+                break;
             default:
                 MPS_LOG_ERROR("Unsupported dtype %d for splat constant\n",
                               static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
@@ -291,6 +297,8 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
             return createArray(reinterpret_cast<const int16_t*>(rawData.data()));
         case mlx::core::uint16:
             return createArray(reinterpret_cast<const uint16_t*>(rawData.data()));
+        case mlx::core::complex64:
+            return createArray(reinterpret_cast<const mlx::core::complex64_t*>(rawData.data()));
         default:
             MPS_LOG_ERROR("Unsupported dtype %d for constant\n",
                           static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
@@ -488,7 +496,12 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
         MPS_LOG_ERROR("stablehlo.remainder: operand not found in value map\n");
         return false;
     }
-    values.emplace(ToKey(op->getResult(0)), mlx::core::remainder(lhs_opt->get(), rhs_opt->get()));
+    // stablehlo.remainder is defined as: a - floor(a/b) * b (Python-style modulo)
+    auto& a = lhs_opt->get();
+    auto& b = rhs_opt->get();
+    auto result =
+        mlx::core::subtract(a, mlx::core::multiply(mlx::core::floor(mlx::core::divide(a, b)), b));
+    values.emplace(ToKey(op->getResult(0)), result);
     return true;
 }
 
@@ -1708,6 +1721,42 @@ ReduceType DetectReduceType(mlir::Region& body) {
     return ReduceType::Unknown;
 }
 
+// Detect argmax/argmin pattern in a 2-input reduce body.
+// Returns 1 for argmax, -1 for argmin, 0 for neither.
+int DetectArgReducePattern(mlir::Region& body) {
+    if (body.empty())
+        return 0;
+
+    // argmax/argmin reduces have 4 block args: (val_lhs, val_rhs, idx_lhs, idx_rhs)
+    // and use compare + select to implement the reduction.
+    // Look for the first compare on the value pair (block args 0 & 1).
+    auto& block = body.front();
+    if (block.getNumArguments() != 4)
+        return 0;
+
+    for (auto& op : block.getOperations()) {
+        if (auto cmpOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op)) {
+            // Check if comparing the first two block args (values, not indices)
+            auto lhsArg = mlir::dyn_cast<mlir::BlockArgument>(cmpOp.getLhs());
+            auto rhsArg = mlir::dyn_cast<mlir::BlockArgument>(cmpOp.getRhs());
+            if (!lhsArg || !rhsArg)
+                continue;
+            // Block args for 2-input reduce are interleaved: (val0, idx0, val1, idx1)
+            // So comparing values means args 0 vs 2
+            if (lhsArg.getArgNumber() == 0 && rhsArg.getArgNumber() == 2) {
+                auto dir = cmpOp.getComparisonDirection();
+                if (dir == mlir::stablehlo::ComparisonDirection::GT ||
+                    dir == mlir::stablehlo::ComparisonDirection::GE)
+                    return 1;  // argmax
+                if (dir == mlir::stablehlo::ComparisonDirection::LT ||
+                    dir == mlir::stablehlo::ComparisonDirection::LE)
+                    return -1;  // argmin
+            }
+        }
+    }
+    return 0;
+}
+
 // Handler for stablehlo.reduce
 bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                   ExecContext& ctx) {
@@ -1724,12 +1773,36 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
         axes.push_back(static_cast<int>(dim));
     }
 
-    // Detect reduction type from body
     auto& body = reduceOp.getBody();
-    ReduceType reduceType = DetectReduceType(body);
-
-    // Get number of inputs (reduce can have multiple inputs)
     size_t numInputs = reduceOp.getInputs().size();
+
+    // Special case: argmax/argmin pattern (2 inputs: values + indices)
+    if (numInputs == 2) {
+        int argDir = DetectArgReducePattern(body);
+        if (argDir != 0) {
+            auto input_opt = GetValue(values, reduceOp.getInputs()[0]);
+            if (!input_opt) {
+                MPS_LOG_ERROR("stablehlo.reduce: argmax/argmin input not found\n");
+                return false;
+            }
+
+            // argmax/argmin only supports single axis reduction
+            if (axes.size() == 1) {
+                auto& input = input_opt->get();
+                auto idx = (argDir > 0) ? mlx::core::argmax(input, axes[0], /*keepdims=*/false)
+                                        : mlx::core::argmin(input, axes[0], /*keepdims=*/false);
+                auto val = (argDir > 0) ? mlx::core::max(input, axes) : mlx::core::min(input, axes);
+
+                // Result 0 is the reduced values, result 1 is the indices
+                values.emplace(ToKey(op->getResult(0)), std::move(val));
+                values.emplace(ToKey(op->getResult(1)), mlx::core::astype(idx, mlx::core::int32));
+                return true;
+            }
+        }
+    }
+
+    // Detect reduction type from body
+    ReduceType reduceType = DetectReduceType(body);
 
     // Handle each input-output pair
     for (size_t i = 0; i < numInputs; ++i) {
@@ -2117,6 +2190,65 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         return true;
     }
 
+    // Handle unary mhlo.* custom calls
+    using UnaryFn = mlx::core::array (*)(const mlx::core::array&, mlx::core::StreamOrDevice);
+    static const std::unordered_map<std::string, UnaryFn> unaryCustomCalls = {
+        {"mhlo.sinh", mlx::core::sinh},      {"mhlo.cosh", mlx::core::cosh},
+        {"mhlo.asin", mlx::core::arcsin},    {"mhlo.acos", mlx::core::arccos},
+        {"mhlo.atan", mlx::core::arctan},    {"mhlo.asinh", mlx::core::arcsinh},
+        {"mhlo.acosh", mlx::core::arccosh},  {"mhlo.atanh", mlx::core::arctanh},
+        {"mhlo.erf_inv", mlx::core::erfinv},
+    };
+
+    auto unaryIt = unaryCustomCalls.find(callTargetName);
+    if (unaryIt != unaryCustomCalls.end()) {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("stablehlo.custom_call %s: expected 1 input and 1 output\n",
+                          callTargetName.c_str());
+            return false;
+        }
+        auto input_opt = GetValue(values, op->getOperand(0));
+        if (!input_opt) {
+            MPS_LOG_ERROR("stablehlo.custom_call %s: operand not found\n", callTargetName.c_str());
+            return false;
+        }
+        values.emplace(ToKey(op->getResult(0)), unaryIt->second(input_opt->get(), {}));
+        return true;
+    }
+
+    // Handle mhlo.topk - returns top k values and their indices
+    if (callTargetName == "mhlo.topk") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("stablehlo.custom_call mhlo.topk: expected 1 input and 2 outputs\n");
+            return false;
+        }
+        auto input_opt = GetValue(values, op->getOperand(0));
+        if (!input_opt) {
+            MPS_LOG_ERROR("stablehlo.custom_call mhlo.topk: operand not found\n");
+            return false;
+        }
+
+        // Get k from the output shape (last dimension of result 0)
+        auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        int k = static_cast<int>(resultType.getShape().back());
+        int axis = static_cast<int>(input_opt->get().ndim()) - 1;  // topk always on last axis
+
+        // Use argsort descending (negate + argsort), take first k
+        auto negated = mlx::core::negative(input_opt->get());
+        auto indices = mlx::core::argsort(negated, axis);
+
+        // Slice first k along the last axis
+        mlx::core::Shape starts(indices.ndim(), 0);
+        mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
+        stops[axis] = k;
+        indices = mlx::core::slice(indices, starts, stops);
+
+        auto topValues = mlx::core::take_along_axis(input_opt->get(), indices, axis);
+        values.emplace(ToKey(op->getResult(0)), std::move(topValues));
+        values.emplace(ToKey(op->getResult(1)), mlx::core::astype(indices, mlx::core::int32));
+        return true;
+    }
+
     MPS_LOG_ERROR("stablehlo.custom_call: unsupported target '%s'\n", callTargetName.c_str());
     return false;
 }
@@ -2166,6 +2298,301 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         values.emplace(ToKey(op->getResult(i)), std::move(callOutputs[i]));
     }
 
+    return true;
+}
+
+// Handler for stablehlo.sort
+bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                ExecContext& ctx) {
+    auto sortOp = mlir::dyn_cast<mlir::stablehlo::SortOp>(op);
+    if (!sortOp) {
+        MPS_LOG_ERROR("stablehlo.sort: failed to cast\n");
+        return false;
+    }
+
+    int dimension = static_cast<int>(sortOp.getDimension());
+    bool isStable = sortOp.getIsStable();
+    (void)isStable;  // MLX sort is always stable
+
+    // Analyze comparator to determine sort direction
+    // The comparator takes pairs of elements and returns bool
+    // We look for compare LT (ascending) or GT (descending)
+    bool ascending = true;
+    auto& comparator = sortOp.getComparator();
+    if (!comparator.empty()) {
+        auto& block = comparator.front();
+        for (auto& compOp : block.getOperations()) {
+            if (auto cmpOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(compOp)) {
+                auto dir = cmpOp.getComparisonDirection();
+                if (dir == mlir::stablehlo::ComparisonDirection::GT ||
+                    dir == mlir::stablehlo::ComparisonDirection::GE) {
+                    ascending = false;
+                }
+                break;  // Use the last compare before return
+            }
+        }
+    }
+
+    size_t numInputs = sortOp.getInputs().size();
+
+    if (numInputs == 1) {
+        // Simple sort of a single tensor
+        auto input_opt = GetValue(values, sortOp.getInputs()[0]);
+        if (!input_opt) {
+            MPS_LOG_ERROR("stablehlo.sort: input not found\n");
+            return false;
+        }
+        auto result = mlx::core::sort(input_opt->get(), dimension);
+        if (!ascending) {
+            // Reverse the sorted dimension
+            auto shape = result.shape();
+            int dimSize = shape[dimension];
+            mlx::core::Shape starts(result.ndim(), 0);
+            mlx::core::Shape stops(shape.begin(), shape.end());
+            mlx::core::Shape steps(result.ndim(), 1);
+            starts[dimension] = dimSize - 1;
+            stops[dimension] = -dimSize - 1;
+            steps[dimension] = -1;
+            result = mlx::core::slice(result, starts, stops, steps);
+        }
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+    } else if (numInputs == 2) {
+        // Sort-by-key: sort first input, apply same permutation to second
+        auto keys_opt = GetValue(values, sortOp.getInputs()[0]);
+        auto vals_opt = GetValue(values, sortOp.getInputs()[1]);
+        if (!keys_opt || !vals_opt) {
+            MPS_LOG_ERROR("stablehlo.sort: inputs not found\n");
+            return false;
+        }
+
+        // For descending sort, negate keys so ascending argsort gives descending order
+        auto sortKeys = ascending ? keys_opt->get() : mlx::core::negative(keys_opt->get());
+        auto indices = mlx::core::argsort(sortKeys, dimension);
+
+        auto sortedKeys = mlx::core::take_along_axis(keys_opt->get(), indices, dimension);
+        auto sortedVals = mlx::core::take_along_axis(vals_opt->get(), indices, dimension);
+        values.emplace(ToKey(op->getResult(0)), std::move(sortedKeys));
+        values.emplace(ToKey(op->getResult(1)), std::move(sortedVals));
+    } else {
+        MPS_LOG_ERROR("stablehlo.sort: unsupported number of inputs: %zu\n", numInputs);
+        return false;
+    }
+
+    return true;
+}
+
+// Detect scatter update type from the body region
+enum class ScatterType { Update, Add, Mul, Min, Max, Unknown };
+
+ScatterType DetectScatterType(mlir::Region& body) {
+    if (body.empty())
+        return ScatterType::Unknown;
+
+    auto& block = body.front();
+    for (auto& op : block.getOperations()) {
+        auto opName = op.getName().getStringRef();
+        // The body takes (current, update) and returns the result
+        // For simple update: return update (the second arg)
+        if (opName == "stablehlo.return") {
+            // Check if it returns the second block argument directly
+            if (op.getNumOperands() == 1) {
+                auto returnVal = op.getOperand(0);
+                // If the return value is the second block argument, it's an update
+                if (returnVal == block.getArgument(1)) {
+                    return ScatterType::Update;
+                }
+            }
+        }
+        if (opName == "stablehlo.add")
+            return ScatterType::Add;
+        if (opName == "stablehlo.multiply")
+            return ScatterType::Mul;
+        if (opName == "stablehlo.minimum")
+            return ScatterType::Min;
+        if (opName == "stablehlo.maximum")
+            return ScatterType::Max;
+    }
+    return ScatterType::Unknown;
+}
+
+// Handler for stablehlo.scatter
+bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                   ExecContext& ctx) {
+    auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
+    if (!scatterOp) {
+        MPS_LOG_ERROR("stablehlo.scatter: failed to cast\n");
+        return false;
+    }
+
+    // Only support single-input scatter for now
+    if (scatterOp.getInputs().size() != 1) {
+        MPS_LOG_ERROR("stablehlo.scatter: multi-input scatter not supported\n");
+        return false;
+    }
+
+    auto operand_opt = GetValue(values, scatterOp.getInputs()[0]);
+    auto indices_opt = GetValue(values, scatterOp.getScatterIndices());
+    auto updates_opt = GetValue(values, scatterOp.getUpdates()[0]);
+    if (!operand_opt || !indices_opt || !updates_opt) {
+        MPS_LOG_ERROR("stablehlo.scatter: operand not found in value map\n");
+        return false;
+    }
+
+    auto& operand = operand_opt->get();
+    auto& scatterIndices = indices_opt->get();
+    auto& updates = updates_opt->get();
+
+    auto dimNumbers = scatterOp.getScatterDimensionNumbers();
+    auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
+    auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
+    auto indexVectorDim = static_cast<int>(dimNumbers.getIndexVectorDim());
+
+    // Detect update type
+    auto& body = scatterOp.getUpdateComputation();
+    auto scatterType = DetectScatterType(body);
+
+    // Simple case: 1D scatter with single scatter dim
+    if (scatterDimsToOperandDims.size() == 1 && insertedWindowDims.size() == 1) {
+        int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
+
+        // Extract indices
+        auto indices = scatterIndices;
+        if (indexVectorDim < static_cast<int>(scatterIndices.shape().size()) &&
+            scatterIndices.shape(indexVectorDim) == 1) {
+            indices = mlx::core::squeeze(scatterIndices, {indexVectorDim});
+        }
+
+        // Ensure indices are int32
+        if (indices.dtype() != mlx::core::int32) {
+            indices = mlx::core::astype(indices, mlx::core::int32);
+        }
+
+        mlx::core::array result = operand;
+        std::vector<mlx::core::array> idxVec = {indices};
+        std::vector<int> axesVec = {scatterDim};
+
+        switch (scatterType) {
+            case ScatterType::Update:
+                result = mlx::core::scatter(operand, idxVec, updates, axesVec);
+                break;
+            case ScatterType::Add:
+                result = mlx::core::scatter_add(operand, idxVec, updates, axesVec);
+                break;
+            case ScatterType::Mul:
+                result = mlx::core::scatter_prod(operand, idxVec, updates, axesVec);
+                break;
+            case ScatterType::Min:
+                result = mlx::core::scatter_min(operand, idxVec, updates, axesVec);
+                break;
+            case ScatterType::Max:
+                result = mlx::core::scatter_max(operand, idxVec, updates, axesVec);
+                break;
+            default:
+                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
+                return false;
+        }
+
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter pattern "
+                  "(scatterDimsToOperandDims.size=%zu, insertedWindowDims.size=%zu)\n",
+                  scatterDimsToOperandDims.size(), insertedWindowDims.size());
+    return false;
+}
+
+// Handler for stablehlo.fft
+bool HandleFft(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+               ExecContext& ctx) {
+    auto fftOp = mlir::dyn_cast<mlir::stablehlo::FftOp>(op);
+    if (!fftOp) {
+        MPS_LOG_ERROR("stablehlo.fft: failed to cast\n");
+        return false;
+    }
+
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.fft: operand not found\n");
+        return false;
+    }
+
+    auto& input = input_opt->get();
+    auto fftType = fftOp.getFftType();
+    auto fftLength = fftOp.getFftLength();
+
+    // Convert fft_length to vector
+    std::vector<int> axes;
+    mlx::core::Shape lengths;
+    int ndim = static_cast<int>(input.ndim());
+    for (size_t i = 0; i < fftLength.size(); ++i) {
+        axes.push_back(ndim - static_cast<int>(fftLength.size()) + static_cast<int>(i));
+        lengths.push_back(static_cast<int>(fftLength[i]));
+    }
+
+    mlx::core::array result = input;
+    switch (fftType) {
+        case mlir::stablehlo::FftType::FFT:
+            result = mlx::core::fft::fftn(input, lengths, axes);
+            break;
+        case mlir::stablehlo::FftType::IFFT:
+            result = mlx::core::fft::ifftn(input, lengths, axes);
+            break;
+        case mlir::stablehlo::FftType::RFFT:
+            result = mlx::core::fft::rfftn(input, lengths, axes);
+            break;
+        case mlir::stablehlo::FftType::IRFFT:
+            result = mlx::core::fft::irfftn(input, lengths, axes);
+            break;
+        default:
+            MPS_LOG_ERROR("stablehlo.fft: unsupported fft type\n");
+            return false;
+    }
+
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
+// Handler for stablehlo.complex (combine real + imag into complex)
+bool HandleComplex(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                   ExecContext& ctx) {
+    auto real_opt = GetValue(values, op->getOperand(0));
+    auto imag_opt = GetValue(values, op->getOperand(1));
+    if (!real_opt || !imag_opt) {
+        MPS_LOG_ERROR("stablehlo.complex: operand not found\n");
+        return false;
+    }
+    // MLX: create complex from real and imaginary parts
+    // complex(re, im) = re + im * 1j
+    auto imag_unit = mlx::core::array(std::complex<float>(0.0F, 1.0F));
+    auto result = mlx::core::add(
+        mlx::core::astype(real_opt->get(), mlx::core::complex64),
+        mlx::core::multiply(mlx::core::astype(imag_opt->get(), mlx::core::complex64), imag_unit));
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
+// Handler for stablehlo.real
+bool HandleReal(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                ExecContext& ctx) {
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.real: operand not found\n");
+        return false;
+    }
+    values.emplace(ToKey(op->getResult(0)), mlx::core::real(input_opt->get()));
+    return true;
+}
+
+// Handler for stablehlo.imag
+bool HandleImag(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                ExecContext& ctx) {
+    auto input_opt = GetValue(values, op->getOperand(0));
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.imag: operand not found\n");
+        return false;
+    }
+    values.emplace(ToKey(op->getResult(0)), mlx::core::imag(input_opt->get()));
     return true;
 }
 
@@ -2228,6 +2655,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"stablehlo.dynamic_update_slice", HandleDynamicUpdateSlice},
         {"stablehlo.pad", HandlePad},
         {"stablehlo.gather", HandleGather},
+        {"stablehlo.scatter", HandleScatter},
         // Linear algebra
         {"stablehlo.dot_general", HandleDotGeneral},
         {"stablehlo.convolution", HandleConvolution},
@@ -2239,6 +2667,14 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"stablehlo.custom_call", HandleCustomCall},
         {"stablehlo.while", HandleWhile},
         {"stablehlo.case", HandleCase},
+        // Sort
+        {"stablehlo.sort", HandleSort},
+        // FFT
+        {"stablehlo.fft", HandleFft},
+        // Complex
+        {"stablehlo.complex", HandleComplex},
+        {"stablehlo.real", HandleReal},
+        {"stablehlo.imag", HandleImag},
         {"stablehlo.return", HandleStablehloReturn},
     };
     return handlers;
