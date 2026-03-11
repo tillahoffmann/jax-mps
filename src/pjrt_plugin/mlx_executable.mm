@@ -496,11 +496,14 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
         MPS_LOG_ERROR("stablehlo.remainder: operand not found in value map\n");
         return false;
     }
-    // stablehlo.remainder is defined as: a - floor(a/b) * b (Python-style modulo)
+    // stablehlo.remainder is C-style fmod: a - trunc(a/b) * b
+    // trunc(x) = sign(x) * floor(abs(x))
     auto& a = lhs_opt->get();
     auto& b = rhs_opt->get();
-    auto result =
-        mlx::core::subtract(a, mlx::core::multiply(mlx::core::floor(mlx::core::divide(a, b)), b));
+    auto quotient = mlx::core::divide(a, b);
+    auto truncated =
+        mlx::core::multiply(mlx::core::sign(quotient), mlx::core::floor(mlx::core::abs(quotient)));
+    auto result = mlx::core::subtract(a, mlx::core::multiply(truncated, b));
     values.emplace(ToKey(op->getResult(0)), result);
     return true;
 }
@@ -2462,9 +2465,55 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             indices = mlx::core::squeeze(scatterIndices, {indexVectorDim});
         }
 
-        // Ensure indices are int32
+        // Ensure indices are int32 and at least 1D
         if (indices.dtype() != mlx::core::int32) {
             indices = mlx::core::astype(indices, mlx::core::int32);
+        }
+        if (indices.ndim() == 0) {
+            indices = mlx::core::reshape(indices, {1});
+        }
+
+        // MLX scatter expects updates with shape [idx_shape..., slice_shape...]
+        // where slice_shape includes all operand dims.
+        // StableHLO updates have inserted_window_dims collapsed, so we need
+        // to expand those dims back (insert size-1 dims).
+        auto reshapedUpdates = updates;
+        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
+        int insertedDim = static_cast<int>(insertedWindowDims[0]);
+
+        // MLX scatter expects updates with shape [idx_shape..., slice_shape_per_operand_dim...]
+        // where slice_shape has size-1 at scatter axes and original sizes elsewhere.
+        // StableHLO updates have inserted_window_dims collapsed.
+        // We need to expand updates to include idx_shape prefix and size-1 at inserted dims.
+        {
+            auto updShape = updates.shape();
+            mlx::core::Shape newShape;
+
+            // Batch dims come from indices shape
+            auto idxShape = indices.shape();
+            for (int dim : idxShape) {
+                newShape.push_back(dim);
+            }
+
+            // Then operand dims, with size-1 at inserted positions
+            if (updateWindowDims.empty()) {
+                // All operand dims are inserted
+                for (int i = 0; i < static_cast<int>(operand.ndim()); ++i) {
+                    newShape.push_back(1);
+                }
+            } else {
+                int windowIdx = static_cast<int>(updateWindowDims[0]);
+                for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim());
+                     ++operandDim) {
+                    if (operandDim == insertedDim) {
+                        newShape.push_back(1);
+                    } else {
+                        newShape.push_back(updShape[windowIdx]);
+                        ++windowIdx;
+                    }
+                }
+            }
+            reshapedUpdates = mlx::core::reshape(updates, newShape);
         }
 
         mlx::core::array result = operand;
@@ -2473,19 +2522,81 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 
         switch (scatterType) {
             case ScatterType::Update:
-                result = mlx::core::scatter(operand, idxVec, updates, axesVec);
+                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
                 break;
             case ScatterType::Add:
-                result = mlx::core::scatter_add(operand, idxVec, updates, axesVec);
+                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
                 break;
             case ScatterType::Mul:
-                result = mlx::core::scatter_prod(operand, idxVec, updates, axesVec);
+                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
                 break;
             case ScatterType::Min:
-                result = mlx::core::scatter_min(operand, idxVec, updates, axesVec);
+                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
                 break;
             case ScatterType::Max:
-                result = mlx::core::scatter_max(operand, idxVec, updates, axesVec);
+                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            default:
+                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
+                return false;
+        }
+
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Multi-dimensional scatter: all dims are inserted (full index scatter)
+    if (scatterDimsToOperandDims.size() == insertedWindowDims.size() &&
+        scatterDimsToOperandDims.size() == operand.ndim()) {
+        // Full index scatter: each index selects a single element
+        // Extract per-axis indices from the index_vector_dim
+        auto indices = scatterIndices;
+
+        // Build per-axis index arrays
+        std::vector<mlx::core::array> idxVec;
+        std::vector<int> axesVec;
+        for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
+            int axis = static_cast<int>(scatterDimsToOperandDims[i]);
+            axesVec.push_back(axis);
+
+            // Slice the index vector dim to get indices for this axis
+            mlx::core::Shape starts(indices.ndim(), 0);
+            mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
+            starts[indexVectorDim] = static_cast<int>(i);
+            stops[indexVectorDim] = static_cast<int>(i) + 1;
+            auto axisIndices =
+                mlx::core::squeeze(mlx::core::slice(indices, starts, stops), {indexVectorDim});
+            if (axisIndices.dtype() != mlx::core::int32) {
+                axisIndices = mlx::core::astype(axisIndices, mlx::core::int32);
+            }
+            idxVec.push_back(axisIndices);
+        }
+
+        // Updates need reshaping: add size-1 dims for all operand dims
+        auto reshapedUpdates = updates;
+        auto updShape = updates.shape();
+        mlx::core::Shape newShape(updShape.begin(), updShape.end());
+        for (int i = 0; i < static_cast<int>(operand.ndim()); ++i) {
+            newShape.push_back(1);
+        }
+        reshapedUpdates = mlx::core::reshape(updates, newShape);
+
+        mlx::core::array result = operand;
+        switch (scatterType) {
+            case ScatterType::Update:
+                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Add:
+                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Mul:
+                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Min:
+                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Max:
+                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
                 break;
             default:
                 MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
