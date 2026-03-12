@@ -106,6 +106,9 @@ find_library(STABLEHLO_TYPE_CONVERSION_LIB StablehloTypeConversion HINTS ${CMAKE
 find_library(VERSION_LIB Version HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 
 # MLX (pre-built by setup_deps.sh, installed to prefix)
+# Note: MLX's linalg GPU patch uses MetalPerformanceShaders symbols. Since MLX
+# is a static library, these are resolved at final link time via MPS_FRAMEWORK
+# on pjrt_plugin_mps below.
 find_package(MLX REQUIRED CONFIG)
 message(STATUS "Found MLX: ${MLX_DIR}")
 
