@@ -3770,12 +3770,23 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
         return result;
     }
 
-    // Skip eager eval - MLX arrays are lazy. Evaluation is deferred to
-    // MlxBuffer::ToHostBuffer() so JAX can pipeline execution and readback.
-    // The profiling eval timer is measured there instead.
+    // Evaluate all outputs. We cannot defer eval to ToHostBuffer() because
+    // PJRT_Buffer_ReadyEvent currently always returns ready=true, so
+    // block_until_ready() would not synchronize and benchmarks/correctness
+    // would be affected.
     if (profiling) {
         eval_start = Clock::now();
-        eval_end = eval_start;  // No eval here; duration will be ~0
+    }
+    if (!outputs.empty()) {
+        try {
+            mlx::core::eval(outputs);
+        } catch (const std::exception& e) {
+            MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
+            return result;
+        }
+    }
+    if (profiling) {
+        eval_end = Clock::now();
     }
 
     // Wrap outputs in MlxBuffer
