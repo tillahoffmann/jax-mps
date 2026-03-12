@@ -130,8 +130,7 @@ jobs:
 
   lint-python:
     name: Lint Python
-    needs: setup-deps
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -140,26 +139,16 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Restore deps from cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          fail-on-cache-miss: true
-
-      - name: Install project dependencies
-        run: uv sync --all-groups
-        env:
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
-
       - name: ruff format
-        run: uv run ruff format --check src tests
+        run: uvx ruff@0.14.13 format --check src tests
 
       - name: ruff check
-        run: uv run ruff check src tests
+        run: uvx ruff@0.14.13 check src tests
 
       - name: pyright
-        run: uv run pyright
+        run: |
+          uv sync --no-install-project --all-groups
+          uv run pyright
 
   build-dev:
     name: Build dev wheel
