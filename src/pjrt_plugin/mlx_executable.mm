@@ -738,8 +738,81 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
     }
 
     if (hasInterior) {
-        MPS_LOG_ERROR("stablehlo.pad: interior padding not yet supported\n");
-        return false;
+        // Interior padding: insert `p` copies of padValue between each pair of
+        // existing elements along each axis, then apply edge padding.
+        //
+        // For an axis of size N with interior padding p, the result has size
+        // N + (N-1)*p (before edge padding).
+        auto result = input;
+        auto ndim = edgePaddingLow.size();
+
+        for (size_t axis = 0; axis < ndim; ++axis) {
+            auto p = interiorPadding[axis];
+            if (p <= 0)
+                continue;
+
+            auto shape = result.shape();
+            auto axisSize = shape[axis];
+            if (axisSize <= 1)
+                continue;
+
+            // Build the dilated result by interleaving slices with padding.
+            // New axis size = axisSize + (axisSize - 1) * p
+            auto newAxisSize = static_cast<int32_t>(axisSize + (axisSize - 1) * p);
+
+            // Create a full-sized array of padValue, then scatter original values.
+            mlx::core::Shape newShape(shape.begin(), shape.end());
+            newShape[axis] = newAxisSize;
+            auto padScalar = mlx::core::broadcast_to(padValue, {1});
+            auto dilated = mlx::core::broadcast_to(
+                mlx::core::reshape(padScalar, mlx::core::Shape(ndim, 1)), newShape);
+
+            // Build indices for the original elements: 0, p+1, 2*(p+1), ...
+            std::vector<int32_t> idxVals(axisSize);
+            for (int32_t i = 0; i < axisSize; ++i) {
+                idxVals[i] = i * static_cast<int32_t>(p + 1);
+            }
+            auto indices = mlx::core::array(idxVals.data(), {axisSize}, mlx::core::int32);
+
+            // Use take + put pattern: gather from result along axis, place into dilated.
+            // Actually, the simplest approach: use slice + scatter via put_along_axis
+            // or build with concatenation.
+            //
+            // Simplest correct approach: iterate and concatenate.
+            // For each element i in [0, axisSize), take slice i, then append p pad slices.
+            // But that's O(N) concatenations which is slow.
+            //
+            // Better: use scatter. Create zeros of the target shape, then scatter
+            // original values at the strided positions.
+            //
+            // Even better: use as_strided on a zero-initialized array.
+            // Simplest correct: create output full of pad_value, then use
+            // scatter with strided indices.
+
+            // Create the dilated array filled with padValue.
+            dilated = mlx::core::full(newShape, padValue);
+
+            // Scatter original values at strided positions along this axis.
+            // We need to put result[..., i, ...] at position i*(p+1) along axis.
+            result = mlx::core::put_along_axis(dilated,
+                                               mlx::core::reshape(indices,
+                                                                  [&]() {
+                                                                      mlx::core::Shape s(ndim, 1);
+                                                                      s[axis] = axisSize;
+                                                                      return s;
+                                                                  }()),
+                                               result, static_cast<int>(axis));
+        }
+
+        // Now apply edge padding.
+        std::vector<std::pair<int, int>> padWidths;
+        padWidths.reserve(ndim);
+        for (size_t i = 0; i < ndim; ++i) {
+            padWidths.emplace_back(static_cast<int>(edgePaddingLow[i]),
+                                   static_cast<int>(edgePaddingHigh[i]));
+        }
+        values.emplace(ToKey(op->getResult(0)), mlx::core::pad(result, padWidths, padValue));
+        return true;
     }
 
     // Edge padding only: use MLX pad with {low, high} pairs per axis
@@ -1989,6 +2062,261 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     return true;
 }
 
+// Handler for stablehlo.reduce_window (cumulative ops and pooling)
+bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
+                        std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto rwOp = mlir::dyn_cast<mlir::stablehlo::ReduceWindowOp>(op);
+    if (!rwOp) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: failed to cast\n");
+        return false;
+    }
+
+    // Only support single-input / single-init / single-result.
+    if (rwOp.getInputs().size() != 1 || rwOp.getInitValues().size() != 1 ||
+        rwOp->getNumResults() != 1) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: only single-input reduce_window is supported\n");
+        return false;
+    }
+
+    auto input_opt = GetValue(values, rwOp.getInputs()[0]);
+    if (!input_opt) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: input not found\n");
+        return false;
+    }
+    auto& input = input_opt->get();
+
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(rwOp.getInputs()[0].getType());
+    if (!inputType) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: unranked input\n");
+        return false;
+    }
+    auto inputShape = inputType.getShape();
+    auto rank = static_cast<int64_t>(inputShape.size());
+
+    auto windowDims = rwOp.getWindowDimensions();
+    auto stridesOpt = rwOp.getWindowStrides();
+    auto baseDilOpt = rwOp.getBaseDilations();
+    auto winDilOpt = rwOp.getWindowDilations();
+    auto paddingAttr = rwOp.getPaddingAttr();
+
+    std::vector<int64_t> strides(rank, 1);
+    std::vector<int64_t> winDil(rank, 1);
+    std::vector<int64_t> padLow(rank, 0);
+    std::vector<int64_t> padHigh(rank, 0);
+
+    if (stridesOpt) {
+        auto s = *stridesOpt;
+        for (int64_t i = 0; i < rank; i++)
+            strides[i] = s[i];
+    }
+    if (winDilOpt) {
+        auto d = *winDilOpt;
+        for (int64_t i = 0; i < rank; i++)
+            winDil[i] = d[i];
+    }
+    if (paddingAttr) {
+        auto vals = paddingAttr.getValues<int64_t>();
+        for (int64_t i = 0; i < rank; i++) {
+            padLow[i] = vals[{(uint64_t)i, 0}];
+            padHigh[i] = vals[{(uint64_t)i, 1}];
+        }
+    }
+
+    bool allStridesOne = !stridesOpt;
+    if (stridesOpt) {
+        allStridesOne = true;
+        for (auto s : *stridesOpt) {
+            if (s != 1) {
+                allStridesOne = false;
+                break;
+            }
+        }
+    }
+    bool allBaseDilOne = !baseDilOpt;
+    if (baseDilOpt) {
+        allBaseDilOne = true;
+        for (auto d : *baseDilOpt) {
+            if (d != 1) {
+                allBaseDilOne = false;
+                break;
+            }
+        }
+    }
+    bool allWinDilOne = !winDilOpt;
+    if (winDilOpt) {
+        allWinDilOne = true;
+        for (auto d : *winDilOpt) {
+            if (d != 1) {
+                allWinDilOne = false;
+                break;
+            }
+        }
+    }
+
+    ReduceType reduceType = DetectReduceType(rwOp.getBody());
+
+    // ---------- Tier 1: Cumulative pattern ----------
+    // All strides=1, all dilations=1, exactly one axis with window == input_shape
+    if (allStridesOne && allBaseDilOne && allWinDilOne) {
+        int64_t cumAxis = -1;
+        bool isCumulative = true;
+        for (int64_t i = 0; i < rank; i++) {
+            if (windowDims[i] == 1)
+                continue;
+            if (windowDims[i] == inputShape[i] && cumAxis == -1) {
+                cumAxis = i;
+            } else {
+                isCumulative = false;
+                break;
+            }
+        }
+
+        if (isCumulative && cumAxis >= 0) {
+            int64_t axisSize = inputShape[cumAxis];
+            bool reverse = false;
+            bool inclusive = true;
+
+            if (padLow[cumAxis] == axisSize - 1 && padHigh[cumAxis] == 0) {
+                reverse = false;
+                inclusive = true;
+            } else if (padLow[cumAxis] == 0 && padHigh[cumAxis] == axisSize - 1) {
+                reverse = true;
+                inclusive = true;
+            } else if (padLow[cumAxis] == axisSize && padHigh[cumAxis] == -1) {
+                reverse = false;
+                inclusive = false;
+            } else if (padLow[cumAxis] == -1 && padHigh[cumAxis] == axisSize) {
+                reverse = true;
+                inclusive = false;
+            } else {
+                MPS_LOG_ERROR("stablehlo.reduce_window: unsupported cumulative padding pattern\n");
+                return false;
+            }
+
+            // Check non-cumulative axes have zero padding.
+            for (int64_t i = 0; i < rank; i++) {
+                if (i == cumAxis)
+                    continue;
+                if (padLow[i] != 0 || padHigh[i] != 0) {
+                    MPS_LOG_ERROR(
+                        "stablehlo.reduce_window: non-zero padding on non-cumulative axis\n");
+                    return false;
+                }
+            }
+
+            auto axis = static_cast<int>(cumAxis);
+            std::optional<mlx::core::array> result;
+            switch (reduceType) {
+                case ReduceType::Sum:
+                    result = mlx::core::cumsum(input, axis, reverse, inclusive);
+                    break;
+                case ReduceType::Prod:
+                    result = mlx::core::cumprod(input, axis, reverse, inclusive);
+                    break;
+                case ReduceType::Max:
+                    result = mlx::core::cummax(input, axis, reverse, inclusive);
+                    break;
+                case ReduceType::Min:
+                    result = mlx::core::cummin(input, axis, reverse, inclusive);
+                    break;
+                default:
+                    MPS_LOG_ERROR("stablehlo.reduce_window: unsupported cumulative reduce type\n");
+                    return false;
+            }
+
+            values.emplace(ToKey(op->getResult(0)), std::move(*result));
+            return true;
+        }
+    }
+
+    // ---------- Tier 2: Pooling pattern ----------
+    // base_dilations all 1, at least one spatial axis with window > 1
+    if (!allBaseDilOne) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: base dilations not supported\n");
+        return false;
+    }
+
+    if (reduceType != ReduceType::Max && reduceType != ReduceType::Sum) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum only\n");
+        return false;
+    }
+
+    // Pad input if needed.
+    mlx::core::array padded = input;
+    bool needsPad = false;
+    for (int64_t i = 0; i < rank; i++) {
+        if (padLow[i] != 0 || padHigh[i] != 0) {
+            needsPad = true;
+            break;
+        }
+    }
+    if (needsPad) {
+        // Get the init value for padding.
+        auto init_opt = GetValue(values, rwOp.getInitValues()[0]);
+        if (!init_opt) {
+            MPS_LOG_ERROR("stablehlo.reduce_window: init value not found\n");
+            return false;
+        }
+
+        std::vector<std::pair<int, int>> padWidth(rank);
+        for (int64_t i = 0; i < rank; i++) {
+            padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
+        }
+        padded = mlx::core::pad(input, padWidth, init_opt->get());
+    }
+
+    // Compute the output shape from padded input, window, strides, dilation.
+    auto paddedShape = padded.shape();
+    std::vector<int> outShape(rank);
+    for (int64_t i = 0; i < rank; i++) {
+        // Effective window size with dilation.
+        int64_t effWin = (windowDims[i] - 1) * winDil[i] + 1;
+        outShape[i] = static_cast<int>((paddedShape[i] - effWin) / strides[i] + 1);
+    }
+
+    // Use as_strided to create a view with window dimensions appended.
+    // Output shape: [out_0, out_1, ..., win_0, win_1, ...]
+    // Then reduce over the window dimensions.
+    mlx::core::Shape viewShape;
+    for (int64_t i = 0; i < rank; i++)
+        viewShape.push_back(outShape[i]);
+    for (int64_t i = 0; i < rank; i++)
+        viewShape.push_back(static_cast<int32_t>(windowDims[i]));
+
+    // Compute strides for the as_strided view.
+    // First compute element strides of the padded array.
+    std::vector<int64_t> elemStrides(rank);
+    elemStrides[rank - 1] = 1;
+    for (int64_t i = rank - 2; i >= 0; i--) {
+        elemStrides[i] = elemStrides[i + 1] * paddedShape[i + 1];
+    }
+
+    mlx::core::Strides viewStrides;
+    // Output dimension strides: move by stride[i] * elemStride[i].
+    for (int64_t i = 0; i < rank; i++) {
+        viewStrides.push_back(strides[i] * elemStrides[i]);
+    }
+    // Window dimension strides: move by winDil[i] * elemStride[i].
+    for (int64_t i = 0; i < rank; i++) {
+        viewStrides.push_back(winDil[i] * elemStrides[i]);
+    }
+
+    auto windowed = mlx::core::as_strided(padded, viewShape, viewStrides, 0);
+
+    // Reduce over the window dimensions (axes rank..2*rank-1).
+    std::vector<int> reduceAxes;
+    for (int64_t i = rank; i < 2 * rank; i++) {
+        reduceAxes.push_back(static_cast<int>(i));
+    }
+
+    mlx::core::array result = (reduceType == ReduceType::Max)
+                                  ? mlx::core::max(windowed, reduceAxes)
+                                  : mlx::core::sum(windowed, reduceAxes);
+
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
 // Handler for stablehlo.dot_general
 bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -3130,6 +3458,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"stablehlo.triangular_solve", HandleTriangularSolve},
         // Reduction
         {"stablehlo.reduce", HandleReduce},
+        {"stablehlo.reduce_window", HandleReduceWindow},
         // Control flow
         {"func.return", HandleReturn},
         {"func.call", HandleCall},

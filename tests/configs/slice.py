@@ -162,14 +162,22 @@ def make_slice_op_configs():
                 name="multi_index_point_gather",
             ),
             # Batched gather via vmap
-            OperationTestConfig(
-                lambda x, idx: jax.vmap(
-                    lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
-                )(x, idx),
-                lambda key: random.normal(key, (3, 10)),
-                lambda key: random.randint(key, (3,), 0, 10),
-                name="batched_single_axis_gather",
-                grad_xfail="scatter:.+general fallback requires insertedWindowDims",
+            pytest.param(
+                OperationTestConfig(
+                    lambda x, idx: jax.vmap(
+                        lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
+                    )(x, idx),
+                    lambda key: random.normal(key, (3, 10)),
+                    lambda key: random.randint(key, (3,), 0, 10),
+                    name="batched_single_axis_gather",
+                    grad_xfail="scatter:.+general fallback requires insertedWindowDims",
+                ),
+                marks=[
+                    pytest.mark.xfail(
+                        reason="Batched gather not yet supported on MLX backend",
+                        strict=True,
+                    )
+                ],
             ),
             # Large integer gather tests: verify integers > 2^24 are preserved
             # These test the bitcast workaround for MPS gather operations
