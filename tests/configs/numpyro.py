@@ -115,35 +115,11 @@ def make_numpyro_op_configs():
                         )
                     ],
                 ),
-                *(
-                    [
-                        pytest.param(
-                            NumpyroDistributionTestConfig(
-                                dists.CategoricalProbs,
-                                lambda key, bs=batch_shape: random.dirichlet(
-                                    key, jnp.ones(5), bs
-                                ),
-                                differentiable_argnums=(1,),
-                                name="Categorical",
-                            ),
-                            marks=[
-                                xfail_match(
-                                    "Output count mismatch|unsupported gather pattern"
-                                )
-                            ],
-                        )
-                    ]
-                    if batch_shape
-                    else [
-                        NumpyroDistributionTestConfig(
-                            dists.CategoricalProbs,
-                            lambda key, bs=batch_shape: random.dirichlet(
-                                key, jnp.ones(5), bs
-                            ),
-                            differentiable_argnums=(1,),
-                            name="Categorical",
-                        ),
-                    ]
+                NumpyroDistributionTestConfig(
+                    dists.CategoricalProbs,
+                    lambda key, bs=batch_shape: random.dirichlet(key, jnp.ones(5), bs),
+                    differentiable_argnums=(1,),
+                    name="Categorical",
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Poisson,
