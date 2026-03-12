@@ -462,7 +462,7 @@ bool HandleTanh(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
     return true;
 }
 
-// Handler for stablehlo.tan (MLX doesn't have a direct tan, use sin/cos)
+// Handler for stablehlo.tan
 bool HandleTan(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                ExecContext& ctx) {
     auto input_opt = GetValue(values, op->getOperand(0));
@@ -470,9 +470,7 @@ bool HandleTan(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
         MPS_LOG_ERROR("stablehlo.tan: operand not found in value map\n");
         return false;
     }
-    auto& x = input_opt->get();
-    values.emplace(ToKey(op->getResult(0)),
-                   mlx::core::divide(mlx::core::sin(x), mlx::core::cos(x)));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::tan(input_opt->get()));
     return true;
 }
 
@@ -2691,7 +2689,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         return true;
     }
 
-    // Handle mhlo.topk - returns top k values and their indices
+    // Handle mhlo.topk - returns top k values and their indices (sorted descending)
     if (callTargetName == "mhlo.topk") {
         if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
             MPS_LOG_ERROR("stablehlo.custom_call mhlo.topk: expected 1 input and 2 outputs\n");
@@ -2708,11 +2706,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         int k = static_cast<int>(resultType.getShape().back());
         int axis = static_cast<int>(input_opt->get().ndim()) - 1;  // topk always on last axis
 
-        // Use negate + argsort for descending order, then take first k
-        // Ensure input is contiguous (transposed views can cause incorrect argsort)
+        // Negate + argsort for descending order, then take first k
         auto input = mlx::core::contiguous(input_opt->get());
-        auto negated = mlx::core::negative(input);
-        auto sortedIndices = mlx::core::argsort(negated, axis);
+        auto sortedIndices = mlx::core::argsort(mlx::core::negative(input), axis);
 
         // Slice first k along the axis
         mlx::core::Shape starts(sortedIndices.ndim(), 0);
