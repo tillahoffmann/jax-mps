@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup script for jax-mps dependencies (LLVM/MLIR + StableHLO + MLX)
+# Setup script for jax-mps dependencies (LLVM/MLIR + StableHLO)
 # These are built once and installed to a prefix directory.
 #
 # Usage:
@@ -13,10 +13,6 @@
 # Default prefix: $HOME/.local/jax-mps-deps
 
 set -e
-
-# Resolve the repo root (one level up from this script)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration
 PREFIX="${PREFIX:-$HOME/.local/jax-mps-deps}"
@@ -62,15 +58,9 @@ if [ "$FORCE_REBUILD" = true ]; then
     rm -rf "$PREFIX/lib/cmake/mlir" "$PREFIX/lib/cmake/llvm"
     rm -f "$PREFIX/lib/libStablehloOps.a"
     rm -f "$PREFIX/lib/libprotobuf.a" "$PREFIX/lib/libabsl_base.a"
-    rm -rf "$PREFIX/share/cmake/MLX" "$PREFIX/lib/libmlx.a"
     rm -rf "$BUILD_DIR/llvm-build" "$BUILD_DIR/stablehlo-build"
     rm -rf "$BUILD_DIR/abseil-build" "$BUILD_DIR/protobuf-build"
-    rm -rf "$BUILD_DIR/mlx-build"
 fi
-
-# Read MLX version from version.txt
-MLX_GIT_TAG="$(cat "$REPO_ROOT/third_party/mlx/version.txt" | tr -d '[:space:]')"
-MLX_PATCHES_DIR="$REPO_ROOT/third_party/mlx/patches"
 
 echo "=== jax-mps dependency setup ==="
 echo "Prefix:       $PREFIX"
@@ -81,7 +71,6 @@ echo "Protobuf:     $PROTOBUF_VERSION"
 echo "XLA:          $XLA_COMMIT"
 echo "StableHLO:    $STABLEHLO_COMMIT"
 echo "LLVM:         $LLVM_COMMIT_OVERRIDE"
-echo "MLX:          $MLX_GIT_TAG"
 echo "Force:        $FORCE_REBUILD"
 echo ""
 
@@ -316,53 +305,6 @@ if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
     echo "XLA PJRT headers installed to $PREFIX"
 else
     echo "=== XLA PJRT headers already installed ==="
-fi
-
-# Build MLX (static library with GPU linalg patch)
-MLX_DIR="$BUILD_DIR/mlx"
-MLX_BUILD_DIR="$BUILD_DIR/mlx-build"
-if [ ! -f "$PREFIX/share/cmake/MLX/MLXConfig.cmake" ]; then
-    echo "=== Cloning MLX at tag $MLX_GIT_TAG ==="
-    if [ ! -d "$MLX_DIR" ]; then
-        mkdir -p "$MLX_DIR"
-        cd "$MLX_DIR"
-        git init
-        git remote add origin https://github.com/ml-explore/mlx.git
-        git fetch --depth 1 origin "$MLX_GIT_TAG"
-        git checkout FETCH_HEAD
-    else
-        cd "$MLX_DIR"
-        CURRENT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
-        if [ "$CURRENT_TAG" != "$MLX_GIT_TAG" ]; then
-            echo "=== Updating MLX to tag $MLX_GIT_TAG ==="
-            git fetch --depth 1 origin "$MLX_GIT_TAG"
-            git checkout FETCH_HEAD
-        fi
-    fi
-
-    echo "=== Applying MLX patches ==="
-    cd "$MLX_DIR"
-    git checkout -- . && git clean -fd
-    for patch in "$MLX_PATCHES_DIR"/*.patch; do
-        [ -f "$patch" ] && git apply --verbose "$patch"
-    done
-
-    echo "=== Building MLX (static) ==="
-    cmake -G Ninja -B "$MLX_BUILD_DIR" -S "$MLX_DIR" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DMLX_BUILD_TESTS=OFF \
-        -DMLX_BUILD_EXAMPLES=OFF \
-        -DMLX_BUILD_BENCHMARKS=OFF \
-        -DMLX_BUILD_PYTHON_BINDINGS=OFF
-
-    cmake --build "$MLX_BUILD_DIR" -j "$JOBS"
-    cmake --install "$MLX_BUILD_DIR"
-    echo "MLX installed to $PREFIX"
-else
-    echo "=== MLX already installed ==="
 fi
 
 echo ""

@@ -105,9 +105,31 @@ find_library(STABLEHLO_PASS_UTILS_LIB StablehloPassUtils HINTS ${CMAKE_PREFIX_PA
 find_library(STABLEHLO_TYPE_CONVERSION_LIB StablehloTypeConversion HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 find_library(VERSION_LIB Version HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 
-# MLX (pre-built by setup_deps.sh, installed to prefix)
-find_package(MLX REQUIRED CONFIG)
-message(STATUS "Found MLX: ${MLX_DIR}")
+# MLX as external project
+include(FetchContent)
+
+# Set MLX_VERSION before FetchContent so it's available during MLX's project() call
+set(MLX_VERSION "0.30.0" CACHE STRING "MLX version" FORCE)
+set(MLX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(MLX_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx/version.txt MLX_GIT_TAG)
+string(STRIP "${MLX_GIT_TAG}" MLX_GIT_TAG)
+
+FetchContent_Declare(
+    mlx
+    GIT_REPOSITORY https://github.com/ml-explore/mlx.git
+    GIT_TAG ${MLX_GIT_TAG}
+    PATCH_COMMAND git checkout -- . && git clean -fd && git apply --verbose
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx/patches/01-linalg-gpu-support.patch
+)
+FetchContent_MakeAvailable(mlx)
+
+# Link MetalPerformanceShaders to MLX for our GPU linalg patch.
+target_link_libraries(mlx PRIVATE ${MPS_FRAMEWORK})
 
 # Source files
 set(PJRT_SOURCES
