@@ -704,6 +704,48 @@ bool HandlePopcount(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
     return true;
 }
 
+// Apply edge padding that may include negative values (trimming).
+// Negative low/high means slice from that side; positive means pad.
+mlx::core::array ApplyEdgePadding(const mlx::core::array& input,
+                                  llvm::ArrayRef<int64_t> edgePaddingLow,
+                                  llvm::ArrayRef<int64_t> edgePaddingHigh,
+                                  const mlx::core::array& padValue) {
+    auto ndim = edgePaddingLow.size();
+    auto result = input;
+
+    // Trim (slice) for any negative padding values.
+    bool hasNeg = false;
+    for (size_t i = 0; i < ndim; ++i) {
+        if (edgePaddingLow[i] < 0 || edgePaddingHigh[i] < 0) {
+            hasNeg = true;
+            break;
+        }
+    }
+    if (hasNeg) {
+        mlx::core::Shape starts;
+        mlx::core::Shape stops;
+        mlx::core::Shape strides;
+        auto shape = result.shape();
+        for (size_t i = 0; i < ndim; ++i) {
+            int64_t lo = edgePaddingLow[i];
+            int64_t hi = edgePaddingHigh[i];
+            starts.push_back(static_cast<int>(lo < 0 ? -lo : 0));
+            stops.push_back(static_cast<int>(shape[i] + (hi < 0 ? hi : 0)));
+            strides.push_back(1);
+        }
+        result = mlx::core::slice(result, starts, stops, strides);
+    }
+
+    // Pad with clamped-to-zero values.
+    std::vector<std::pair<int, int>> padWidths;
+    padWidths.reserve(ndim);
+    for (size_t i = 0; i < ndim; ++i) {
+        padWidths.emplace_back(static_cast<int>(std::max<int64_t>(edgePaddingLow[i], 0)),
+                               static_cast<int>(std::max<int64_t>(edgePaddingHigh[i], 0)));
+    }
+    return mlx::core::pad(result, padWidths, padValue);
+}
+
 // Handler for stablehlo.pad
 bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                ExecContext& ctx) {
@@ -802,77 +844,13 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
                                                result, static_cast<int>(axis));
         }
 
-        // Handle negative edge padding (trimming) before positive padding.
-        bool hasNegEdge = false;
-        for (size_t i = 0; i < ndim; ++i) {
-            if (edgePaddingLow[i] < 0 || edgePaddingHigh[i] < 0) {
-                hasNegEdge = true;
-                break;
-            }
-        }
-        if (hasNegEdge) {
-            mlx::core::Shape starts;
-            mlx::core::Shape stops;
-            mlx::core::Shape strides;
-            auto shape = result.shape();
-            for (size_t i = 0; i < ndim; ++i) {
-                int64_t lo = edgePaddingLow[i];
-                int64_t hi = edgePaddingHigh[i];
-                starts.push_back(static_cast<int>(lo < 0 ? -lo : 0));
-                stops.push_back(static_cast<int>(shape[i] + (hi < 0 ? hi : 0)));
-                strides.push_back(1);
-            }
-            result = mlx::core::slice(result, starts, stops, strides);
-        }
-
-        std::vector<std::pair<int, int>> padWidths;
-        padWidths.reserve(ndim);
-        for (size_t i = 0; i < ndim; ++i) {
-            padWidths.emplace_back(static_cast<int>(std::max<int64_t>(edgePaddingLow[i], 0)),
-                                   static_cast<int>(std::max<int64_t>(edgePaddingHigh[i], 0)));
-        }
-        values.emplace(ToKey(op->getResult(0)), mlx::core::pad(result, padWidths, padValue));
+        values.emplace(ToKey(op->getResult(0)),
+                       ApplyEdgePadding(result, edgePaddingLow, edgePaddingHigh, padValue));
         return true;
     }
 
-    // Edge padding: handle negative padding (slicing) then positive padding.
-    // StableHLO allows negative edge padding which means "trim" from that side.
-    auto result = input;
-    bool needsSlice = false;
-    auto ndim = edgePaddingLow.size();
-
-    for (size_t i = 0; i < ndim; ++i) {
-        if (edgePaddingLow[i] < 0 || edgePaddingHigh[i] < 0) {
-            needsSlice = true;
-            break;
-        }
-    }
-
-    if (needsSlice) {
-        // Slice to handle negative padding (trimming).
-        mlx::core::Shape starts;
-        mlx::core::Shape stops;
-        mlx::core::Shape strides;
-        auto shape = result.shape();
-        for (size_t i = 0; i < ndim; ++i) {
-            int64_t lo = edgePaddingLow[i];
-            int64_t hi = edgePaddingHigh[i];
-            starts.push_back(static_cast<int>(lo < 0 ? -lo : 0));
-            stops.push_back(static_cast<int>(shape[i] + (hi < 0 ? hi : 0)));
-            strides.push_back(1);
-        }
-        result = mlx::core::slice(result, starts, stops, strides);
-    }
-
-    // Apply remaining positive padding.
-    std::vector<std::pair<int, int>> padWidths;
-    padWidths.reserve(ndim);
-    for (size_t i = 0; i < ndim; ++i) {
-        padWidths.emplace_back(static_cast<int>(std::max<int64_t>(edgePaddingLow[i], 0)),
-                               static_cast<int>(std::max<int64_t>(edgePaddingHigh[i], 0)));
-    }
-
-    values.emplace(ToKey(op->getResult(0)), mlx::core::pad(result, padWidths, padValue));
+    values.emplace(ToKey(op->getResult(0)),
+                   ApplyEdgePadding(input, edgePaddingLow, edgePaddingHigh, padValue));
     return true;
 }
 
