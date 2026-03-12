@@ -25,6 +25,7 @@ jobs:
               - 'pyproject.toml'
               - 'CMakeLists.txt'
               - 'scripts/setup_deps.sh'
+              - 'third_party/mlx/**'
 
   setup-deps:
     name: Setup dependencies
