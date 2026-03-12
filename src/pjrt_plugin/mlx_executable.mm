@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -2358,6 +2359,269 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     return true;
 }
 
+// Detect scatter update type from the body region (used by both select_and_scatter and scatter).
+enum class ScatterType { Update, Add, Sub, Mul, Min, Max, Unknown };
+
+ScatterType DetectScatterType(mlir::Region& body) {
+    if (body.empty())
+        return ScatterType::Unknown;
+
+    auto& block = body.front();
+    for (auto& op : block.getOperations()) {
+        auto opName = op.getName().getStringRef();
+        // The body takes (current, update) and returns the result
+        // For simple update: return update (the second arg)
+        if (opName == "stablehlo.return") {
+            // Check if it returns the second block argument directly
+            if (op.getNumOperands() == 1) {
+                auto returnVal = op.getOperand(0);
+                // If the return value is the second block argument, it's an update
+                if (returnVal == block.getArgument(1)) {
+                    return ScatterType::Update;
+                }
+            }
+        }
+        if (opName == "stablehlo.add")
+            return ScatterType::Add;
+        if (opName == "stablehlo.subtract")
+            return ScatterType::Sub;
+        if (opName == "stablehlo.multiply")
+            return ScatterType::Mul;
+        if (opName == "stablehlo.minimum")
+            return ScatterType::Min;
+        if (opName == "stablehlo.maximum")
+            return ScatterType::Max;
+    }
+    return ScatterType::Unknown;
+}
+
+// Handler for stablehlo.select_and_scatter (backward pass of max/min pooling)
+bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
+                            std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto ssOp = mlir::dyn_cast<mlir::stablehlo::SelectAndScatterOp>(op);
+    if (!ssOp) {
+        MPS_LOG_ERROR("stablehlo.select_and_scatter: failed to cast\n");
+        return false;
+    }
+
+    auto operand_opt = GetValue(values, ssOp.getOperand());
+    auto source_opt = GetValue(values, ssOp.getSource());
+    auto init_opt = GetValue(values, ssOp.getInitValue());
+    if (!operand_opt || !source_opt || !init_opt) {
+        MPS_LOG_ERROR("stablehlo.select_and_scatter: operand not found\n");
+        return false;
+    }
+    auto& operand = operand_opt->get();
+    auto& source = source_opt->get();
+    auto& initValue = init_opt->get();
+
+    auto rank = static_cast<int64_t>(operand.ndim());
+
+    // Parse window attributes (same pattern as reduce_window).
+    auto windowDimsOpt = ssOp.getWindowDimensions();
+    if (!windowDimsOpt) {
+        MPS_LOG_ERROR("stablehlo.select_and_scatter: window_dimensions required\n");
+        return false;
+    }
+    auto windowDims = *windowDimsOpt;
+
+    std::vector<int64_t> strides(rank, 1);
+    std::vector<int64_t> padLow(rank, 0);
+    std::vector<int64_t> padHigh(rank, 0);
+
+    if (auto s = ssOp.getWindowStrides()) {
+        for (int64_t i = 0; i < rank; i++)
+            strides[i] = (*s)[i];
+    }
+    if (auto p = ssOp.getPaddingAttr()) {
+        auto vals = p.getValues<int64_t>();
+        for (int64_t i = 0; i < rank; i++) {
+            padLow[i] = vals[{(uint64_t)i, 0}];
+            padHigh[i] = vals[{(uint64_t)i, 1}];
+        }
+    }
+
+    // Detect select type: GE/GT => max (argmax), LE/LT => min (argmin).
+    bool selectMax = true;
+    {
+        auto& body = ssOp.getSelect();
+        if (body.empty()) {
+            MPS_LOG_ERROR("stablehlo.select_and_scatter: empty select body\n");
+            return false;
+        }
+        bool found = false;
+        for (auto& bodyOp : body.front().getOperations()) {
+            if (auto cmpOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(bodyOp)) {
+                auto dir = cmpOp.getComparisonDirection();
+                if (dir == mlir::stablehlo::ComparisonDirection::GE ||
+                    dir == mlir::stablehlo::ComparisonDirection::GT) {
+                    selectMax = true;
+                } else {
+                    selectMax = false;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            MPS_LOG_ERROR("stablehlo.select_and_scatter: no compare in select body\n");
+            return false;
+        }
+    }
+
+    // Detect scatter type (typically add for pool gradients).
+    ScatterType scatterType = DetectScatterType(ssOp.getScatter());
+    if (scatterType != ScatterType::Add) {
+        MPS_LOG_ERROR("stablehlo.select_and_scatter: only add scatter supported (got %d)\n",
+                      static_cast<int>(scatterType));
+        return false;
+    }
+
+    // Pad operand so windows can cover edge positions.
+    // Pad with -inf (max-select) or +inf (min-select) so padded elements are never selected.
+    mlx::core::array padded = operand;
+    bool needsPad = false;
+    for (int64_t i = 0; i < rank; i++) {
+        if (padLow[i] != 0 || padHigh[i] != 0) {
+            needsPad = true;
+            break;
+        }
+    }
+    if (needsPad) {
+        float padScalar = selectMax ? -std::numeric_limits<float>::infinity()
+                                    : std::numeric_limits<float>::infinity();
+        auto padVal = mlx::core::full({}, padScalar, operand.dtype());
+        std::vector<std::pair<int, int>> padWidth(rank);
+        for (int64_t i = 0; i < rank; i++)
+            padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
+        padded = mlx::core::pad(operand, padWidth, padVal);
+    }
+
+    auto paddedShape = padded.shape();
+
+    // Compute output shape (should match source shape).
+    std::vector<int> outShape(rank);
+    for (int64_t i = 0; i < rank; i++)
+        outShape[i] = static_cast<int>((paddedShape[i] - windowDims[i]) / strides[i] + 1);
+
+    // Create windowed view using as_strided: [out_dims..., win_dims...].
+    mlx::core::Shape viewShape;
+    for (int64_t i = 0; i < rank; i++)
+        viewShape.push_back(outShape[i]);
+    for (int64_t i = 0; i < rank; i++)
+        viewShape.push_back(static_cast<int32_t>(windowDims[i]));
+
+    std::vector<int64_t> elemStrides(rank);
+    elemStrides[rank - 1] = 1;
+    for (int64_t i = rank - 2; i >= 0; i--)
+        elemStrides[i] = elemStrides[i + 1] * paddedShape[i + 1];
+
+    mlx::core::Strides viewStrides;
+    for (int64_t i = 0; i < rank; i++)
+        viewStrides.push_back(strides[i] * elemStrides[i]);
+    for (int64_t i = 0; i < rank; i++)
+        viewStrides.push_back(elemStrides[i]);
+
+    auto windowed = mlx::core::as_strided(padded, viewShape, viewStrides, 0);
+
+    // Flatten window dimensions into one axis and find argmax/argmin.
+    int64_t winTotal = 1;
+    for (int64_t i = 0; i < rank; i++)
+        winTotal *= windowDims[i];
+
+    mlx::core::Shape flatWinShape;
+    for (int64_t i = 0; i < rank; i++)
+        flatWinShape.push_back(outShape[i]);
+    flatWinShape.push_back(static_cast<int32_t>(winTotal));
+
+    auto windowedFlat = mlx::core::reshape(windowed, flatWinShape);
+    int flatAxis = static_cast<int>(rank);
+    auto selectedIdx = selectMax ? mlx::core::argmax(windowedFlat, flatAxis)
+                                 : mlx::core::argmin(windowedFlat, flatAxis);
+    // argmax/argmin returns uint32; cast to int32 for arithmetic.
+    selectedIdx = mlx::core::astype(selectedIdx, mlx::core::int32);
+
+    // Convert flat window indices to linear indices in the (unpadded) operand.
+    // Unravel flat index f into per-dimension window coords:
+    //   win_coord[k] = (f / divisor[k]) % windowDims[k]
+    // Then compute operand position:
+    //   operand_pos[k] = out_coord[k] * stride[k] + win_coord[k] - padLow[k]
+    // Linear index = sum(operand_pos[k] * operand_elem_stride[k])
+
+    auto operandShape = operand.shape();
+    std::vector<int64_t> opElemStrides(rank);
+    opElemStrides[rank - 1] = 1;
+    for (int64_t i = rank - 2; i >= 0; i--)
+        opElemStrides[i] = opElemStrides[i + 1] * operandShape[i + 1];
+
+    // Divisors for unraveling: divisor[k] = product of windowDims[k+1..rank-1].
+    std::vector<int64_t> winDivisors(rank);
+    winDivisors[rank - 1] = 1;
+    for (int64_t i = rank - 2; i >= 0; i--)
+        winDivisors[i] = winDivisors[i + 1] * windowDims[i + 1];
+
+    auto linearIdx = mlx::core::zeros(selectedIdx.shape(), mlx::core::int32);
+
+    for (int64_t k = 0; k < rank; k++) {
+        // Extract window coordinate for dimension k.
+        // Note: mlx::core::divide promotes int32 to float32, so we cast back.
+        auto quotient = mlx::core::astype(
+            mlx::core::divide(selectedIdx, mlx::core::array(static_cast<int32_t>(winDivisors[k]),
+                                                            mlx::core::int32)),
+            mlx::core::int32);
+        auto winCoord = mlx::core::remainder(
+            quotient, mlx::core::array(static_cast<int32_t>(windowDims[k]), mlx::core::int32));
+
+        // Create output coordinate array for dimension k (broadcasts with other dims).
+        mlx::core::Shape coordShape(rank, 1);
+        coordShape[k] = outShape[k];
+        auto outCoord =
+            mlx::core::reshape(mlx::core::arange(outShape[k], mlx::core::int32), coordShape);
+
+        // operand_pos[k] = out_coord[k] * stride[k] + win_coord[k] - padLow[k]
+        auto operandPos = mlx::core::add(
+            mlx::core::add(
+                mlx::core::multiply(
+                    outCoord, mlx::core::array(static_cast<int32_t>(strides[k]), mlx::core::int32)),
+                winCoord),
+            mlx::core::array(static_cast<int32_t>(-padLow[k]), mlx::core::int32));
+
+        // Accumulate into linear index.
+        linearIdx = mlx::core::add(
+            linearIdx,
+            mlx::core::multiply(operandPos, mlx::core::array(static_cast<int32_t>(opElemStrides[k]),
+                                                             mlx::core::int32)));
+    }
+
+    // Scatter source values into a flat output initialized with init_value.
+    int32_t operandTotal = 1;
+    for (int64_t i = 0; i < rank; i++)
+        operandTotal *= operandShape[i];
+
+    auto flatOutput = mlx::core::full({operandTotal}, initValue);
+    auto flatSource = mlx::core::flatten(source);
+    auto flatIdx = mlx::core::flatten(linearIdx);
+
+    // Ensure indices are int32 (required by MLX scatter).
+    if (flatIdx.dtype() != mlx::core::int32) {
+        flatIdx = mlx::core::astype(flatIdx, mlx::core::int32);
+    }
+
+    // MLX scatter expects updates shape [idx_shape..., slice_shape...] where
+    // slice_shape has size-1 at scatter axes. For 1D scatter along axis 0,
+    // updates need shape [M, 1] and indices shape [M].
+    int32_t sourceTotal = 1;
+    for (auto d : source.shape())
+        sourceTotal *= d;
+    flatSource = mlx::core::reshape(flatSource, {sourceTotal, 1});
+
+    auto result = mlx::core::scatter_add(flatOutput, {flatIdx}, flatSource, {0});
+    result = mlx::core::reshape(result, operand.shape());
+
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
 // Handler for stablehlo.dot_general
 bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -2896,42 +3160,6 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
     }
 
     return true;
-}
-
-// Detect scatter update type from the body region
-enum class ScatterType { Update, Add, Sub, Mul, Min, Max, Unknown };
-
-ScatterType DetectScatterType(mlir::Region& body) {
-    if (body.empty())
-        return ScatterType::Unknown;
-
-    auto& block = body.front();
-    for (auto& op : block.getOperations()) {
-        auto opName = op.getName().getStringRef();
-        // The body takes (current, update) and returns the result
-        // For simple update: return update (the second arg)
-        if (opName == "stablehlo.return") {
-            // Check if it returns the second block argument directly
-            if (op.getNumOperands() == 1) {
-                auto returnVal = op.getOperand(0);
-                // If the return value is the second block argument, it's an update
-                if (returnVal == block.getArgument(1)) {
-                    return ScatterType::Update;
-                }
-            }
-        }
-        if (opName == "stablehlo.add")
-            return ScatterType::Add;
-        if (opName == "stablehlo.subtract")
-            return ScatterType::Sub;
-        if (opName == "stablehlo.multiply")
-            return ScatterType::Mul;
-        if (opName == "stablehlo.minimum")
-            return ScatterType::Min;
-        if (opName == "stablehlo.maximum")
-            return ScatterType::Max;
-    }
-    return ScatterType::Unknown;
 }
 
 // Handler for stablehlo.scatter
@@ -3498,6 +3726,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         // Reduction
         {"stablehlo.reduce", HandleReduce},
         {"stablehlo.reduce_window", HandleReduceWindow},
+        {"stablehlo.select_and_scatter", HandleSelectAndScatter},
         // Control flow
         {"func.return", HandleReturn},
         {"func.call", HandleCall},
