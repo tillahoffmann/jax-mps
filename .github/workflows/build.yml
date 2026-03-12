@@ -58,7 +58,7 @@ jobs:
 
   build:
     name: Build wheel
-    needs: setup-deps
+    needs: [setup-deps, lint-python]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -147,8 +147,9 @@ jobs:
 
       - name: pyright
         run: |
-          uv sync --no-install-project --all-groups
-          uv run pyright
+          uv venv
+          uv export --no-emit-project --all-groups | uv pip install -r -
+          .venv/bin/pyright
 
   build-dev:
     name: Build dev wheel
