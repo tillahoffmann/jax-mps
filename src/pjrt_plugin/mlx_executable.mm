@@ -2235,8 +2235,9 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         return false;
     }
 
-    if (reduceType != ReduceType::Max && reduceType != ReduceType::Sum) {
-        MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum only\n");
+    if (reduceType != ReduceType::Max && reduceType != ReduceType::Sum &&
+        reduceType != ReduceType::Min) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum/min only\n");
         return false;
     }
 
@@ -2308,9 +2309,13 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         reduceAxes.push_back(static_cast<int>(i));
     }
 
-    mlx::core::array result = (reduceType == ReduceType::Max)
-                                  ? mlx::core::max(windowed, reduceAxes)
-                                  : mlx::core::sum(windowed, reduceAxes);
+    mlx::core::array result = [&]() {
+        if (reduceType == ReduceType::Max)
+            return mlx::core::max(windowed, reduceAxes);
+        if (reduceType == ReduceType::Min)
+            return mlx::core::min(windowed, reduceAxes);
+        return mlx::core::sum(windowed, reduceAxes);
+    }();
 
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;

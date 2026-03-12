@@ -169,4 +169,24 @@ def make_reduction_op_configs():
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="avgpool2d-valid",
             ),
+            # Min pool 2D: window=(1,2,2,1), stride=(1,2,2,1) VALID
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, jnp.inf, lax.min, (1, 2, 2, 1), (1, 2, 2, 1), "valid"
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="minpool2d-valid",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
+            # Min pool 1D: window=2, stride=2 on last axis (VALID padding)
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, jnp.inf, lax.min, (1, 2), (1, 2), "valid"
+                ),
+                lambda key: random.normal(key, (2, 8)),
+                name="minpool1d-valid",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
         ]
