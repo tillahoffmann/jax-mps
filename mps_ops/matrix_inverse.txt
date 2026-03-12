@@ -1,3 +1,0 @@
-# MATRIX INVERSE (MPSGraphMatrixInverseOps.h)
-
-inverseOfTensor:name:
