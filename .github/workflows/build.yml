@@ -37,7 +37,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
 
       - name: Install build tools
         if: steps.cache.outputs.cache-hit != 'true'
@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
 
   build:
     name: Build wheel
@@ -72,7 +72,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Install dependencies
@@ -105,7 +105,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Install llvm
@@ -175,7 +175,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
+          key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Build dev wheel
