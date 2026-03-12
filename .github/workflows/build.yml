@@ -33,12 +33,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Restore deps from cache
+      - name: Check deps cache
         id: cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: deps-v3-macos14-${{ hashFiles('scripts/setup_deps.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          lookup-only: true
 
       - name: Install build tools
         if: steps.cache.outputs.cache-hit != 'true'
