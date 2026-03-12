@@ -130,7 +130,8 @@ jobs:
 
   lint-python:
     name: Lint Python
-    runs-on: ubuntu-latest
+    needs: build
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -139,16 +140,25 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist/
+
+      - name: Install wheel and dependencies
+        run: |
+          uv sync --all-groups --no-install-project
+          uv pip install dist/*.whl
+
       - name: ruff format
-        run: uvx ruff@0.14.13 format --check src tests
+        run: .venv/bin/ruff format --check src tests
 
       - name: ruff check
-        run: uvx ruff@0.14.13 check src tests
+        run: .venv/bin/ruff check src tests
 
       - name: pyright
-        run: |
-          uv export --no-emit-project --all-groups | uv pip install -r -
-          .venv/bin/pyright
+        run: .venv/bin/pyright
 
   build-dev:
     name: Build dev wheel
