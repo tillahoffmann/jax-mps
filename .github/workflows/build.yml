@@ -15,7 +15,7 @@ jobs:
     outputs:
       wheel: ${{ steps.filter.outputs.wheel }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -30,11 +30,11 @@ jobs:
     name: Setup dependencies
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Restore deps from cache
         id: cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
@@ -51,7 +51,7 @@ jobs:
 
       - name: Save cache
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
@@ -61,7 +61,7 @@ jobs:
     needs: setup-deps
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -69,16 +69,14 @@ jobs:
           python-version: "3.13"
 
       - name: Restore deps from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
           fail-on-cache-miss: true
 
-      - name: Install project and dev dependencies
-        run: uv sync --all-groups
-        env:
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+      - name: Install dependencies
+        run: uv sync --all-groups --no-install-project
 
       - name: Build wheel
         run: uv build --wheel
@@ -86,7 +84,7 @@ jobs:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheel
           path: dist/*.whl
@@ -96,7 +94,7 @@ jobs:
     needs: setup-deps
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -104,7 +102,7 @@ jobs:
           python-version: "3.13"
 
       - name: Restore deps from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
@@ -130,36 +128,35 @@ jobs:
 
   lint-python:
     name: Lint Python
-    needs: setup-deps
+    needs: build
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
 
-      - name: Restore deps from cache
-        uses: actions/cache/restore@v4
+      - name: Download wheel
+        uses: actions/download-artifact@v8
         with:
-          path: ${{ github.workspace }}/.jax-mps-deps
-          key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
-          fail-on-cache-miss: true
+          name: wheel
+          path: dist/
 
-      - name: Install project dependencies
-        run: uv sync --all-groups
-        env:
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
+      - name: Install wheel and dependencies
+        run: |
+          uv sync --all-groups --no-install-project
+          uv pip install dist/*.whl
 
       - name: ruff format
-        run: uv run ruff format --check src tests
+        run: .venv/bin/ruff format --check src tests
 
       - name: ruff check
-        run: uv run ruff check src tests
+        run: .venv/bin/ruff check src tests
 
       - name: pyright
-        run: uv run pyright
+        run: .venv/bin/pyright
 
   build-dev:
     name: Build dev wheel
@@ -167,7 +164,7 @@ jobs:
     runs-on: macos-14
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.wheel == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -175,7 +172,7 @@ jobs:
           python-version: "3.13"
 
       - name: Restore deps from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps
           key: mlir-stablehlo-v2-macos14-${{ hashFiles('scripts/setup_deps.sh') }}
@@ -192,7 +189,7 @@ jobs:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/.jax-mps-deps
 
       - name: Upload dev wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheel-dev
           path: dist/*.whl
@@ -202,7 +199,7 @@ jobs:
     needs: build
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -210,7 +207,7 @@ jobs:
           python-version: "3.13"
 
       - name: Download wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wheel
           path: dist/
@@ -247,13 +244,13 @@ jobs:
       contents: write
     steps:
       - name: Download wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wheel
           path: dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*.whl
           generate_release_notes: true
@@ -270,7 +267,7 @@ jobs:
       id-token: write
     steps:
       - name: Download dev wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wheel-dev
           path: dist/
