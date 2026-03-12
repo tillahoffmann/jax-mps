@@ -60,14 +60,16 @@ def make_shape_op_configs():
             OperationTestConfig(
                 lambda x: jnp.pad(x, ((1, 1), (2, 2))),
                 lambda key: random.normal(key, (3, 3)),
-                # Grad crashes with fatal Metal abort (sliceUpdateDataTensor shape mismatch).
-                differentiable_argnums=(),
             ),
             # Pad with interior padding
             OperationTestConfig(
                 lambda x: jax.lax.pad(x, 0.0, [(1, 1, 1), (0, 0, 2)]),
                 lambda key: random.normal(key, (3, 4)),
-                # Grad crashes with fatal Metal abort (see #59).
-                differentiable_argnums=(),
+            ),
+            # Pad with negative edge padding (trimming)
+            OperationTestConfig(
+                lambda x: jax.lax.pad(x, 0.0, [(-1, 2, 0), (0, -1, 0)]),
+                lambda key: random.normal(key, (4, 5)),
+                name="pad-negative-edge",
             ),
         ]
