@@ -63,13 +63,11 @@ def make_reduction_op_configs():
                 lambda x: lax.cummax(x, axis=1),
                 lambda key: random.normal(key, (3, 5)),
                 name="cummax-axis1",
-                differentiable_argnums=(),
             ),
             OperationTestConfig(
                 lambda x: lax.cummin(x, axis=1),
                 lambda key: random.normal(key, (3, 5)),
                 name="cummin-axis1",
-                differentiable_argnums=(),
             ),
         ]
 
@@ -83,8 +81,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8)),
                 name="maxpool1d-valid",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Max pool 2D: window=(1,2,2,1), stride=(1,2,2,1) VALID
             OperationTestConfig(
@@ -93,8 +89,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-valid",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Sum pool 2D: window=(1,2,2,1), stride=(1,2,2,1) VALID
             OperationTestConfig(
@@ -111,8 +105,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-same",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Max pool 2D with window dilation: window=(1,2,2,1), stride=(1,1,1,1),
             # window_dilation=(1,2,2,1) and VALID padding.
@@ -129,7 +121,7 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-window-dilation",
-                # Grad requires pad with interior/window dilation (not yet supported)
+                # JAX VJP not implemented for window dilation
                 differentiable_argnums=(),
             ),
             # Overlapping max pool: window=3, stride=1 (common in CNNs)
@@ -139,8 +131,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-overlapping",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Non-square window: 2x3 window
             OperationTestConfig(
@@ -149,8 +139,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 9, 3)),
                 name="maxpool2d-nonsquare",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Sum pool with SAME padding
             OperationTestConfig(
@@ -176,8 +164,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="minpool2d-valid",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Min pool 1D: window=2, stride=2 on last axis (VALID padding)
             OperationTestConfig(
@@ -186,8 +172,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8)),
                 name="minpool1d-valid",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Min pool 2D SAME padding: window=(1,3,3,1), stride=(1,1,1,1)
             OperationTestConfig(
@@ -196,8 +180,6 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="minpool2d-same",
-                # Grad requires select_and_scatter (not yet supported)
-                differentiable_argnums=(),
             ),
             # Min pool 2D with window dilation
             OperationTestConfig(
@@ -213,7 +195,7 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="minpool2d-window-dilation",
-                # Grad requires select_and_scatter (not yet supported)
+                # JAX VJP not implemented for window dilation
                 differentiable_argnums=(),
             ),
         ]
