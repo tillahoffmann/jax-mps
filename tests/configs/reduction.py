@@ -189,4 +189,31 @@ def make_reduction_op_configs():
                 # Grad requires select_and_scatter (not yet supported)
                 differentiable_argnums=(),
             ),
+            # Min pool 2D SAME padding: window=(1,3,3,1), stride=(1,1,1,1)
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, jnp.inf, lax.min, (1, 3, 3, 1), (1, 1, 1, 1), "same"
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="minpool2d-same",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
+            # Min pool 2D with window dilation
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x,
+                    jnp.inf,
+                    lax.min,
+                    (1, 2, 2, 1),
+                    (1, 1, 1, 1),
+                    "valid",
+                    None,
+                    (1, 2, 2, 1),
+                ),
+                lambda key: random.normal(key, (2, 8, 8, 3)),
+                name="minpool2d-window-dilation",
+                # Grad requires select_and_scatter (not yet supported)
+                differentiable_argnums=(),
+            ),
         ]
