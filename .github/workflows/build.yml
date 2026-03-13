@@ -144,7 +144,7 @@ jobs:
       - name: Build wheel
         run: uv build --wheel
         env:
-          CMAKE_PREFIX_PATH: "${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
+          CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v7
@@ -277,7 +277,7 @@ jobs:
           sed -i '' "s/^version = \".*\"/version = \"$DEV_VERSION\"/" pyproject.toml
           uv build --wheel
         env:
-          CMAKE_PREFIX_PATH: "${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
+          CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload dev wheel
         uses: actions/upload-artifact@v7
