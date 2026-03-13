@@ -283,4 +283,40 @@ def make_slice_op_configs():
                 differentiable_argnums=(0,),
                 name="scatter_vmap_2d_diagonal",
             ),
+            # Partial-index gather with non-sorted startIndexMap.
+            # start_index_map=(2, 0) means idx[0]->dim2, idx[1]->dim0.
+            # Strides must follow sorted collapsed-dim order, not startIndexMap order.
+            # Indices [3, 2] select dim2=3, dim0=2 => x[2, :, 3].
+            # With shape (3,4,5), wrong strides give linear idx 11 instead of 13.
+            OperationTestConfig(
+                lambda x: lax.gather(
+                    x,
+                    jnp.array([[3, 2]]),
+                    dimension_numbers=lax.GatherDimensionNumbers(
+                        offset_dims=(1,),
+                        collapsed_slice_dims=(0, 2),
+                        start_index_map=(2, 0),
+                    ),
+                    slice_sizes=(1, 4, 1),
+                ),
+                lambda key: random.normal(key, (3, 4, 5)),
+                name="partial_gather_reversed_index_map",
+            ),
+            # Fix 3: Partial-index gather with scalar indices.
+            # indices shape [2] with indexVectorDim=0 => each sub-index is scalar.
+            # linearIdx must be padded to match flatOperand.ndim() for take_along_axis.
+            OperationTestConfig(
+                lambda x: lax.gather(
+                    x,
+                    jnp.array([1, 0]),
+                    dimension_numbers=lax.GatherDimensionNumbers(
+                        offset_dims=(0,),
+                        collapsed_slice_dims=(0, 2),
+                        start_index_map=(0, 2),
+                    ),
+                    slice_sizes=(1, 4, 1),
+                ),
+                lambda key: random.normal(key, (3, 4, 5)),
+                name="partial_gather_scalar_indices",
+            ),
         ]

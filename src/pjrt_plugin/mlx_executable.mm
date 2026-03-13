@@ -959,9 +959,9 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
                 // Batched gather: use take_along_axis which naturally handles
                 // per-element indexing (result[b,i] = operand[b, indices[b,i]]).
                 // take_along_axis requires indices to have the same ndim as operand.
+                // Append trailing size-1 dims for any offset dims beyond the gather axis.
                 auto batchedIndices = indices;
                 if (batchedIndices.ndim() < operand.ndim()) {
-                    // Expand dims at the gather axis position to match operand ndim
                     mlx::core::Shape expandedShape = batchedIndices.shape();
                     while (static_cast<int>(expandedShape.size()) < operand.ndim()) {
                         expandedShape.push_back(1);
@@ -1080,25 +1080,34 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             flatShape.push_back(flattenedSize);
             auto flatOperand = mlx::core::reshape(permuted, flatShape);
 
-            // Compute linear indices within the collapsed dims
-            // Map from startIndexMap axes to their position in the collapsed portion
+            // Compute linear indices within the collapsed dims.
+            // Collapsed dims are flattened in sorted operand-dim order, so compute
+            // strides based on that order rather than startIndexMap order.
+            std::vector<int> collapsedDimsSorted(collapsedSet.begin(), collapsedSet.end());
+            std::sort(collapsedDimsSorted.begin(), collapsedDimsSorted.end());
+            std::map<int, int> strideMap;
+            int s = 1;
+            for (int i = static_cast<int>(collapsedDimsSorted.size()) - 1; i >= 0; --i) {
+                strideMap[collapsedDimsSorted[i]] = s;
+                s *= operand.shape(collapsedDimsSorted[i]);
+            }
             auto linearIdx = mlx::core::array(0, mlx::core::int32);
             for (size_t i = 0; i < axes.size(); ++i) {
-                // Compute stride within collapsed dims (in original operand order)
-                int stride = 1;
-                for (size_t j = i + 1; j < axes.size(); ++j) {
-                    stride *= operand.shape(axes[j]);
-                }
                 linearIdx = mlx::core::add(
-                    linearIdx,
-                    mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
+                    linearIdx, mlx::core::multiply(idxVec[i], mlx::core::array(strideMap[axes[i]],
+                                                                               mlx::core::int32)));
             }
 
-            // Expand indices to match flatOperand broadcasting: add offset dims
+            // Expand linearIdx to have ndim == flatOperand.ndim() for take_along_axis.
+            // Prepend numOffset singleton dims (offset axes) and append any missing
+            // trailing dims so the total rank matches flatOperand exactly.
             mlx::core::Shape expandedShape(numOffset, 1);
             auto idxBatchShape = linearIdx.shape();
             for (int d : idxBatchShape) {
                 expandedShape.push_back(d);
+            }
+            while (static_cast<int>(expandedShape.size()) < flatOperand.ndim()) {
+                expandedShape.push_back(1);
             }
             linearIdx = mlx::core::reshape(linearIdx, expandedShape);
 
