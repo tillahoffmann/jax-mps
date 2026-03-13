@@ -16,7 +16,7 @@ def _run(cmd):
 def _get_memory_gb():
     try:
         mem_bytes = int(_run(["sysctl", "-n", "hw.memsize"]))
-        return f"{int(mem_bytes / (1024**3))} GB"
+        return f"{mem_bytes // (1024**3)} GB"
     except (ValueError, TypeError):
         return "unknown"
 
