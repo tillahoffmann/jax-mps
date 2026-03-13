@@ -2,7 +2,7 @@
 # Common setup for jax-mps dependency build scripts.
 # Source this file from component scripts; do not execute directly.
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -23,7 +23,7 @@ done
 
 mkdir -p "$PREFIX" "$BUILD_DIR"
 
-for tool in cmake ninja git; do
+for tool in cmake ninja git curl; do
     if ! command -v $tool &> /dev/null; then
         echo "Error: $tool is required but not installed"
         echo "On macOS: brew install cmake ninja"

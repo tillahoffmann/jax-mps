@@ -22,6 +22,7 @@ echo ""
 
 if [ "$FORCE_REBUILD" = true ]; then
     rm -rf "$PREFIX/share/cmake/MLX" "$PREFIX/lib/libmlx.a"
+    rm -f "$PREFIX/.mlx-tag"
     rm -rf "$BUILD_DIR/mlx-build"
 fi
 
