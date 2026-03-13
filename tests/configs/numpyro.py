@@ -1,9 +1,8 @@
-import pytest
 from jax import numpy as jnp
 from jax import random
 from numpyro import distributions as dists
 
-from .util import OperationTestConfig, xfail_match
+from .util import OperationTestConfig
 
 
 class NumpyroDistributionTestConfig(OperationTestConfig):
@@ -195,19 +194,14 @@ def make_numpyro_op_configs():
                     lambda key: jnp.linalg.cholesky(jnp.eye(4) + jnp.ones((4, 4))),
                     grad_xfail=None,
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.LowRankMultivariateNormal,
-                        lambda key, bs=batch_shape: random.normal(
-                            key, bs + (4,)
-                        ),  # loc
-                        lambda key, bs=batch_shape: random.normal(
-                            key, bs + (4, 2)
-                        ),  # cov_factor
-                        lambda key, bs=batch_shape: random.gamma(
-                            key, 5.0, bs + (4,)
-                        ),  # cov_diag
-                    ),
-                    marks=[xfail_match("Output count mismatch")] if batch_shape else [],
+                NumpyroDistributionTestConfig(
+                    dists.LowRankMultivariateNormal,
+                    lambda key, bs=batch_shape: random.normal(key, bs + (4,)),  # loc
+                    lambda key, bs=batch_shape: random.normal(
+                        key, bs + (4, 2)
+                    ),  # cov_factor
+                    lambda key, bs=batch_shape: random.gamma(
+                        key, 5.0, bs + (4,)
+                    ),  # cov_diag
                 ),
             ]

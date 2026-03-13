@@ -977,24 +977,21 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
         return true;
     }
 
-    // Multi-dim gather: all dims collapsed (full index gather)
+    // Multi-dim gather: multiple start_index_map dims, all collapsed
     // This handles patterns like operand[idx[0], idx[1], ..., idx[N-1]]
-    // where indexVectorDim points to the axis containing per-dim indices
+    // where indexVectorDim points to the axis containing per-dim indices.
+    // When offset_dims is non-empty, some operand dims are preserved in output.
     if (startIndexMap.size() == collapsedSliceDims.size() && startIndexMap.size() > 1) {
-        // Extract per-axis indices by slicing along the index vector dim
         auto indices = startIndices;
-
-        // Determine batch shape (all dims except indexVectorDim)
         auto idxShape = indices.shape();
 
-        // Build per-axis index arrays
+        // Build per-axis index arrays and extract from index_vector_dim
         std::vector<mlx::core::array> idxVec;
         std::vector<int> axes;
         for (size_t i = 0; i < startIndexMap.size(); ++i) {
             int axis = static_cast<int>(startIndexMap[i]);
             axes.push_back(axis);
 
-            // Slice the index vector dim to get indices for this axis
             mlx::core::Shape starts(indices.ndim(), 0);
             mlx::core::Shape stops(idxShape.begin(), idxShape.end());
             starts[indexVectorDim] = static_cast<int>(i);
@@ -1004,44 +1001,99 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             if (axisIndices.dtype() != mlx::core::int32) {
                 axisIndices = mlx::core::astype(axisIndices, mlx::core::int32);
             }
+            // Clamp to valid range
+            axisIndices =
+                mlx::core::clip(axisIndices, mlx::core::array(0, mlx::core::int32),
+                                mlx::core::array(operand.shape(axis) - 1, mlx::core::int32));
             idxVec.push_back(axisIndices);
         }
 
-        // Use gather to extract values at the specified indices
-        // For full-index gather, each index set picks a single scalar from operand
-        // We need operand[idx0, idx1, ...] which is gather with all axes
-        auto result = operand;
-        // Apply takes sequentially for each axis
-        // Actually use the multi-axis indexing: reshape indices for advanced indexing
-        // For a scalar gather: idxVec has N scalar arrays, just do nested take
-        // For batched gather: each idxVec[i] has the same batch shape
-
-        // MLX doesn't have a multi-axis gather directly, but we can use
-        // sequential take_along_axis or flatten + single gather
-        // Flatten the operand and compute linear indices
-        auto flatOperand = mlx::core::flatten(operand);
-        auto linearIdx = idxVec[0];
-        // Clamp indices to valid range
-        for (size_t i = 0; i < axes.size(); ++i) {
-            auto clamped =
-                mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
-                                mlx::core::array(operand.shape(axes[i]) - 1, mlx::core::int32));
-            idxVec[i] = clamped;
-        }
-        // Compute linear index: idx[0] * stride[0] + idx[1] * stride[1] + ...
-        linearIdx = mlx::core::array(0, mlx::core::int32);
-        for (size_t i = 0; i < axes.size(); ++i) {
-            // Compute stride for this axis
-            int stride = 1;
-            for (int d = axes[i] + 1; d < operand.ndim(); ++d) {
-                stride *= operand.shape(d);
+        // Identify which operand dims are offset dims (not collapsed)
+        std::set<int> collapsedSet(collapsedSliceDims.begin(), collapsedSliceDims.end());
+        std::vector<int> offsetOperandDims;
+        for (int d = 0; d < operand.ndim(); ++d) {
+            if (collapsedSet.count(d) == 0) {
+                offsetOperandDims.push_back(d);
             }
-            linearIdx = mlx::core::add(
-                linearIdx,
-                mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
         }
 
-        result = mlx::core::take(flatOperand, linearIdx, 0);
+        mlx::core::array result = operand;
+
+        if (offsetOperandDims.empty()) {
+            // Full-index gather: all dims collapsed, flatten and use linear indices
+            auto flatOperand = mlx::core::flatten(operand);
+            auto linearIdx = mlx::core::array(0, mlx::core::int32);
+            for (size_t i = 0; i < axes.size(); ++i) {
+                int stride = 1;
+                for (int d = axes[i] + 1; d < operand.ndim(); ++d) {
+                    stride *= operand.shape(d);
+                }
+                linearIdx = mlx::core::add(
+                    linearIdx,
+                    mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
+            }
+            result = mlx::core::take(flatOperand, linearIdx, 0);
+        } else {
+            // Partial-index gather: some dims are offset (preserved), rest are collapsed.
+            // Transpose operand to put offset dims first, collapsed dims last,
+            // flatten the collapsed dims, compute linear indices, then use take_along_axis.
+            std::vector<int> perm;
+            perm.reserve(operand.ndim());
+            for (int d : offsetOperandDims) {
+                perm.push_back(d);
+            }
+            for (int d = 0; d < operand.ndim(); ++d) {
+                if (collapsedSet.count(d) != 0) {
+                    perm.push_back(d);
+                }
+            }
+
+            bool needsPerm = false;
+            for (int i = 0; i < static_cast<int>(perm.size()); ++i) {
+                if (perm[i] != i) {
+                    needsPerm = true;
+                    break;
+                }
+            }
+            auto permuted = needsPerm ? mlx::core::transpose(operand, perm) : operand;
+
+            // Flatten collapsed dims into a single dim
+            int numOffset = static_cast<int>(offsetOperandDims.size());
+            mlx::core::Shape flatShape;
+            for (int i = 0; i < numOffset; ++i) {
+                flatShape.push_back(permuted.shape(i));
+            }
+            int flattenedSize = 1;
+            for (int i = numOffset; i < permuted.ndim(); ++i) {
+                flattenedSize *= permuted.shape(i);
+            }
+            flatShape.push_back(flattenedSize);
+            auto flatOperand = mlx::core::reshape(permuted, flatShape);
+
+            // Compute linear indices within the collapsed dims
+            // Map from startIndexMap axes to their position in the collapsed portion
+            auto linearIdx = mlx::core::array(0, mlx::core::int32);
+            for (size_t i = 0; i < axes.size(); ++i) {
+                // Compute stride within collapsed dims (in original operand order)
+                int stride = 1;
+                for (size_t j = i + 1; j < axes.size(); ++j) {
+                    stride *= operand.shape(axes[j]);
+                }
+                linearIdx = mlx::core::add(
+                    linearIdx,
+                    mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
+            }
+
+            // Expand indices to match flatOperand broadcasting: add offset dims
+            mlx::core::Shape expandedShape(numOffset, 1);
+            auto idxBatchShape = linearIdx.shape();
+            for (int d : idxBatchShape) {
+                expandedShape.push_back(d);
+            }
+            linearIdx = mlx::core::reshape(linearIdx, expandedShape);
+
+            result = mlx::core::take_along_axis(flatOperand, linearIdx, numOffset);
+        }
 
         // Reshape to expected output shape
         auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
