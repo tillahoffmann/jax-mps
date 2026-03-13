@@ -2278,6 +2278,12 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     auto inputShape = inputType.getShape();
     auto rank = static_cast<int64_t>(inputShape.size());
 
+    // Handle scalar (0-dimensional) inputs: reduce_window on a scalar is identity.
+    if (rank == 0) {
+        values.emplace(ToKey(op->getResult(0)), input);
+        return true;
+    }
+
     auto windowDims = rwOp.getWindowDimensions();
     auto stridesOpt = rwOp.getWindowStrides();
     auto baseDilOpt = rwOp.getBaseDilations();
@@ -3842,6 +3848,21 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
     auto a_solve = a;
     auto b_solve = b;
 
+    // Check for singular triangular matrix (zero on diagonal) to avoid LAPACK abort.
+    // Extract diagonal and check for zeros. If singular, return NaN result like XLA does.
+    {
+        auto diag = mlx::core::diagonal(a, 0, -2, -1);
+        auto has_zero = mlx::core::any(mlx::core::equal(diag, mlx::core::zeros_like(diag)));
+        mlx::core::eval(has_zero);
+        if (has_zero.item<bool>()) {
+            // Return NaN-filled result matching b's shape, consistent with XLA behavior
+            auto nan_result =
+                mlx::core::full(b.shape(), std::numeric_limits<float>::quiet_NaN(), b.dtype());
+            values.emplace(ToKey(op->getResult(0)), std::move(nan_result));
+            return true;
+        }
+    }
+
     if (unit_diagonal) {
         // Replace diagonal with 1s: zero out diagonal, add identity.
         int n = a_solve.shape()[a_solve.ndim() - 1];
@@ -3861,34 +3882,39 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
         lower = !lower;
     }
 
-    if (!left_side) {
-        // Right-side solve: X * A = B
-        // Equivalent to: A^T * X^T = B^T (left-side solve)
-        auto ndim_a = a_solve.ndim();
-        std::vector<int> perm_a(ndim_a);
-        std::iota(perm_a.begin(), perm_a.end(), 0);
-        std::swap(perm_a[ndim_a - 2], perm_a[ndim_a - 1]);
-        a_solve = mlx::core::transpose(a_solve, perm_a);
-        lower = !lower;
+    try {
+        if (!left_side) {
+            // Right-side solve: X * A = B
+            // Equivalent to: A^T * X^T = B^T (left-side solve)
+            auto ndim_a = a_solve.ndim();
+            std::vector<int> perm_a(ndim_a);
+            std::iota(perm_a.begin(), perm_a.end(), 0);
+            std::swap(perm_a[ndim_a - 2], perm_a[ndim_a - 1]);
+            a_solve = mlx::core::transpose(a_solve, perm_a);
+            lower = !lower;
 
-        auto ndim_b = b_solve.ndim();
-        std::vector<int> perm_b(ndim_b);
-        std::iota(perm_b.begin(), perm_b.end(), 0);
-        std::swap(perm_b[ndim_b - 2], perm_b[ndim_b - 1]);
-        b_solve = mlx::core::transpose(b_solve, perm_b);
+            auto ndim_b = b_solve.ndim();
+            std::vector<int> perm_b(ndim_b);
+            std::iota(perm_b.begin(), perm_b.end(), 0);
+            std::swap(perm_b[ndim_b - 2], perm_b[ndim_b - 1]);
+            b_solve = mlx::core::transpose(b_solve, perm_b);
 
-        auto x_t = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
-                                                       mlx::core::Device::cpu);
-        auto result = mlx::core::transpose(x_t, perm_b);
+            auto x_t = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
+                                                           mlx::core::Device::cpu);
+            auto result = mlx::core::transpose(x_t, perm_b);
+            values.emplace(ToKey(op->getResult(0)), std::move(result));
+            return true;
+        }
+
+        // MLX solve_triangular uses upper=!lower
+        auto result = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
+                                                          mlx::core::Device::cpu);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
+    } catch (const std::exception& e) {
+        MPS_LOG_ERROR("stablehlo.triangular_solve: %s\n", e.what());
+        return false;
     }
-
-    // MLX solve_triangular uses upper=!lower
-    auto result = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
-                                                      mlx::core::Device::cpu);
-    values.emplace(ToKey(op->getResult(0)), std::move(result));
-    return true;
 }
 
 // Op dispatch table - initialized once
@@ -4161,6 +4187,7 @@ size_t MlxExecutable::num_outputs() const {
 }
 
 MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
+    // NOTE: Thread safety is handled by GetPjrtGlobalMutex() at the PJRT API layer.
     MlxExecuteResult result;
     const bool profiling = IsProfilingEnabled();
     Clock::time_point exec_start;
@@ -4219,38 +4246,42 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     // Try MLX compile() on first execution - it can fuse kernels for better performance
     // Can be disabled with MPS_NO_COMPILE=1 for debugging
     static bool disable_compile = std::getenv("MPS_NO_COMPILE") != nullptr;
-    if (!compile_attempted_ && !disable_compile) {
-        compile_attempted_ = true;
+    {
+        // NOTE: Thread safety handled by GetPjrtGlobalMutex() at PJRT API layer.
+        if (!compile_attempted_ && !disable_compile) {
+            compile_attempted_ = true;
 
-        // Create a function that we can compile
-        // Note: capture 'this' only - ctx would be invalid on subsequent calls
-        auto exec_fn =
-            [this](const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
-            std::vector<mlx::core::array> outs;
-            ExecContext local_ctx;
-            local_ctx.module = *parsed_module_.module;
-            local_ctx.inside_compile = true;
-            if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
-                return {};
+            // Create a function that we can compile
+            // Note: capture 'this' only - ctx would be invalid on subsequent calls
+            auto exec_fn =
+                [this](
+                    const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+                std::vector<mlx::core::array> outs;
+                ExecContext local_ctx;
+                local_ctx.module = *parsed_module_.module;
+                local_ctx.inside_compile = true;
+                if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
+                    return {};
+                }
+                return outs;
+            };
+
+            try {
+                // Try to compile the function
+                compiled_fn_ = mlx::core::compile(exec_fn);
+
+                // Test that compile works by running it once
+                auto test_outputs = compiled_fn_(inputArrays);
+                if (!test_outputs.empty()) {
+                    mlx::core::eval(test_outputs);
+                    compile_succeeded_ = true;
+                    outputs = std::move(test_outputs);
+                    MPS_LOG_INFO("MLX compile() succeeded - using compiled execution path\n");
+                }
+            } catch (const std::exception& e) {
+                MPS_LOG_INFO("MLX compile() failed (%s), using direct path\n", e.what());
+                compile_succeeded_ = false;
             }
-            return outs;
-        };
-
-        try {
-            // Try to compile the function
-            compiled_fn_ = mlx::core::compile(exec_fn);
-
-            // Test that compile works by running it once
-            auto test_outputs = compiled_fn_(inputArrays);
-            if (!test_outputs.empty()) {
-                mlx::core::eval(test_outputs);
-                compile_succeeded_ = true;
-                outputs = std::move(test_outputs);
-                MPS_LOG_INFO("MLX compile() succeeded - using compiled execution path\n");
-            }
-        } catch (const std::exception& e) {
-            MPS_LOG_INFO("MLX compile() failed (%s), using direct path\n", e.what());
-            compile_succeeded_ = false;
         }
     }
 

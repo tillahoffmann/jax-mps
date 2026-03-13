@@ -5,6 +5,7 @@
 // #define MPS_LOG_LEVEL 3  // Uncomment for verbose logging
 
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_profiler.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -165,6 +166,9 @@ PJRT_Error* MPS_Executable_DeserializeAndLoad(PJRT_Executable_DeserializeAndLoad
 PJRT_Error* MPS_LoadedExecutable_Fingerprint(PJRT_LoadedExecutable_Fingerprint_Args* args);
 PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(
     PJRT_LoadedExecutable_GetDeviceAssignment_Args* args);
+PJRT_Error* MPS_Executable_GetCompiledMemoryStats(
+    PJRT_Executable_GetCompiledMemoryStats_Args* args);
+PJRT_Error* MPS_Executable_GetCompileOptions(PJRT_Executable_GetCompileOptions_Args* args);
 
 // Buffer API (pjrt_buffer.cc)
 PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args);
@@ -179,6 +183,7 @@ PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args);
 PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args);
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args);
 PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args);
+PJRT_Error* MPS_Buffer_CopyToMemory(PJRT_Buffer_CopyToMemory_Args* args);
 PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args);
 PJRT_Error* MPS_Buffer_IsOnCpu(PJRT_Buffer_IsOnCpu_Args* args);
 PJRT_Error* MPS_Buffer_ReadyEvent(PJRT_Buffer_ReadyEvent_Args* args);
@@ -218,7 +223,7 @@ PJRT_Error* MPS_Compile(PJRT_Compile_Args* args);
 
 static const PJRT_Api pjrt_api = {
     .struct_size = PJRT_Api_STRUCT_SIZE,
-    .extension_start = nullptr,
+    .extension_start = GetProfilerExtension(),
 
     .pjrt_api_version =
         {
@@ -334,11 +339,11 @@ static const PJRT_Api pjrt_api = {
     // Output type/dimension information
     .PJRT_Executable_OutputElementTypes = MPS_Executable_OutputElementTypes,
     .PJRT_Executable_OutputDimensions = MPS_Executable_OutputDimensions,
-    .PJRT_Buffer_CopyToMemory = nullptr,
+    .PJRT_Buffer_CopyToMemory = MPS_Buffer_CopyToMemory,
     .PJRT_Client_CreateViewOfDeviceBuffer = nullptr,
     .PJRT_Executable_Fingerprint = MPS_Executable_Fingerprint,
     .PJRT_Client_TopologyDescription = MPS_Client_TopologyDescription,
-    .PJRT_Executable_GetCompiledMemoryStats = nullptr,
+    .PJRT_Executable_GetCompiledMemoryStats = MPS_Executable_GetCompiledMemoryStats,
     .PJRT_Memory_Kind_Id = nullptr,
     .PJRT_ExecuteContext_Create = nullptr,
     .PJRT_ExecuteContext_Destroy = nullptr,
@@ -366,7 +371,7 @@ static const PJRT_Api pjrt_api = {
     .PJRT_Device_PoisonExecution = nullptr,
     .PJRT_Device_CreateAsyncTrackingEvent = nullptr,
     .PJRT_AsyncTrackingEvent_Destroy = nullptr,
-    .PJRT_Executable_GetCompileOptions = nullptr,
+    .PJRT_Executable_GetCompileOptions = MPS_Executable_GetCompileOptions,
     .PJRT_Buffer_DonateWithControlDependency = nullptr,
     .PJRT_Event_Create = nullptr,
     .PJRT_Event_Set = nullptr,

@@ -195,7 +195,10 @@ if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
     fi
 
     mkdir -p "$PREFIX/include/xla/pjrt/c"
+    mkdir -p "$PREFIX/include/xla/backends/profiler/plugin"
     cp "$XLA_DIR/xla/pjrt/c/pjrt_c_api.h" "$PREFIX/include/xla/pjrt/c/"
+    cp "$XLA_DIR/xla/pjrt/c/pjrt_c_api_profiler_extension.h" "$PREFIX/include/xla/pjrt/c/"
+    cp "$XLA_DIR/xla/backends/profiler/plugin/profiler_c_api.h" "$PREFIX/include/xla/backends/profiler/plugin/"
     echo "XLA PJRT headers installed to $PREFIX"
 else
     echo "=== XLA PJRT headers already installed ==="

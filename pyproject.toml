@@ -60,6 +60,7 @@ dev = [
     "pyright>=1.1.408",
     "pytest",
     "pytest-benchmark>=5.2.3",
+    "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.5",
     "ruff>=0.14.13",
     "tqdm>=4.67.1",

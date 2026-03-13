@@ -1,6 +1,7 @@
 // PJRT Buffer API implementation for Metal backend
 
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -97,11 +98,41 @@ PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args) {
     return nullptr;
 }
 
+static PJRT_Error* CopyBuffer(PJRT_Buffer* src, PJRT_Buffer** dst_out) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
+    if (!src || !src->buffer) {
+        return MakeError("Buffer copy: source buffer is null");
+    }
+    if (src->buffer->IsDeleted()) {
+        return MakeError("Buffer copy: source buffer has been deleted");
+    }
+
+    // Create a deep copy via MLX copy()
+    auto copied = mlx::core::copy(src->buffer->array());
+    mlx::core::eval(copied);
+
+    auto new_buffer = jax_mps::MlxBuffer::FromArray(std::move(copied));
+    if (!new_buffer) {
+        return MakeError("Buffer copy: failed to create copy");
+    }
+
+    auto* dst_buffer = new PJRT_Buffer();
+    dst_buffer->buffer = std::move(new_buffer);
+    dst_buffer->client = src->client;
+    *dst_out = dst_buffer;
+    return nullptr;
+}
+
 PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args) {
-    return MakeError("CopyToDevice not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+    return CopyBuffer(args->buffer, &args->dst_buffer);
+}
+
+PJRT_Error* MPS_Buffer_CopyToMemory(PJRT_Buffer_CopyToMemory_Args* args) {
+    return CopyBuffer(args->buffer, &args->dst_buffer);
 }
 
 PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->src && args->src->buffer && args->dst) {
         args->src->buffer->ToHostBuffer(args->dst);
     }

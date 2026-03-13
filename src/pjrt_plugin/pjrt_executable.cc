@@ -5,6 +5,7 @@
 
 #include "device_assignment.pb.h"
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -190,6 +191,7 @@ PJRT_Error* MPS_LoadedExecutable_IsDeleted(PJRT_LoadedExecutable_IsDeleted_Args*
 }
 
 PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_INFO("Executing program\n");
 
     if (!args->executable || !args->executable->executable) {
@@ -257,6 +259,15 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
 
     MPS_LOG_INFO("Execution complete\n");
     return nullptr;
+}
+
+PJRT_Error* MPS_Executable_GetCompiledMemoryStats(
+    PJRT_Executable_GetCompiledMemoryStats_Args* args) {
+    return MakeError("GetCompiledMemoryStats not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+}
+
+PJRT_Error* MPS_Executable_GetCompileOptions(PJRT_Executable_GetCompileOptions_Args* args) {
+    return MakeError("GetCompileOptions not implemented", PJRT_Error_Code_UNIMPLEMENTED);
 }
 
 PJRT_Error* MPS_Executable_DeserializeAndLoad(PJRT_Executable_DeserializeAndLoad_Args* args) {

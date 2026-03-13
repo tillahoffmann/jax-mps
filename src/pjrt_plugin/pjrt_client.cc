@@ -4,6 +4,7 @@
 
 #include "pjrt_plugin/issue_url.h"
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
 #include "pjrt_plugin/stablehlo_parser.h"
 
@@ -155,6 +156,7 @@ PJRT_Error* MPS_Client_AddressableMemories(PJRT_Client_AddressableMemories_Args*
 }
 
 PJRT_Error* MPS_Client_Compile(PJRT_Client_Compile_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_INFO("Compiling StableHLO program\n");
 
     PJRT_Client* client = GetClient(args->client);
@@ -242,6 +244,7 @@ PJRT_Error* MPS_Client_DefaultDeviceAssignment(PJRT_Client_DefaultDeviceAssignme
 }
 
 PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Client_BufferFromHostBuffer\n");
 
     PJRT_Client* client = GetClient(args->client);
