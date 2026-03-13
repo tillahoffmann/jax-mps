@@ -74,7 +74,6 @@ def make_reduction_op_configs():
             lambda x: lax.reduce_window(x, 0.0, lax.add, (), (), "valid"),
             lambda key: random.normal(key, ()),
             name="reduce_window_scalar",
-            differentiable_argnums=(),
         )
 
     # Pooling operations (lower to stablehlo.reduce_window with pooling pattern).

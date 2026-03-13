@@ -4,8 +4,9 @@
 // Log level: 0=error, 1=+warn (default), 2=+info, 3=+debug
 // #define MPS_LOG_LEVEL 3  // Uncomment for verbose logging
 
+#include <mutex>
+
 #include "pjrt_plugin/logging.h"
-#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_profiler.h"
 #include "pjrt_plugin/pjrt_types.h"
 
@@ -23,47 +24,45 @@ const char* const kPlatformVersion = "0.1.0";
 static PJRT_Client* g_default_client = nullptr;
 
 PJRT_Client* GetOrCreateDefaultClient() {
-    std::scoped_lock lock(GetPjrtGlobalMutex());
-    if (g_default_client)
-        return g_default_client;
+    static std::once_flag init_flag;
+    std::call_once(init_flag, [] {
+        MPS_LOG_INFO("Creating default client\n");
+        auto mlx_client = std::make_unique<jax_mps::MlxClient>();
+        if (!mlx_client) {
+            MPS_LOG_ERROR("Failed to create MLX client\n");
+            return;
+        }
 
-    MPS_LOG_INFO("Creating default client\n");
-    auto mlx_client = std::make_unique<jax_mps::MlxClient>();
-    if (!mlx_client) {
-        MPS_LOG_ERROR("Failed to create MLX client\n");
-        return nullptr;
-    }
+        g_default_client = new PJRT_Client();
+        g_default_client->client = std::move(mlx_client);
 
-    g_default_client = new PJRT_Client();
-    g_default_client->client = std::move(mlx_client);
+        for (int i = 0; i < g_default_client->client->device_count(); i++) {
+            auto* dev = new PJRT_Device();
+            dev->device = g_default_client->client->device(i);
+            dev->client = g_default_client;
 
-    for (int i = 0; i < g_default_client->client->device_count(); i++) {
-        auto* dev = new PJRT_Device();
-        dev->device = g_default_client->client->device(i);
-        dev->client = g_default_client;
+            // Create the device description with back-pointer
+            auto* desc = new PJRT_DeviceDescription();
+            desc->device = dev;
+            dev->description = desc;
 
-        // Create the device description with back-pointer
-        auto* desc = new PJRT_DeviceDescription();
-        desc->device = dev;
-        dev->description = desc;
+            // Create the default memory for the device
+            auto* mem = new PJRT_Memory();
+            mem->device = dev;
+            mem->client = g_default_client;
+            mem->id = i;
+            dev->default_memory = mem;
+            g_default_client->memories.push_back(mem);
 
-        // Create the default memory for the device
-        auto* mem = new PJRT_Memory();
-        mem->device = dev;
-        mem->client = g_default_client;
-        mem->id = i;
-        dev->default_memory = mem;
-        g_default_client->memories.push_back(mem);
+            g_default_client->devices.push_back(dev);
+        }
 
-        g_default_client->devices.push_back(dev);
-    }
+        // Create topology description
+        g_default_client->topology = new PJRT_TopologyDescription();
+        g_default_client->topology->client = g_default_client;
 
-    // Create topology description
-    g_default_client->topology = new PJRT_TopologyDescription();
-    g_default_client->topology->client = g_default_client;
-
-    MPS_LOG_INFO("Created client with %zu devices\n", g_default_client->devices.size());
-
+        MPS_LOG_INFO("Created client with %zu devices\n", g_default_client->devices.size());
+    });
     return g_default_client;
 }
 

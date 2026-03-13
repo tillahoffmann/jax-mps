@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -50,7 +51,7 @@ def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
     print(f"Cloning JAX {tag} tests to {clone_dir} ...")
 
     if clone_dir.exists():
-        subprocess.run(["rm", "-rf", str(clone_dir)], check=True)
+        shutil.rmtree(clone_dir)
 
     subprocess.run(
         [
