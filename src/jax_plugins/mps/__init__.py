@@ -17,7 +17,7 @@ class MPSPluginError(Exception):
     pass
 
 
-def _get_search_paths():
+def _get_search_paths() -> list[tuple[Path, str]]:
     """Return list of (path, description) tuples for library search."""
     pkg_dir = Path(__file__).parent
     project_root = pkg_dir.parent.parent.parent
@@ -34,7 +34,7 @@ def _get_search_paths():
     ]
 
 
-def _find_library():
+def _find_library() -> str | None:
     """Find the pjrt_plugin_mps shared library.
 
     Returns:
@@ -61,15 +61,15 @@ def _find_library():
     return None
 
 
-def _check_jaxlib_version():
+def _check_jaxlib_version() -> None:
     """Check if the installed jaxlib version is compatible.
 
     Warns if the major.minor version doesn't match what the plugin was built for.
     """
     try:
-        import jaxlib
+        from .util import get_package_version
 
-        version_str = getattr(jaxlib, "__version__", None)
+        version_str = get_package_version("jaxlib")
         if version_str is None:
             return
 
@@ -91,7 +91,7 @@ def _check_jaxlib_version():
         pass  # Don't fail initialization due to version check issues
 
 
-def initialize():
+def initialize() -> None:
     """Initialize the MPS plugin with JAX.
 
     This function is called by JAX's plugin discovery mechanism.
