@@ -17,6 +17,7 @@ PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->type = args->buffer && args->buffer->buffer
                      ? static_cast<PJRT_Buffer_Type>(args->buffer->buffer->dtype())
                      : PJRT_Buffer_Type_F32;
@@ -24,6 +25,7 @@ PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Dimensions(PJRT_Buffer_Dimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         const auto& dims = args->buffer->buffer->dimensions();
         args->dims = dims.data();
@@ -36,6 +38,7 @@ PJRT_Error* MPS_Buffer_Dimensions(PJRT_Buffer_Dimensions_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_UnpaddedDimensions(PJRT_Buffer_UnpaddedDimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         const auto& dims = args->buffer->buffer->dimensions();
         args->unpadded_dims = dims.data();
@@ -59,6 +62,7 @@ PJRT_Error* MPS_Buffer_GetMemoryLayout(PJRT_Buffer_GetMemoryLayout_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_OnDeviceSizeInBytes(PJRT_Buffer_OnDeviceSizeInBytes_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->on_device_size_in_bytes =
         args->buffer && args->buffer->buffer ? args->buffer->buffer->byte_size() : 0;
     return nullptr;
@@ -89,6 +93,7 @@ PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         args->buffer->buffer->Delete();
     }
@@ -96,6 +101,7 @@ PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->is_deleted =
         args->buffer && args->buffer->buffer ? args->buffer->buffer->IsDeleted() : true;
     return nullptr;

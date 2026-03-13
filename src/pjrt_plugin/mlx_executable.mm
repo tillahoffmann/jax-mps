@@ -3848,31 +3848,29 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
     auto a_solve = a;
     auto b_solve = b;
 
-    // Check for singular triangular matrix (zero on diagonal) to avoid LAPACK abort.
-    // Check per-batch: reduce over the diagonal dimension only (last axis of diag).
-    {
-        auto diag = mlx::core::diagonal(a, 0, -2, -1);
-        // any(..., axis=-1) gives per-batch singular flags
-        auto has_zero = mlx::core::any(mlx::core::equal(diag, mlx::core::zeros_like(diag)),
-                                       /* axis= */ std::vector<int>{-1}, /* keepdims= */ false);
-        // Reduce across all batches to decide if any batch is singular
-        auto any_singular = mlx::core::any(has_zero);
-        mlx::core::eval(any_singular);
-        if (any_singular.item<bool>()) {
-            // Return NaN-filled result matching b's shape, consistent with XLA behavior
-            auto nan_result =
-                mlx::core::full(b.shape(), std::numeric_limits<float>::quiet_NaN(), b.dtype());
-            values.emplace(ToKey(op->getResult(0)), std::move(nan_result));
-            return true;
-        }
-    }
-
     if (unit_diagonal) {
         // Replace diagonal with 1s: zero out diagonal, add identity.
         int n = a_solve.shape()[a_solve.ndim() - 1];
         auto eye = mlx::core::eye(n, a_solve.dtype());
         a_solve = a_solve * (1.0F - eye) + eye;
     }
+
+    // Guard against singular triangular matrices to prevent LAPACK abort().
+    // Done after unit_diagonal handling so unit-diagonal matrices are never flagged.
+    // Detect zero diagonals per-batch, replace them with epsilon to allow solve,
+    // then use where() to NaN-out results for singular batches. This is purely
+    // functional (no eval) so it works inside mlx::core::compile() tracing.
+    int n_dim = a_solve.shape()[a_solve.ndim() - 1];
+    auto diag = mlx::core::diagonal(a_solve, 0, -2, -1);
+    auto zero_mask = mlx::core::equal(diag, mlx::core::zeros_like(diag));
+    // per-batch: any zero on diagonal? Shape: (*batch_dims)
+    auto batch_singular = mlx::core::any(zero_mask, /* axis= */ std::vector<int>{-1},
+                                         /* keepdims= */ false);
+
+    // Replace zero diagonal entries with epsilon so LAPACK won't abort
+    auto eye_mat = mlx::core::eye(n_dim, a_solve.dtype());
+    auto eps = mlx::core::array(1e-30F, a_solve.dtype());
+    a_solve = a_solve + mlx::core::expand_dims(zero_mask, -1) * eye_mat * eps;
 
     if (transpose == mlir::stablehlo::Transpose::TRANSPOSE ||
         transpose == mlir::stablehlo::Transpose::ADJOINT) {
@@ -3885,6 +3883,18 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
         // Transposing flips lower/upper
         lower = !lower;
     }
+
+    // Helper to replace results with NaN for singular batches
+    auto nan_guard = [&](mlx::core::array result) -> mlx::core::array {
+        auto nan_val = mlx::core::full(result.shape(), std::numeric_limits<float>::quiet_NaN(),
+                                       result.dtype());
+        // Broadcast batch_singular to result shape: expand dims for matrix dims
+        auto mask = batch_singular;
+        for (int i = 0; i < 2; ++i) {
+            mask = mlx::core::expand_dims(mask, -1);
+        }
+        return mlx::core::where(mask, nan_val, result);
+    };
 
     try {
         if (!left_side) {
@@ -3905,14 +3915,15 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
 
             auto x_t = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
                                                            mlx::core::Device::cpu);
-            auto result = mlx::core::transpose(x_t, perm_b);
+            auto result = nan_guard(mlx::core::transpose(x_t, perm_b));
             values.emplace(ToKey(op->getResult(0)), std::move(result));
             return true;
         }
 
         // MLX solve_triangular uses upper=!lower
-        auto result = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
-                                                          mlx::core::Device::cpu);
+        auto result = nan_guard(mlx::core::linalg::solve_triangular(a_solve, b_solve,
+                                                                    /*upper=*/!lower,
+                                                                    mlx::core::Device::cpu));
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     } catch (const std::exception& e) {

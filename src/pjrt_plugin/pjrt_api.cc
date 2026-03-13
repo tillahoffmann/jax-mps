@@ -5,6 +5,7 @@
 // #define MPS_LOG_LEVEL 3  // Uncomment for verbose logging
 
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_profiler.h"
 #include "pjrt_plugin/pjrt_types.h"
 
@@ -22,6 +23,7 @@ const char* const kPlatformVersion = "0.1.0";
 static PJRT_Client* g_default_client = nullptr;
 
 PJRT_Client* GetOrCreateDefaultClient() {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (g_default_client)
         return g_default_client;
 

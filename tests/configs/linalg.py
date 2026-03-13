@@ -137,6 +137,29 @@ def make_linalg_op_configs():
             name="triangular_solve_unit_diagonal",
         )
 
+        # Singular triangular matrix (zero on diagonal): MPS returns NaN (to avoid
+        # LAPACK abort), while CPU returns inf. Values differ but no crash.
+        yield pytest.param(
+            OperationTestConfig(
+                _solve_triangular_lower,
+                numpy.array([[1.0, 0.0], [1.0, 0.0]], dtype=numpy.float32),
+                numpy.array([[1.0], [2.0]], dtype=numpy.float32),
+                name="triangular_solve_singular",
+            ),
+            marks=[xfail_match("Values are not close")],
+        )
+
+        # Unit diagonal with zeros on actual diagonal: should NOT be treated as
+        # singular because unit_diagonal=True ignores the provided diagonal.
+        yield OperationTestConfig(
+            _solve_triangular_unit_diag,
+            numpy.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 3.0, 0.0]], dtype=numpy.float32
+            ),
+            numpy.array([[1.0], [2.0], [3.0]], dtype=numpy.float32),
+            name="triangular_solve_unit_diag_zero_diagonal",
+        )
+
         # 1x1 matrices (trivial edge case)
         yield OperationTestConfig(
             jnp.linalg.cholesky,
