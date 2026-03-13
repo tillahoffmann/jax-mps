@@ -15,7 +15,7 @@
 #
 # Default prefix: $HOME/.local/jax-mps-deps
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -24,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "$SCRIPT_DIR/setup_deps_mlx.sh" "$@"
 
 PREFIX="${PREFIX:-$HOME/.local/jax-mps-deps}"
+prev=""
 for arg in "$@"; do
     if [ "$prev" = "--prefix" ]; then PREFIX="$arg"; fi
     prev="$arg"
