@@ -8,7 +8,9 @@ from .util import get_package_version
 
 def _run(cmd):
     try:
-        return subprocess.check_output(cmd, text=True).strip()
+        return subprocess.check_output(
+            cmd, text=True, stderr=subprocess.DEVNULL
+        ).strip()
     except Exception:
         return "unknown"
 
