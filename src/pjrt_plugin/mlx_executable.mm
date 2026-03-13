@@ -927,17 +927,24 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     auto indexVectorDim = static_cast<int>(dimNumbers.getIndexVectorDim());
     auto operandBatchingDims = dimNumbers.getOperandBatchingDims();
 
-    // Simple case: single index dimension, single collapsed dim
-    // This handles the common pattern: gather(data, indices) -> data[indices]
-    if (startIndexMap.size() == 1 && collapsedSliceDims.size() == 1 &&
-        static_cast<int64_t>(startIndexMap[0]) == static_cast<int64_t>(collapsedSliceDims[0])) {
+    // Simple case: single index dimension, optionally collapsed
+    // This handles patterns like: gather(data, indices) -> data[indices]
+    // When collapsedSliceDims is non-empty, the gathered dim is removed from output.
+    // When collapsedSliceDims is empty, the gathered dim is kept (as a slice dim).
+    if (startIndexMap.size() == 1 &&
+        (collapsedSliceDims.empty() ||
+         (collapsedSliceDims.size() == 1 &&
+          static_cast<int64_t>(startIndexMap[0]) == static_cast<int64_t>(collapsedSliceDims[0])))) {
         int gatherDim = static_cast<int>(startIndexMap[0]);
+        bool collapsed = !collapsedSliceDims.empty();
 
         // Extract the index vector
         auto indices = startIndices;
         if (indexVectorDim < static_cast<int>(startIndices.shape().size())) {
-            // Index vector dim exists - squeeze it if it's size 1
-            if (startIndices.shape(indexVectorDim) == 1) {
+            // Index vector dim exists - squeeze it if it's size 1 and the dim is collapsed
+            // When not collapsed, keep the index vector dim so take_along_axis
+            // produces the right output shape (with the slice dimension).
+            if (collapsed && startIndices.shape(indexVectorDim) == 1) {
                 indices = mlx::core::squeeze(startIndices, {indexVectorDim});
             }
         }
