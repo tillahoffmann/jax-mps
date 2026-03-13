@@ -61,3 +61,10 @@ Benchmarks are excluded from normal test runs. To run them:
 # Run benchmarks (compares CPU vs MPS performance)
 uv run pytest -m benchmark --benchmark-only -n0
 ```
+
+# Bugs and Issues
+
+When fixing a bug or addressing an issue, use TDD:
+
+1. Create the test to reproduce the issue and verify it fails.
+2. Fix the bug or address the issue and verify the test passes.

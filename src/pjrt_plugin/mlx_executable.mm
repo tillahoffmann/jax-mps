@@ -327,6 +327,7 @@ std::optional<std::reference_wrapper<mlx::core::array>> GetValue(ValueMap& value
 // Execution context passed to handlers
 struct ExecContext {
     mlir::ModuleOp module;
+    bool inside_compile = false;  // true when running inside mlx::core::compile()
 };
 
 // Op handler function type
@@ -1743,6 +1744,12 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
         return false;
     }
 
+    // While loops require eval() each iteration for the condition and to bound
+    // memory, which is incompatible with mlx::core::compile() tracing.
+    if (ctx.inside_compile) {
+        return false;
+    }
+
     // Get initial values from operands
     std::vector<mlx::core::array> loopVars;
     for (auto operand : op->getOperands()) {
@@ -1757,12 +1764,69 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
     auto& condRegion = whileOp.getCond();
     auto& bodyRegion = whileOp.getBody();
 
+    // Try to compile condition and body regions into fused MLX functions so each
+    // iteration is a single compiled dispatch instead of N individual ops.
+    // Falls back to interpreted if compile() itself throws or if the regions
+    // contain ops incompatible with compile tracing (e.g. case/switch need eval).
+    using CompiledFn =
+        std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>;
+    CompiledFn compiledCond;
+    CompiledFn compiledBody;
+    bool useCompiled = false;
+    try {
+        compiledCond = mlx::core::compile(
+            [&condRegion, &ctx, &values](
+                const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+                auto args = inputs;
+                std::vector<mlx::core::array> results;
+                ExecContext compileCtx;
+                compileCtx.module = ctx.module;
+                compileCtx.inside_compile = true;
+                if (!ExecuteRegion(condRegion, args, results, compileCtx, &values)) {
+                    return {};
+                }
+                return results;
+            });
+
+        compiledBody = mlx::core::compile(
+            [&bodyRegion, &ctx, &values](
+                const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+                auto args = inputs;
+                std::vector<mlx::core::array> results;
+                ExecContext compileCtx;
+                compileCtx.module = ctx.module;
+                compileCtx.inside_compile = true;
+                if (!ExecuteRegion(bodyRegion, args, results, compileCtx, &values)) {
+                    return {};
+                }
+                return results;
+            });
+
+        // Probe: run compiled cond+body once to verify they work
+        auto testCond = compiledCond(loopVars);
+        if (testCond.size() == 1) {
+            auto testBody = compiledBody(loopVars);
+            if (testBody.size() == loopVars.size()) {
+                std::vector<mlx::core::array> toEval;
+                toEval.insert(toEval.end(), testCond.begin(), testCond.end());
+                toEval.insert(toEval.end(), testBody.begin(), testBody.end());
+                mlx::core::eval(toEval);
+                useCompiled = true;
+            }
+        }
+    } catch (...) {
+        useCompiled = false;
+    }
+
     while (true) {
-        // Execute condition region (pass parent values for outer-scope references)
         std::vector<mlx::core::array> condResults;
-        if (!ExecuteRegion(condRegion, loopVars, condResults, ctx, &values)) {
-            MPS_LOG_ERROR("stablehlo.while: failed to execute cond region\n");
-            return false;
+        if (useCompiled) {
+            condResults = compiledCond(loopVars);
+        } else {
+            if (!ExecuteRegion(condRegion, loopVars, condResults, ctx, &values)) {
+                MPS_LOG_ERROR("stablehlo.while: failed to execute cond region\n");
+                return false;
+            }
         }
 
         if (condResults.size() != 1) {
@@ -1771,25 +1835,31 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
             return false;
         }
 
-        // Evaluate and check condition
-        mlx::core::eval(condResults[0]);
+        // Evaluate condition (and loop vars from previous iteration to bound memory).
+        // Combining into a single eval() call minimizes GPU sync round-trips.
+        loopVars.push_back(condResults[0]);
+        mlx::core::eval(loopVars);
+        auto condVal = std::move(loopVars.back());
+        loopVars.pop_back();
 
-        // Verify condition is a scalar boolean
-        if (condResults[0].size() != 1) {
+        if (condVal.size() != 1) {
             MPS_LOG_ERROR("stablehlo.while: condition must be a scalar, got size %zu\n",
-                          condResults[0].size());
+                          condVal.size());
             return false;
         }
 
-        if (!condResults[0].item<bool>()) {
+        if (!condVal.item<bool>()) {
             break;
         }
 
-        // Execute body region (pass parent values for outer-scope references)
         std::vector<mlx::core::array> bodyResults;
-        if (!ExecuteRegion(bodyRegion, loopVars, bodyResults, ctx, &values)) {
-            MPS_LOG_ERROR("stablehlo.while: failed to execute body region\n");
-            return false;
+        if (useCompiled) {
+            bodyResults = compiledBody(loopVars);
+        } else {
+            if (!ExecuteRegion(bodyRegion, loopVars, bodyResults, ctx, &values)) {
+                MPS_LOG_ERROR("stablehlo.while: failed to execute body region\n");
+                return false;
+            }
         }
 
         if (bodyResults.size() != loopVars.size()) {
@@ -1798,7 +1868,7 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
             return false;
         }
 
-        // Update loop variables
+        // Update loop variables (evaluated at start of next iteration)
         loopVars = std::move(bodyResults);
     }
 
@@ -4159,6 +4229,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
             std::vector<mlx::core::array> outs;
             ExecContext local_ctx;
             local_ctx.module = *parsed_module_.module;
+            local_ctx.inside_compile = true;
             if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
                 return {};
             }

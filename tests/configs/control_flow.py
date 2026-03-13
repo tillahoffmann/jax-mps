@@ -1,3 +1,4 @@
+import jax
 import numpy
 from jax import lax, random
 from jax import numpy as jnp
@@ -380,5 +381,49 @@ def make_control_flow_op_configs():
                 numpy.float32(1.0),
                 differentiable_argnums=(),  # while_loop doesn't support reverse-mode AD
                 name="lax.while_loop.with_switch",
+            ),
+            # ==================== while + rng (issue #82) ====================
+            # fori_loop with rng split + randint accumulation
+            OperationTestConfig(
+                lambda key: lax.fori_loop(
+                    0,
+                    1000,
+                    lambda _, carry: (
+                        jax.random.split(carry[0])[0],
+                        carry[1]
+                        + jax.random.randint(
+                            jax.random.split(carry[0])[1],
+                            shape=(),
+                            minval=0,
+                            maxval=2,
+                        ),
+                    ),
+                    (key, jnp.int32(0)),
+                )[1],
+                lambda key: key,
+                name="lax.fori_loop.rng_accumulate",
+            ),
+            # fori_loop with rng split + scatter update
+            OperationTestConfig(
+                lambda key: lax.fori_loop(
+                    0,
+                    1000,
+                    lambda _, carry: (
+                        jax.random.split(carry[0])[0],
+                        carry[1]
+                        .at[
+                            jax.random.randint(
+                                jax.random.split(carry[0])[1],
+                                shape=(),
+                                minval=0,
+                                maxval=2,
+                            )
+                        ]
+                        .set(1),
+                    ),
+                    (key, jnp.zeros(2, dtype=jnp.int8)),
+                )[1],
+                lambda key: key,
+                name="lax.fori_loop.rng_scatter",
             ),
         ]
