@@ -194,14 +194,13 @@ def main():
 
     # Run each file in a separate subprocess
     totals = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "xfailed": 0}
-    no_result_files: list[str] = []
+    crashed_files: list[str] = []
     for i, tf in enumerate(test_files, 1):
         print(f"[{i}/{len(test_files)}] {tf.name} ...", end=" ", flush=True)
         counts = run_file(tf, xml_dir, args.timeout, project_root)
         if counts is None:
-            print("NO RESULTS (counted as 1 error)")
-            totals["errors"] += 1
-            no_result_files.append(tf.name)
+            print("CRASHED (no results)")
+            crashed_files.append(tf.name)
             continue
         for k in totals:
             totals[k] += counts[k]
@@ -231,14 +230,18 @@ def main():
     print(f"  Errors:       {totals['errors']}")
     print()
     print(f"  Pass rate:    {passed}/{available} = {pct:.1f}%")
-    if no_result_files:
-        print(f"\n  No results:   {', '.join(no_result_files)}")
     print("=" * 60)
 
     summary_path = results_dir / "summary.txt"
     summary_path.write_text(f"{passed}/{available} ({pct:.1f}%) -- JAX {version}\n")
     print(f"\nPer-file XML: {xml_dir}/")
     print(f"Summary:      {summary_path}")
+
+    if crashed_files:
+        print(f"\nERROR: {len(crashed_files)} file(s) produced no results (crashed):")
+        for f in crashed_files:
+            print(f"  - {f}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
