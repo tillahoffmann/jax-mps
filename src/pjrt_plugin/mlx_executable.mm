@@ -3255,6 +3255,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 
         // Reshape updates: (idx_shape..., operand_shape_with_1_at_covered_dims...)
         // Covered dims = scatter dims + batch dims + inserted window dims
+        // Updates dims are split into index dims (not in update_window_dims)
+        // and window dims (in update_window_dims).
+        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
         std::set<int> coveredDims;
         for (auto d : scatterDimsToOperandDims) {
             coveredDims.insert(static_cast<int>(d));
@@ -3267,17 +3270,50 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         }
 
         auto updShape = updates.shape();
-        mlx::core::Shape newShape(updShape.begin(), updShape.end());
+        int updNdim = static_cast<int>(updShape.size());
+        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+
+        // Separate index dims and window dims, transpose if needed
+        std::vector<int> transposeOrder;
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) == 0) {
+                transposeOrder.push_back(i);
+            }
+        }
+        int numIdxDims = static_cast<int>(transposeOrder.size());
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) != 0) {
+                transposeOrder.push_back(i);
+            }
+        }
+        auto transposedUpdates = updates;
+        bool needsTranspose = false;
+        for (int i = 0; i < updNdim; ++i) {
+            if (transposeOrder[i] != i) {
+                needsTranspose = true;
+                break;
+            }
+        }
+        if (needsTranspose) {
+            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
+        }
+        auto tShape = transposedUpdates.shape();
+
+        // Build final shape: (idx_dims..., operand_dim_0, ...)
+        mlx::core::Shape newShape;
+        for (int i = 0; i < numIdxDims; ++i) {
+            newShape.push_back(tShape[i]);
+        }
+        int windowIdx = 0;
         for (int dim = 0; dim < static_cast<int>(operand.ndim()); ++dim) {
             if (coveredDims.count(dim) != 0) {
                 newShape.push_back(1);
             } else {
-                // Window dim — find size from update_window_dims
-                // For simplicity, get it from the expected output type
-                newShape.push_back(operand.shape(dim));
+                newShape.push_back(tShape[numIdxDims + windowIdx]);
+                ++windowIdx;
             }
         }
-        auto reshapedUpdates = mlx::core::reshape(updates, newShape);
+        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
         mlx::core::array result = operand;
         switch (scatterType) {

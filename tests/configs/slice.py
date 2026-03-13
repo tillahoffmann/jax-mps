@@ -168,7 +168,6 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3, 10)),
                 lambda key: random.randint(key, (3,), 0, 10),
                 name="batched_single_axis_gather",
-                grad_xfail="Output count mismatch",
             ),
             # Batched gather via vmap with no collapsed dims (issue #74)
             OperationTestConfig(
@@ -178,7 +177,6 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (4, 5)),
                 lambda key: random.randint(key, (4,), 0, 5),
                 name="batched_gather_no_collapse",
-                grad_xfail="Output count mismatch",
             ),
             # Large integer gather tests: verify integers > 2^24 are preserved
             # These test the bitcast workaround for MPS gather operations
