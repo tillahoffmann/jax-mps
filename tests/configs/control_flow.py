@@ -14,7 +14,6 @@ def make_control_flow_op_configs():
                 numpy.bool_(True),
                 numpy.float32(3.0),
                 numpy.float32(4.0),
-                differentiable_argnums=(),
                 name="lax.cond.true",
             ),
             OperationTestConfig(
@@ -22,7 +21,6 @@ def make_control_flow_op_configs():
                 numpy.bool_(False),
                 numpy.float32(3.0),
                 numpy.float32(4.0),
-                differentiable_argnums=(),
                 name="lax.cond.false",
             ),
             OperationTestConfig(
@@ -34,7 +32,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.bool_(True),
                 lambda key: random.normal(key, (4,)),
-                differentiable_argnums=(),
                 name="lax.cond.array",
             ),
             # ==================== lax.switch ====================
@@ -46,7 +43,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(1),
                 lambda key: random.normal(key, (4,)),
-                differentiable_argnums=(),
                 name="lax.switch",
             ),
             OperationTestConfig(
@@ -61,7 +57,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(2),
                 lambda key: random.normal(key, (4, 4)),
-                differentiable_argnums=(),
                 name="lax.switch.multiaxis",
             ),
             # Boundary selector: first branch (index 0)
@@ -73,7 +68,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(0),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.first_branch",
             ),
             # Boundary selector: last branch (index N-1)
@@ -85,7 +79,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(2),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.last_branch",
             ),
             # Out-of-bounds selector: negative (should clamp to first or last)
@@ -97,7 +90,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(-1),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.oob_negative",
             ),
             # Out-of-bounds selector: too large (should clamp to last)
@@ -109,7 +101,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(100),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.oob_large",
             ),
             # Many branches (5 branches)
@@ -127,7 +118,6 @@ def make_control_flow_op_configs():
                 ),
                 numpy.int32(3),
                 numpy.float32(4.0),
-                differentiable_argnums=(),
                 name="lax.switch.many_branches",
             ),
             # Multiple return values from branches
@@ -143,7 +133,6 @@ def make_control_flow_op_configs():
                 )[0],
                 numpy.int32(1),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.multi_return.first",
             ),
             OperationTestConfig(
@@ -158,7 +147,6 @@ def make_control_flow_op_configs():
                 )[1],
                 numpy.int32(1),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.multi_return.second",
             ),
             # Nested switch inside branches
@@ -182,7 +170,6 @@ def make_control_flow_op_configs():
                 numpy.int32(0),
                 numpy.int32(1),
                 numpy.float32(5.0),
-                differentiable_argnums=(),
                 name="lax.switch.nested",
             ),
             # ==================== lax.while_loop ====================
@@ -369,7 +356,7 @@ def make_control_flow_op_configs():
                     (numpy.int32(0), x),
                 )[1],
                 numpy.float32(1.0),
-                differentiable_argnums=(),
+                differentiable_argnums=(),  # while_loop doesn't support reverse-mode AD
                 name="lax.while_loop.with_cond",
             ),
             # ==================== switch inside while ====================
@@ -391,7 +378,7 @@ def make_control_flow_op_configs():
                     (numpy.int32(0), x),
                 )[1],
                 numpy.float32(1.0),
-                differentiable_argnums=(),
+                differentiable_argnums=(),  # while_loop doesn't support reverse-mode AD
                 name="lax.while_loop.with_switch",
             ),
         ]

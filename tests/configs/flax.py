@@ -114,8 +114,6 @@ def make_flax_op_configs():
                 name="nnx.Embed",
                 grad_transform=_GT,
             ),
-            # FIXME: 2D indices gradient fails on MPS due to scatter shape limitation
-            # (updates rank > operand rank). Need to implement batched scatter in shape_ops.mm.
             OperationTestConfig(
                 _call_module,
                 lambda key: nnx.Embed(
@@ -123,7 +121,6 @@ def make_flax_op_configs():
                 ),
                 lambda key: random.randint(key, (3, 4), 0, 100),
                 name="nnx.Embed(2d)",
-                differentiable_argnums=(),
                 grad_transform=_GT,
             ),
             # BatchNorm
