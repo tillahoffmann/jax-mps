@@ -958,7 +958,17 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             if (!operandBatchingDims.empty()) {
                 // Batched gather: use take_along_axis which naturally handles
                 // per-element indexing (result[b,i] = operand[b, indices[b,i]]).
-                return mlx::core::take_along_axis(operand, indices, gatherDim);
+                // take_along_axis requires indices to have the same ndim as operand.
+                auto batchedIndices = indices;
+                if (batchedIndices.ndim() < operand.ndim()) {
+                    // Expand dims at the gather axis position to match operand ndim
+                    mlx::core::Shape expandedShape = batchedIndices.shape();
+                    while (static_cast<int>(expandedShape.size()) < operand.ndim()) {
+                        expandedShape.push_back(1);
+                    }
+                    batchedIndices = mlx::core::reshape(batchedIndices, expandedShape);
+                }
+                return mlx::core::take_along_axis(operand, batchedIndices, gatherDim);
             }
             return mlx::core::take(operand, indices, gatherDim);
         }();

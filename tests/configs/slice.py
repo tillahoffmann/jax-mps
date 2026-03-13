@@ -263,7 +263,6 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3,)),
                 differentiable_argnums=(0, 2),
                 name="scatter_vmap_simple",
-                grad_xfail="Output count mismatch",
             ),
             OperationTestConfig(
                 lambda x, idx, val: jax.vmap(lambda a, i, v: a.at[i].add(v))(
