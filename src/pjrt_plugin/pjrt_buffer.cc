@@ -69,6 +69,7 @@ PJRT_Error* MPS_Buffer_OnDeviceSizeInBytes(PJRT_Buffer_OnDeviceSizeInBytes_Args*
 }
 
 PJRT_Error* MPS_Buffer_Device(PJRT_Buffer_Device_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Buffer_Device called, buffer=%p\n", (void*)args->buffer);
     if (args->buffer && args->buffer->client && !args->buffer->client->devices.empty()) {
         args->device = args->buffer->client->devices[0];
@@ -82,6 +83,7 @@ PJRT_Error* MPS_Buffer_Device(PJRT_Buffer_Device_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Buffer_Memory called\n");
     // Return the default memory for the buffer's device
     if (args->buffer && args->buffer->client && !args->buffer->client->memories.empty()) {

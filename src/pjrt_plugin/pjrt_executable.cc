@@ -42,6 +42,7 @@ PJRT_Error* MPS_Executable_NumPartitions(PJRT_Executable_NumPartitions_Args* arg
 }
 
 PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_NumOutputs called\n");
     args->num_outputs = args->executable && args->executable->executable
                             ? args->executable->executable->num_outputs()
@@ -63,6 +64,7 @@ PJRT_Error* MPS_Executable_GetCostAnalysis(PJRT_Executable_GetCostAnalysis_Args*
 }
 
 PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputMemoryKinds called\n");
 
     if (!args->executable) {
@@ -81,6 +83,7 @@ PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_A
 }
 
 PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputElementTypes called\n");
 
     if (!args->executable) {
@@ -98,6 +101,7 @@ PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes
 }
 
 PJRT_Error* MPS_Executable_OutputDimensions(PJRT_Executable_OutputDimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputDimensions called\n");
 
     if (!args->executable) {

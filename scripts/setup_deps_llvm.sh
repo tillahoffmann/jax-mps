@@ -173,8 +173,10 @@ else
     install_stablehlo_headers
 fi
 
-# Install XLA PJRT headers (only the C API header is needed)
-if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
+# Install XLA PJRT and profiler headers
+if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ] || \
+   [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api_profiler_extension.h" ] || \
+   [ ! -f "$PREFIX/include/xla/backends/profiler/plugin/profiler_c_api.h" ]; then
     XLA_DIR="$BUILD_DIR/xla"
     echo "=== Fetching XLA headers at commit $XLA_COMMIT ==="
     if [ ! -d "$XLA_DIR" ]; then
