@@ -184,6 +184,14 @@ if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
         git remote add origin https://github.com/openxla/xla.git
         git fetch --depth 1 origin "$XLA_COMMIT"
         git checkout FETCH_HEAD
+    else
+        cd "$XLA_DIR"
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        if [ "$CURRENT_COMMIT" != "$XLA_COMMIT" ]; then
+            echo "=== Updating XLA to commit $XLA_COMMIT ==="
+            git fetch --depth 1 origin "$XLA_COMMIT"
+            git checkout FETCH_HEAD
+        fi
     fi
 
     mkdir -p "$PREFIX/include/xla/pjrt/c"

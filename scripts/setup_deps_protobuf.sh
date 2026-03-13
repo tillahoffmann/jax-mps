@@ -30,6 +30,7 @@ if [ "$FORCE_REBUILD" = true ]; then
     rm -f "$PREFIX/lib/libabsl_base.a" "$PREFIX/lib/libprotobuf.a"
     rm -f "$PROTOBUF_STAMP"
     rm -rf "$BUILD_DIR/abseil-build" "$BUILD_DIR/protobuf-build"
+    rm -rf "$BUILD_DIR/abseil-cpp" "$BUILD_DIR/protobuf"
 fi
 
 # Build Abseil (required by protobuf, must be static for wheel distribution)
