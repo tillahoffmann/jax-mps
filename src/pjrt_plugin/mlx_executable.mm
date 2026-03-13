@@ -3404,12 +3404,12 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         return true;
     }
 
-    // Multi-dimensional scatter: all dims are inserted (full index scatter)
-    if (scatterDimsToOperandDims.size() == insertedWindowDims.size() &&
-        scatterDimsToOperandDims.size() == operand.ndim()) {
-        // Full index scatter: each index selects a single element
-        // Extract per-axis indices from the index_vector_dim
+    // Multi-dimensional scatter: inserted_window_dims == scatter_dims_to_operand_dims
+    // Handles both full index scatter (all operand dims are scatter targets)
+    // and partial index scatter (some operand dims are window dims).
+    if (scatterDimsToOperandDims.size() == insertedWindowDims.size()) {
         auto indices = scatterIndices;
+        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
 
         // Build per-axis index arrays
         std::vector<mlx::core::array> idxVec;
@@ -3431,14 +3431,63 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             idxVec.push_back(axisIndices);
         }
 
-        // Updates need reshaping: add size-1 dims for all operand dims
-        auto reshapedUpdates = updates;
+        // Reshape updates for MLX: (idx_shape..., operand_dims...)
+        // where scatter target dims get size 1 and window dims keep their size.
+        //
+        // StableHLO updates dims are split into:
+        //   - index dims: all dims NOT in update_window_dims
+        //   - window dims: dims IN update_window_dims (correspond to non-inserted operand dims)
+        // These can be interleaved, so we first transpose to put index dims first.
+        std::set<int> insertedSet(insertedWindowDims.begin(), insertedWindowDims.end());
+        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
         auto updShape = updates.shape();
-        mlx::core::Shape newShape(updShape.begin(), updShape.end());
-        for (int i = 0; i < static_cast<int>(operand.ndim()); ++i) {
-            newShape.push_back(1);
+        int updNdim = static_cast<int>(updShape.size());
+
+        // Separate index dims and window dims in updates
+        std::vector<int> transposeOrder;
+        // Index dims first
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) == 0) {
+                transposeOrder.push_back(i);
+            }
         }
-        reshapedUpdates = mlx::core::reshape(updates, newShape);
+        int numIdxDims = static_cast<int>(transposeOrder.size());
+        // Window dims second
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) != 0) {
+                transposeOrder.push_back(i);
+            }
+        }
+
+        // Transpose if needed
+        auto transposedUpdates = updates;
+        bool needsTranspose = false;
+        for (int i = 0; i < updNdim; ++i) {
+            if (transposeOrder[i] != i) {
+                needsTranspose = true;
+                break;
+            }
+        }
+        if (needsTranspose) {
+            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
+        }
+        auto tShape = transposedUpdates.shape();
+
+        // Build final shape: (idx_dims..., operand_dim_0, operand_dim_1, ...)
+        mlx::core::Shape newShape;
+        for (int i = 0; i < numIdxDims; ++i) {
+            newShape.push_back(tShape[i]);
+        }
+        int windowIdx = 0;
+        for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim()); ++operandDim) {
+            if (insertedSet.count(operandDim) != 0) {
+                newShape.push_back(1);
+            } else {
+                newShape.push_back(tShape[numIdxDims + windowIdx]);
+                ++windowIdx;
+            }
+        }
+        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
         mlx::core::array result = operand;
         switch (scatterType) {

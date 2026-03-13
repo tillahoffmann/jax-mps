@@ -1,6 +1,5 @@
 import jax
 import numpy
-import pytest
 from jax import lax, random
 from jax import numpy as jnp
 
@@ -278,18 +277,13 @@ def make_slice_op_configs():
                 differentiable_argnums=(0, 2),
                 name="scatter_vmap_multi_point",
             ),
-            pytest.param(
-                OperationTestConfig(
-                    lambda x, vals: jax.vmap(
-                        lambda a, v: a.at[numpy.arange(2), numpy.arange(2)].add(v)
-                    )(x, vals),
-                    lambda key: jnp.zeros((3, 4, 4), dtype=jnp.float32),
-                    lambda key: random.normal(key, (3, 2)),
-                    differentiable_argnums=(0,),
-                    name="scatter_vmap_2d_diagonal",
-                ),
-                marks=[
-                    pytest.mark.skip(reason="FIXME: crashes due to batched scatter bug")
-                ],
+            OperationTestConfig(
+                lambda x, vals: jax.vmap(
+                    lambda a, v: a.at[numpy.arange(2), numpy.arange(2)].add(v)
+                )(x, vals),
+                lambda key: jnp.zeros((3, 4, 4), dtype=jnp.float32),
+                lambda key: random.normal(key, (3, 2)),
+                differentiable_argnums=(0,),
+                name="scatter_vmap_2d_diagonal",
             ),
         ]

@@ -193,7 +193,7 @@ def make_numpyro_op_configs():
                     None,  # covariance_matrix
                     None,  # precision_matrix
                     lambda key: jnp.linalg.cholesky(jnp.eye(4) + jnp.ones((4, 4))),
-                    grad_xfail="Output count mismatch" if batch_shape else None,
+                    grad_xfail=None,
                 ),
                 pytest.param(
                     NumpyroDistributionTestConfig(
