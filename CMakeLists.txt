@@ -260,3 +260,21 @@ install(TARGETS pjrt_plugin_mps
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION lib
 )
+
+# Install MLX metallib alongside the dylib so MLX's colocated search finds it.
+# MLX's current_binary_dir() resolves to the dylib's directory (since MLX is
+# statically linked), and load_default_library() checks for mlx.metallib there.
+find_file(MLX_METALLIB mlx.metallib HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+if(MLX_METALLIB)
+    message(STATUS "Found mlx.metallib: ${MLX_METALLIB}")
+    # Copy to build lib dir (for editable installs where dylib is loaded directly)
+    add_custom_command(TARGET pjrt_plugin_mps POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${MLX_METALLIB} $<TARGET_FILE_DIR:pjrt_plugin_mps>/mlx.metallib
+        COMMENT "Copying mlx.metallib alongside pjrt_plugin_mps"
+    )
+    # Install to wheel lib dir (for pip install from wheel)
+    install(FILES ${MLX_METALLIB} DESTINATION lib)
+else()
+    message(WARNING "mlx.metallib not found - Metal GPU kernels will not be available")
+endif()

@@ -10,6 +10,5 @@ __pycache__/
 build/
 dist/
 playground/
-third_party/
 tickets/
 wheels/
