@@ -84,7 +84,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(
             f"ERROR: {len(unsupported)} unsupported ops: {', '.join(sorted(unsupported))}"
         )
-        terminalreporter._session.exitstatus = 1
+        terminalreporter._session.exitstatus = max(
+            terminalreporter._session.exitstatus, 1
+        )
 
     missing = op_names - exercised_ops
     if missing:
@@ -92,7 +94,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(
             f"ERROR: {len(missing)} untested ops: {', '.join(sorted(missing))}"
         )
-        terminalreporter._session.exitstatus = 1
+        terminalreporter._session.exitstatus = max(
+            terminalreporter._session.exitstatus, 1
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)
