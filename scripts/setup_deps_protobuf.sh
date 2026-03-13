@@ -18,8 +18,17 @@ echo "Abseil:       $ABSEIL_VERSION"
 echo "Protobuf:     $PROTOBUF_VERSION"
 echo ""
 
+# Version stamp to detect version changes without --force
+PROTOBUF_STAMP="$PREFIX/.protobuf-versions"
+PROTOBUF_EXPECTED_STAMP="abseil=$ABSEIL_VERSION protobuf=$PROTOBUF_VERSION"
+if [ -f "$PROTOBUF_STAMP" ] && [ "$(cat "$PROTOBUF_STAMP")" != "$PROTOBUF_EXPECTED_STAMP" ]; then
+    echo "=== Version mismatch detected, forcing rebuild ==="
+    FORCE_REBUILD=true
+fi
+
 if [ "$FORCE_REBUILD" = true ]; then
     rm -f "$PREFIX/lib/libabsl_base.a" "$PREFIX/lib/libprotobuf.a"
+    rm -f "$PROTOBUF_STAMP"
     rm -rf "$BUILD_DIR/abseil-build" "$BUILD_DIR/protobuf-build"
 fi
 
@@ -77,6 +86,8 @@ if [ ! -f "$PREFIX/lib/libprotobuf.a" ]; then
 else
     echo "=== Protobuf already installed ==="
 fi
+
+echo "$PROTOBUF_EXPECTED_STAMP" > "$PROTOBUF_STAMP"
 
 echo ""
 echo "=== Protobuf setup complete ==="

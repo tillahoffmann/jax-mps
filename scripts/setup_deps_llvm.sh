@@ -21,9 +21,19 @@ echo "StableHLO:    $STABLEHLO_COMMIT"
 echo "LLVM:         $LLVM_COMMIT"
 echo ""
 
+# Version stamp to detect version changes without --force
+LLVM_STAMP="$PREFIX/.llvm-versions"
+LLVM_EXPECTED_STAMP="llvm=$LLVM_COMMIT stablehlo=$STABLEHLO_COMMIT xla=$XLA_COMMIT"
+if [ -f "$LLVM_STAMP" ] && [ "$(cat "$LLVM_STAMP")" != "$LLVM_EXPECTED_STAMP" ]; then
+    echo "=== Version mismatch detected, forcing rebuild ==="
+    FORCE_REBUILD=true
+fi
+
 if [ "$FORCE_REBUILD" = true ]; then
     rm -rf "$PREFIX/lib/cmake/mlir" "$PREFIX/lib/cmake/llvm"
     rm -f "$PREFIX/lib/libStablehloOps.a"
+    rm -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h"
+    rm -f "$LLVM_STAMP"
     rm -rf "$BUILD_DIR/llvm-build" "$BUILD_DIR/stablehlo-build"
 fi
 
@@ -176,6 +186,8 @@ if [ ! -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h" ]; then
 else
     echo "=== XLA PJRT headers already installed ==="
 fi
+
+echo "$LLVM_EXPECTED_STAMP" > "$LLVM_STAMP"
 
 echo ""
 echo "=== LLVM/StableHLO setup complete ==="
