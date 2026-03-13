@@ -59,5 +59,5 @@ Benchmarks are excluded from normal test runs. To run them:
 
 ```bash
 # Run benchmarks (compares CPU vs MPS performance)
-uv run pytest -m benchmark --benchmark-only
+uv run pytest -m benchmark --benchmark-only -n0
 ```

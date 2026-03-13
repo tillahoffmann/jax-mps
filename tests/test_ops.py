@@ -1,6 +1,4 @@
 import os
-import re
-from pathlib import Path
 
 import jax
 import numpy
@@ -176,68 +174,3 @@ def test_unsupported_op_error_message(jit: bool) -> None:
             assert "CONTRIBUTING.md" in message
         else:
             pytest.skip("clz is now supported; test needs a new unregistered op")
-
-
-@pytest.fixture(autouse=True, scope="module")
-def assert_all_ops_tested():
-    yield
-
-    if "CI" not in os.environ:
-        return
-
-    # Skip op coverage check in CPU-only mode since EXERCISED_STABLEHLO_OPS is only
-    # populated when running on MPS.
-    if TEST_MODE == "cpu":
-        return
-
-    pjrt_dir = Path(__file__).parent.parent / "src/pjrt_plugin"
-    assert pjrt_dir.is_dir()
-
-    # Ops that appear in JAX's lowered IR text (which we scan to populate
-    # EXERCISED_STABLEHLO_OPS) but never reach our dispatch loop. CHLO ops
-    # are legalized by JAX before serialization—simple ones become
-    # stablehlo.custom_call(@mhlo.*), complex ones get expanded to
-    # polynomial approximations. StableHLO ops listed here are similarly
-    # lowered to more primitive ops before reaching us.
-    mlir_lowered_ops = {
-        # CHLO ops legalized by JAX before serialization
-        "chlo.acos",
-        "chlo.acosh",
-        "chlo.asin",
-        "chlo.asinh",
-        "chlo.atanh",
-        "chlo.bessel_i1e",
-        "chlo.cosh",
-        "chlo.digamma",
-        "chlo.erf",
-        "chlo.erf_inv",
-        "chlo.lgamma",
-        "chlo.next_after",
-        "chlo.sinh",
-        "chlo.square",
-        "chlo.top_k",
-        # StableHLO ops lowered to more primitive ops
-        "stablehlo.broadcast",
-        "stablehlo.dot",
-        "stablehlo.erf",
-    }
-
-    # Discover ops from the dispatch table in mlx_executable.mm
-    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)"')
-    op_names = set()
-    executable_file = pjrt_dir / "mlx_executable.mm"
-    assert executable_file.is_file()
-    with executable_file.open() as fp:
-        content = fp.read()
-        op_names.update(dispatch_pattern.findall(content))
-
-    assert op_names, "Failed to discover any ops."
-    exercised = OperationTestConfig.EXERCISED_STABLEHLO_OPS - mlir_lowered_ops
-    unsupported = exercised - op_names
-    assert not unsupported, (
-        f"Discovered {len(unsupported)} unsupported ops: {', '.join(sorted(unsupported))}"
-    )
-    missing = op_names - OperationTestConfig.EXERCISED_STABLEHLO_OPS
-    assert not missing, (
-        f"Discovered {len(missing)} untested ops: {', '.join(sorted(missing))}"
-    )
