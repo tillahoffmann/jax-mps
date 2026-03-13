@@ -1,5 +1,7 @@
 // PJRT Buffer API implementation for Metal backend
 
+#include <string>
+
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
@@ -9,6 +11,7 @@
 // ============================================================================
 
 PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     delete args->buffer;
     return nullptr;
 }
@@ -108,19 +111,23 @@ static PJRT_Error* CopyBuffer(PJRT_Buffer* src, PJRT_Buffer** dst_out) {
     }
 
     // Create a deep copy via MLX copy()
-    auto copied = mlx::core::copy(src->buffer->array());
-    mlx::core::eval(copied);
+    try {
+        auto copied = mlx::core::copy(src->buffer->array());
+        mlx::core::eval(copied);
 
-    auto new_buffer = jax_mps::MlxBuffer::FromArray(std::move(copied));
-    if (!new_buffer) {
-        return MakeError("Buffer copy: failed to create copy");
+        auto new_buffer = jax_mps::MlxBuffer::FromArray(std::move(copied));
+        if (!new_buffer) {
+            return MakeError("Buffer copy: failed to create copy");
+        }
+
+        auto* dst_buffer = new PJRT_Buffer();
+        dst_buffer->buffer = std::move(new_buffer);
+        dst_buffer->client = src->client;
+        *dst_out = dst_buffer;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return MakeError(std::string("Buffer copy: MLX error: ") + e.what());
     }
-
-    auto* dst_buffer = new PJRT_Buffer();
-    dst_buffer->buffer = std::move(new_buffer);
-    dst_buffer->client = src->client;
-    *dst_out = dst_buffer;
-    return nullptr;
 }
 
 PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args) {

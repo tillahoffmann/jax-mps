@@ -3849,12 +3849,16 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
     auto b_solve = b;
 
     // Check for singular triangular matrix (zero on diagonal) to avoid LAPACK abort.
-    // Extract diagonal and check for zeros. If singular, return NaN result like XLA does.
+    // Check per-batch: reduce over the diagonal dimension only (last axis of diag).
     {
         auto diag = mlx::core::diagonal(a, 0, -2, -1);
-        auto has_zero = mlx::core::any(mlx::core::equal(diag, mlx::core::zeros_like(diag)));
-        mlx::core::eval(has_zero);
-        if (has_zero.item<bool>()) {
+        // any(..., axis=-1) gives per-batch singular flags
+        auto has_zero = mlx::core::any(mlx::core::equal(diag, mlx::core::zeros_like(diag)),
+                                       /* axis= */ std::vector<int>{-1}, /* keepdims= */ false);
+        // Reduce across all batches to decide if any batch is singular
+        auto any_singular = mlx::core::any(has_zero);
+        mlx::core::eval(any_singular);
+        if (any_singular.item<bool>()) {
             // Return NaN-filled result matching b's shape, consistent with XLA behavior
             auto nan_result =
                 mlx::core::full(b.shape(), std::numeric_limits<float>::quiet_NaN(), b.dtype());
