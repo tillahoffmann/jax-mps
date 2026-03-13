@@ -31,12 +31,10 @@ def make_reduction_op_configs():
                 OperationTestConfig(
                     lambda x: jnp.max(x, axis=0),
                     lambda key: random.normal(key, (4, 8)),
-                    differentiable_argnums=(),
                 ),
                 OperationTestConfig(
                     lambda x: jnp.min(x, axis=-1),
                     lambda key: random.normal(key, (4, 8)),
-                    differentiable_argnums=(),
                 ),
             ]
 
@@ -57,7 +55,6 @@ def make_reduction_op_configs():
                 lambda x: jnp.cumprod(x, axis=1),
                 lambda key: random.uniform(key, (3, 5), minval=0.5, maxval=1.5),
                 name="cumprod-axis1",
-                differentiable_argnums=(),  # grad uses pad with interior dilation
             ),
             OperationTestConfig(
                 lambda x: lax.cummax(x, axis=1),
