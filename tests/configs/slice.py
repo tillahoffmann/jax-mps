@@ -4,7 +4,7 @@ import pytest
 from jax import lax, random
 from jax import numpy as jnp
 
-from .util import OperationTestConfig, xfail_match
+from .util import OperationTestConfig
 
 
 def make_slice_op_configs():
@@ -162,17 +162,24 @@ def make_slice_op_configs():
                 name="multi_index_point_gather",
             ),
             # Batched gather via vmap
-            pytest.param(
-                OperationTestConfig(
-                    lambda x, idx: jax.vmap(
-                        lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
-                    )(x, idx),
-                    lambda key: random.normal(key, (3, 10)),
-                    lambda key: random.randint(key, (3,), 0, 10),
-                    name="batched_single_axis_gather",
-                    grad_xfail="Output count mismatch",
+            OperationTestConfig(
+                lambda x, idx: jax.vmap(
+                    lambda xi, ii: lax.dynamic_index_in_dim(xi, ii, 0, False)
+                )(x, idx),
+                lambda key: random.normal(key, (3, 10)),
+                lambda key: random.randint(key, (3,), 0, 10),
+                name="batched_single_axis_gather",
+                grad_xfail="Output count mismatch",
+            ),
+            # Batched gather via vmap with no collapsed dims (issue #74)
+            OperationTestConfig(
+                lambda x, idx: jax.vmap(lambda state, i: state[i], in_axes=(0, 0))(
+                    x, idx
                 ),
-                marks=[xfail_match("Output count mismatch")],
+                lambda key: random.normal(key, (4, 5)),
+                lambda key: random.randint(key, (4,), 0, 5),
+                name="batched_gather_no_collapse",
+                grad_xfail="Output count mismatch",
             ),
             # Large integer gather tests: verify integers > 2^24 are preserved
             # These test the bitcast workaround for MPS gather operations

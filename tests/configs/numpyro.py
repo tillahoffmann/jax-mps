@@ -99,21 +99,14 @@ def make_numpyro_op_configs():
                     differentiable_argnums=(1,),
                     name="Bernoulli",
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.BinomialProbs,
-                        lambda key, bs=batch_shape: random.uniform(
-                            key, bs, minval=0.1, maxval=0.9
-                        ),
-                        10,  # total_count (not differentiable)
-                        differentiable_argnums=(1,),
-                        name="Binomial",
+                NumpyroDistributionTestConfig(
+                    dists.BinomialProbs,
+                    lambda key, bs=batch_shape: random.uniform(
+                        key, bs, minval=0.1, maxval=0.9
                     ),
-                    marks=[
-                        xfail_match(
-                            "Output count mismatch|unsupported gather pattern|Segfault"
-                        )
-                    ],
+                    10,  # total_count (not differentiable)
+                    differentiable_argnums=(1,),
+                    name="Binomial",
                 ),
                 NumpyroDistributionTestConfig(
                     dists.CategoricalProbs,
