@@ -18,3 +18,11 @@ body:
       render: python
     validations:
       required: true
+  - type: textarea
+    id: version-info
+    attributes:
+      label: Version and runtime information
+      description: "Paste the output of: `python -m jax_plugins.mps.sysinfo`. If the command is not available, please upgrade first: `pip install -U jax-mps`."
+      render: text
+    validations:
+      required: true
