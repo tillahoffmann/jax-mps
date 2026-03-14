@@ -875,31 +875,56 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
     auto& operand = operand_opt->get();
     auto& update = update_opt->get();
 
-    // Get start indices (each is a 0-d tensor)
-    std::vector<int> starts;
-    for (auto startIdx : dusOp.getStartIndices()) {
-        auto idx_opt = GetValue(values, startIdx);
+    // Empty update is a no-op
+    if (update.size() == 0) {
+        values.emplace(ToKey(op->getResult(0)), operand);
+        return true;
+    }
+
+    // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
+    // For each dimension, build a mask indicating which positions fall within the
+    // update region, and gather from the update using clamped relative indices.
+    auto gathered = update;
+    auto combined_mask = mlx::core::array(true);
+    for (int d = 0; d < static_cast<int>(operand.ndim()); ++d) {
+        auto idx_opt = GetValue(values, dusOp.getStartIndices()[d]);
         if (!idx_opt) {
             MPS_LOG_ERROR("stablehlo.dynamic_update_slice: start index not found\n");
             return false;
         }
-        // Evaluate to get the actual index value
-        mlx::core::eval(idx_opt->get());
-        starts.push_back(idx_opt->get().item<int>());
+        auto start_idx =
+            mlx::core::astype(mlx::core::reshape(idx_opt->get(), {}), mlx::core::int32);
+
+        int op_size = operand.shape(d);
+        int up_size = update.shape(d);
+
+        // Clamp start index: max(0, min(start, op_size - up_size))
+        start_idx =
+            mlx::core::maximum(mlx::core::array(0),
+                               mlx::core::minimum(start_idx, mlx::core::array(op_size - up_size)));
+
+        // Relative position of each operand index w.r.t. the update region
+        auto arange_d = mlx::core::arange(0, op_size, mlx::core::int32);
+        auto relative = mlx::core::subtract(arange_d, start_idx);
+
+        // Per-dimension mask: position is inside update region
+        auto mask_d =
+            mlx::core::logical_and(mlx::core::greater_equal(relative, mlx::core::array(0)),
+                                   mlx::core::less(relative, mlx::core::array(up_size)));
+
+        // Reshape mask for broadcasting: [1, ..., op_size, ..., 1]
+        mlx::core::Shape shape(operand.ndim(), 1);
+        shape[d] = op_size;
+        mask_d = mlx::core::reshape(mask_d, shape);
+        combined_mask = mlx::core::logical_and(combined_mask, mask_d);
+
+        // Clamp relative indices for gathering from update
+        auto clamped = mlx::core::clip(relative, mlx::core::array(0),
+                                       mlx::core::array(std::max(0, up_size - 1)));
+        gathered = mlx::core::take(gathered, clamped, d);
     }
 
-    // Clamp start indices to valid range
-    mlx::core::Shape mlxStarts;
-    mlx::core::Shape mlxStops;
-    for (int i = 0; i < static_cast<int>(starts.size()); ++i) {
-        int maxStart = operand.shape(i) - update.shape(i);
-        int s = std::max(0, std::min(starts[i], maxStart));
-        mlxStarts.push_back(s);
-        mlxStops.push_back(s + update.shape(i));
-    }
-
-    values.emplace(ToKey(op->getResult(0)),
-                   mlx::core::slice_update(operand, update, mlxStarts, mlxStops));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(combined_mask, gathered, operand));
     return true;
 }
 
@@ -1486,51 +1511,8 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
     auto& input = input_opt->get();
     auto sliceSizes = dynamicSliceOp.getSliceSizes();
 
-    // Try fast path first: extract concrete indices and use mlx::core::slice
-    // This will fail during MLX compile() tracing, in which case we fall back to lazy path
-    try {
-        mlx::core::Shape starts;
-        mlx::core::Shape stops;
-        for (size_t i = 1; i < op->getNumOperands(); ++i) {
-            auto idx_opt = GetValue(values, op->getOperand(i));
-            if (!idx_opt) {
-                MPS_LOG_ERROR("stablehlo.dynamic_slice: start index operand not found\n");
-                return false;
-            }
-            auto& idx_arr = idx_opt->get();
-            mlx::core::eval(idx_arr);
-
-            int start;
-            switch (idx_arr.dtype()) {
-                case mlx::core::int32:
-                    start = idx_arr.item<int32_t>();
-                    break;
-                case mlx::core::int64:
-                    start = static_cast<int>(idx_arr.item<int64_t>());
-                    break;
-                case mlx::core::uint32:
-                    start = static_cast<int>(idx_arr.item<uint32_t>());
-                    break;
-                case mlx::core::uint64:
-                    start = static_cast<int>(idx_arr.item<uint64_t>());
-                    break;
-                default:
-                    start = idx_arr.item<int>();
-                    break;
-            }
-
-            int size = static_cast<int>(sliceSizes[i - 1]);
-            starts.push_back(start);
-            stops.push_back(start + size);
-        }
-        values.emplace(ToKey(op->getResult(0)), mlx::core::slice(input, starts, stops));
-        return true;
-    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-        // Intentionally empty - fall through to lazy path below.
-        // This happens during MLX compile() tracing when eval() fails.
-    }
-
-    // Lazy path: use take() with computed indices for MLX compile() compatibility
+    // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
+    // For each dimension, compute indices as start + arange(size) and use take().
     auto result = input;
     for (size_t i = 1; i < op->getNumOperands(); ++i) {
         auto idx_opt = GetValue(values, op->getOperand(i));
@@ -1538,13 +1520,18 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
             MPS_LOG_ERROR("stablehlo.dynamic_slice: start index operand not found\n");
             return false;
         }
-        auto& start_idx = idx_opt->get();
+        auto start_idx = mlx::core::astype(idx_opt->get(), mlx::core::int32);
         int size = static_cast<int>(sliceSizes[i - 1]);
         int axis = static_cast<int>(i - 1);
+        int dim_size = input.shape(axis);
 
-        // Create indices: start + [0, 1, 2, ..., size-1]
+        // Clamp start index per StableHLO spec: max(0, min(start, dim_size - size))
+        start_idx = mlx::core::maximum(
+            mlx::core::array(0), mlx::core::minimum(start_idx, mlx::core::array(dim_size - size)));
+
+        // Create indices: clamped_start + [0, 1, 2, ..., size-1]
         auto offsets = mlx::core::arange(0, size, mlx::core::int32);
-        auto indices = mlx::core::add(mlx::core::astype(start_idx, mlx::core::int32), offsets);
+        auto indices = mlx::core::add(start_idx, offsets);
         result = mlx::core::take(result, indices, axis);
     }
     values.emplace(ToKey(op->getResult(0)), std::move(result));
@@ -1896,7 +1883,9 @@ bool HandleCase(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         return false;
     }
 
-    // Evaluate the index to determine which branch to take
+    // Evaluate the index to determine which branch to take.
+    // Control flow ops fundamentally require concrete values to decide which path to execute,
+    // so eval() is unavoidable here (same as while loop conditions).
     mlx::core::eval(index_opt->get());
     int branchIdx = index_opt->get().item<int>();
 
