@@ -293,6 +293,24 @@ def make_slice_op_configs():
                 differentiable_argnums=(0,),
                 name="scatter_vmap_2d_diagonal",
             ),
+            # Window scatter: slice update with no inserted window dims (issue #89)
+            # jnp.zeros((2,)).at[1:].set(-1.0) produces scatter with
+            # scatterDimsToOperandDims.size=1, insertedWindowDims.size=0
+            OperationTestConfig(
+                lambda x: x.at[1:].set(-1.0),
+                lambda key: jnp.zeros((2,), dtype=jnp.float32),
+                name="window_scatter_slice_set_1d",
+            ),
+            OperationTestConfig(
+                lambda x: x.at[1:4].set(jnp.array([10.0, 20.0, 30.0])),
+                lambda key: jnp.zeros((5,), dtype=jnp.float32),
+                name="window_scatter_slice_set_1d_multi",
+            ),
+            OperationTestConfig(
+                lambda x: x.at[1:3].set(jnp.ones((2, 4))),
+                lambda key: jnp.zeros((5, 4), dtype=jnp.float32),
+                name="window_scatter_slice_set_2d",
+            ),
             # Partial-index gather with non-sorted startIndexMap.
             # start_index_map=(2, 0) means idx[0]->dim2, idx[1]->dim0.
             # Strides must follow sorted collapsed-dim order, not startIndexMap order.
