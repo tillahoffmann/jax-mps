@@ -4,7 +4,10 @@
 // Log level: 0=error, 1=+warn (default), 2=+info, 3=+debug
 // #define MPS_LOG_LEVEL 3  // Uncomment for verbose logging
 
+#include <mutex>
+
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_profiler.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -21,46 +24,45 @@ const char* const kPlatformVersion = "0.1.0";
 static PJRT_Client* g_default_client = nullptr;
 
 PJRT_Client* GetOrCreateDefaultClient() {
-    if (g_default_client)
-        return g_default_client;
+    static std::once_flag init_flag;
+    std::call_once(init_flag, [] {
+        MPS_LOG_INFO("Creating default client\n");
+        auto mlx_client = std::make_unique<jax_mps::MlxClient>();
+        if (!mlx_client) {
+            MPS_LOG_ERROR("Failed to create MLX client\n");
+            return;
+        }
 
-    MPS_LOG_INFO("Creating default client\n");
-    auto mlx_client = std::make_unique<jax_mps::MlxClient>();
-    if (!mlx_client) {
-        MPS_LOG_ERROR("Failed to create MLX client\n");
-        return nullptr;
-    }
+        g_default_client = new PJRT_Client();
+        g_default_client->client = std::move(mlx_client);
 
-    g_default_client = new PJRT_Client();
-    g_default_client->client = std::move(mlx_client);
+        for (int i = 0; i < g_default_client->client->device_count(); i++) {
+            auto* dev = new PJRT_Device();
+            dev->device = g_default_client->client->device(i);
+            dev->client = g_default_client;
 
-    for (int i = 0; i < g_default_client->client->device_count(); i++) {
-        auto* dev = new PJRT_Device();
-        dev->device = g_default_client->client->device(i);
-        dev->client = g_default_client;
+            // Create the device description with back-pointer
+            auto* desc = new PJRT_DeviceDescription();
+            desc->device = dev;
+            dev->description = desc;
 
-        // Create the device description with back-pointer
-        auto* desc = new PJRT_DeviceDescription();
-        desc->device = dev;
-        dev->description = desc;
+            // Create the default memory for the device
+            auto* mem = new PJRT_Memory();
+            mem->device = dev;
+            mem->client = g_default_client;
+            mem->id = i;
+            dev->default_memory = mem;
+            g_default_client->memories.push_back(mem);
 
-        // Create the default memory for the device
-        auto* mem = new PJRT_Memory();
-        mem->device = dev;
-        mem->client = g_default_client;
-        mem->id = i;
-        dev->default_memory = mem;
-        g_default_client->memories.push_back(mem);
+            g_default_client->devices.push_back(dev);
+        }
 
-        g_default_client->devices.push_back(dev);
-    }
+        // Create topology description
+        g_default_client->topology = new PJRT_TopologyDescription();
+        g_default_client->topology->client = g_default_client;
 
-    // Create topology description
-    g_default_client->topology = new PJRT_TopologyDescription();
-    g_default_client->topology->client = g_default_client;
-
-    MPS_LOG_INFO("Created client with %zu devices\n", g_default_client->devices.size());
-
+        MPS_LOG_INFO("Created client with %zu devices\n", g_default_client->devices.size());
+    });
     return g_default_client;
 }
 
@@ -165,6 +167,9 @@ PJRT_Error* MPS_Executable_DeserializeAndLoad(PJRT_Executable_DeserializeAndLoad
 PJRT_Error* MPS_LoadedExecutable_Fingerprint(PJRT_LoadedExecutable_Fingerprint_Args* args);
 PJRT_Error* MPS_LoadedExecutable_GetDeviceAssignment(
     PJRT_LoadedExecutable_GetDeviceAssignment_Args* args);
+PJRT_Error* MPS_Executable_GetCompiledMemoryStats(
+    PJRT_Executable_GetCompiledMemoryStats_Args* args);
+PJRT_Error* MPS_Executable_GetCompileOptions(PJRT_Executable_GetCompileOptions_Args* args);
 
 // Buffer API (pjrt_buffer.cc)
 PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args);
@@ -179,6 +184,7 @@ PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args);
 PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args);
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args);
 PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args);
+PJRT_Error* MPS_Buffer_CopyToMemory(PJRT_Buffer_CopyToMemory_Args* args);
 PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args);
 PJRT_Error* MPS_Buffer_IsOnCpu(PJRT_Buffer_IsOnCpu_Args* args);
 PJRT_Error* MPS_Buffer_ReadyEvent(PJRT_Buffer_ReadyEvent_Args* args);
@@ -218,7 +224,7 @@ PJRT_Error* MPS_Compile(PJRT_Compile_Args* args);
 
 static const PJRT_Api pjrt_api = {
     .struct_size = PJRT_Api_STRUCT_SIZE,
-    .extension_start = nullptr,
+    .extension_start = GetProfilerExtension(),
 
     .pjrt_api_version =
         {
@@ -334,11 +340,11 @@ static const PJRT_Api pjrt_api = {
     // Output type/dimension information
     .PJRT_Executable_OutputElementTypes = MPS_Executable_OutputElementTypes,
     .PJRT_Executable_OutputDimensions = MPS_Executable_OutputDimensions,
-    .PJRT_Buffer_CopyToMemory = nullptr,
+    .PJRT_Buffer_CopyToMemory = MPS_Buffer_CopyToMemory,
     .PJRT_Client_CreateViewOfDeviceBuffer = nullptr,
     .PJRT_Executable_Fingerprint = MPS_Executable_Fingerprint,
     .PJRT_Client_TopologyDescription = MPS_Client_TopologyDescription,
-    .PJRT_Executable_GetCompiledMemoryStats = nullptr,
+    .PJRT_Executable_GetCompiledMemoryStats = MPS_Executable_GetCompiledMemoryStats,
     .PJRT_Memory_Kind_Id = nullptr,
     .PJRT_ExecuteContext_Create = nullptr,
     .PJRT_ExecuteContext_Destroy = nullptr,
@@ -366,7 +372,7 @@ static const PJRT_Api pjrt_api = {
     .PJRT_Device_PoisonExecution = nullptr,
     .PJRT_Device_CreateAsyncTrackingEvent = nullptr,
     .PJRT_AsyncTrackingEvent_Destroy = nullptr,
-    .PJRT_Executable_GetCompileOptions = nullptr,
+    .PJRT_Executable_GetCompileOptions = MPS_Executable_GetCompileOptions,
     .PJRT_Buffer_DonateWithControlDependency = nullptr,
     .PJRT_Event_Create = nullptr,
     .PJRT_Event_Set = nullptr,

@@ -1,6 +1,9 @@
 // PJRT Buffer API implementation for Metal backend
 
+#include <string>
+
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -8,11 +11,13 @@
 // ============================================================================
 
 PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     delete args->buffer;
     return nullptr;
 }
 
 PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->type = args->buffer && args->buffer->buffer
                      ? static_cast<PJRT_Buffer_Type>(args->buffer->buffer->dtype())
                      : PJRT_Buffer_Type_F32;
@@ -20,6 +25,7 @@ PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Dimensions(PJRT_Buffer_Dimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         const auto& dims = args->buffer->buffer->dimensions();
         args->dims = dims.data();
@@ -32,6 +38,7 @@ PJRT_Error* MPS_Buffer_Dimensions(PJRT_Buffer_Dimensions_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_UnpaddedDimensions(PJRT_Buffer_UnpaddedDimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         const auto& dims = args->buffer->buffer->dimensions();
         args->unpadded_dims = dims.data();
@@ -55,12 +62,14 @@ PJRT_Error* MPS_Buffer_GetMemoryLayout(PJRT_Buffer_GetMemoryLayout_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_OnDeviceSizeInBytes(PJRT_Buffer_OnDeviceSizeInBytes_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->on_device_size_in_bytes =
         args->buffer && args->buffer->buffer ? args->buffer->buffer->byte_size() : 0;
     return nullptr;
 }
 
 PJRT_Error* MPS_Buffer_Device(PJRT_Buffer_Device_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Buffer_Device called, buffer=%p\n", (void*)args->buffer);
     if (args->buffer && args->buffer->client && !args->buffer->client->devices.empty()) {
         args->device = args->buffer->client->devices[0];
@@ -74,6 +83,7 @@ PJRT_Error* MPS_Buffer_Device(PJRT_Buffer_Device_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Buffer_Memory called\n");
     // Return the default memory for the buffer's device
     if (args->buffer && args->buffer->client && !args->buffer->client->memories.empty()) {
@@ -85,6 +95,7 @@ PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->buffer && args->buffer->buffer) {
         args->buffer->buffer->Delete();
     }
@@ -92,16 +103,51 @@ PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->is_deleted =
         args->buffer && args->buffer->buffer ? args->buffer->buffer->IsDeleted() : true;
     return nullptr;
 }
 
+static PJRT_Error* CopyBuffer(PJRT_Buffer* src, PJRT_Buffer** dst_out) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
+    if (!src || !src->buffer) {
+        return MakeError("Buffer copy: source buffer is null");
+    }
+    if (src->buffer->IsDeleted()) {
+        return MakeError("Buffer copy: source buffer has been deleted");
+    }
+
+    // Create a deep copy via MLX copy()
+    try {
+        auto copied = mlx::core::copy(src->buffer->array());
+        mlx::core::eval(copied);
+
+        auto new_buffer = jax_mps::MlxBuffer::FromArray(std::move(copied));
+        if (!new_buffer) {
+            return MakeError("Buffer copy: failed to create copy");
+        }
+
+        auto* dst_buffer = new PJRT_Buffer();
+        dst_buffer->buffer = std::move(new_buffer);
+        dst_buffer->client = src->client;
+        *dst_out = dst_buffer;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return MakeError(std::string("Buffer copy: MLX error: ") + e.what());
+    }
+}
+
 PJRT_Error* MPS_Buffer_CopyToDevice(PJRT_Buffer_CopyToDevice_Args* args) {
-    return MakeError("CopyToDevice not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+    return CopyBuffer(args->buffer, &args->dst_buffer);
+}
+
+PJRT_Error* MPS_Buffer_CopyToMemory(PJRT_Buffer_CopyToMemory_Args* args) {
+    return CopyBuffer(args->buffer, &args->dst_buffer);
 }
 
 PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->src && args->src->buffer && args->dst) {
         args->src->buffer->ToHostBuffer(args->dst);
     }

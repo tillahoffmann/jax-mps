@@ -5,6 +5,7 @@
 
 #include "device_assignment.pb.h"
 #include "pjrt_plugin/logging.h"
+#include "pjrt_plugin/pjrt_mutex.h"
 #include "pjrt_plugin/pjrt_types.h"
 
 // ============================================================================
@@ -12,6 +13,7 @@
 // ============================================================================
 
 PJRT_Error* MPS_Executable_Destroy(PJRT_Executable_Destroy_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     // Skip deletion if executable is owned by a LoadedExecutable
     // (will be deleted when LoadedExecutable is destroyed)
     if (args->executable && args->executable->owned_by_loaded) {
@@ -40,6 +42,7 @@ PJRT_Error* MPS_Executable_NumPartitions(PJRT_Executable_NumPartitions_Args* arg
 }
 
 PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_NumOutputs called\n");
     args->num_outputs = args->executable && args->executable->executable
                             ? args->executable->executable->num_outputs()
@@ -61,6 +64,7 @@ PJRT_Error* MPS_Executable_GetCostAnalysis(PJRT_Executable_GetCostAnalysis_Args*
 }
 
 PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputMemoryKinds called\n");
 
     if (!args->executable) {
@@ -79,6 +83,7 @@ PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_A
 }
 
 PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputElementTypes called\n");
 
     if (!args->executable) {
@@ -96,6 +101,7 @@ PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes
 }
 
 PJRT_Error* MPS_Executable_OutputDimensions(PJRT_Executable_OutputDimensions_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_DEBUG(" PJRT_Executable_OutputDimensions called\n");
 
     if (!args->executable) {
@@ -135,6 +141,7 @@ PJRT_Error* MPS_Executable_Fingerprint(PJRT_Executable_Fingerprint_Args* args) {
 // ============================================================================
 
 PJRT_Error* MPS_LoadedExecutable_Destroy(PJRT_LoadedExecutable_Destroy_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     if (args->executable) {
         // Delete the owned PJRT_Executable first (owns MpsExecutable with MLIR context)
         delete args->executable->executable;
@@ -190,6 +197,7 @@ PJRT_Error* MPS_LoadedExecutable_IsDeleted(PJRT_LoadedExecutable_IsDeleted_Args*
 }
 
 PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     MPS_LOG_INFO("Executing program\n");
 
     if (!args->executable || !args->executable->executable) {
@@ -257,6 +265,15 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
 
     MPS_LOG_INFO("Execution complete\n");
     return nullptr;
+}
+
+PJRT_Error* MPS_Executable_GetCompiledMemoryStats(
+    PJRT_Executable_GetCompiledMemoryStats_Args* args) {
+    return MakeError("GetCompiledMemoryStats not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+}
+
+PJRT_Error* MPS_Executable_GetCompileOptions(PJRT_Executable_GetCompileOptions_Args* args) {
+    return MakeError("GetCompileOptions not implemented", PJRT_Error_Code_UNIMPLEMENTED);
 }
 
 PJRT_Error* MPS_Executable_DeserializeAndLoad(PJRT_Executable_DeserializeAndLoad_Args* args) {

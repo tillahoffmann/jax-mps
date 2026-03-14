@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -55,7 +56,7 @@ private:
     size_t num_outputs_ = 0;
     std::vector<OutputInfo> output_info_;
 
-    // MLX compile support
+    // MLX compile support (thread safety via GetPjrtGlobalMutex at PJRT layer)
     mutable bool compile_attempted_ = false;
     mutable bool compile_succeeded_ = false;
     mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>

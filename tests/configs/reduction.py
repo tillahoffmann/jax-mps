@@ -68,6 +68,14 @@ def make_reduction_op_configs():
             ),
         ]
 
+    # Scalar reduce_window: identity operation on 0-dimensional input.
+    with OperationTestConfig.module_name("reduction-real"):
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(x, 0.0, lax.add, (), (), "valid"),
+            lambda key: random.normal(key, ()),
+            name="reduce_window_scalar",
+        )
+
     # Pooling operations (lower to stablehlo.reduce_window with pooling pattern).
     with OperationTestConfig.module_name("reduction-real"):
         yield from [
