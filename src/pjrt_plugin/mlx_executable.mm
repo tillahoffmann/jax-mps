@@ -875,6 +875,12 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
     auto& operand = operand_opt->get();
     auto& update = update_opt->get();
 
+    // Empty update is a no-op
+    if (update.size() == 0) {
+        values.emplace(ToKey(op->getResult(0)), operand);
+        return true;
+    }
+
     // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
     // For each dimension, build a mask indicating which positions fall within the
     // update region, and gather from the update using clamped relative indices.
@@ -1514,13 +1520,18 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
             MPS_LOG_ERROR("stablehlo.dynamic_slice: start index operand not found\n");
             return false;
         }
-        auto& start_idx = idx_opt->get();
+        auto start_idx = mlx::core::astype(idx_opt->get(), mlx::core::int32);
         int size = static_cast<int>(sliceSizes[i - 1]);
         int axis = static_cast<int>(i - 1);
+        int dim_size = input.shape(axis);
 
-        // Create indices: start + [0, 1, 2, ..., size-1]
+        // Clamp start index per StableHLO spec: max(0, min(start, dim_size - size))
+        start_idx = mlx::core::maximum(
+            mlx::core::array(0), mlx::core::minimum(start_idx, mlx::core::array(dim_size - size)));
+
+        // Create indices: clamped_start + [0, 1, 2, ..., size-1]
         auto offsets = mlx::core::arange(0, size, mlx::core::int32);
-        auto indices = mlx::core::add(mlx::core::astype(start_idx, mlx::core::int32), offsets);
+        auto indices = mlx::core::add(start_idx, offsets);
         result = mlx::core::take(result, indices, axis);
     }
     values.emplace(ToKey(op->getResult(0)), std::move(result));
