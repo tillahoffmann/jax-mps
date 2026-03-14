@@ -112,6 +112,16 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (5, 3)),
                 lambda key: random.normal(key, (2, 3)),
             ),
+            # dynamic_update_slice with dynamic start indices (issue #87)
+            OperationTestConfig(
+                lambda x, update, idx: lax.dynamic_update_slice(
+                    x, update, (idx, jnp.int32(0))
+                ),
+                lambda key: random.normal(key, (5, 3)),
+                lambda key: random.normal(key, (2, 3)),
+                lambda key: random.randint(key, (), 0, 4, dtype=jnp.int32),
+                name="dynamic_update_slice_dynamic_idx",
+            ),
             OperationTestConfig(
                 lambda x, idx, updates: x.at[idx].add(updates),
                 numpy.zeros((10, 4), dtype=numpy.float32),
