@@ -113,6 +113,25 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
 
     size_t elem_size = GetMlxDtypeSize(mlx_dtype);
 
+    // Handle zero-sized tensors - create empty array without reading data
+    bool is_zero_sized = false;
+    for (auto d : mlx_shape) {
+        if (d == 0) {
+            is_zero_sized = true;
+            break;
+        }
+    }
+    if (is_zero_sized) {
+        auto arr = mlx::core::zeros(mlx_shape, mlx_dtype);
+        auto buffer = std::unique_ptr<MlxBuffer>(new MlxBuffer(std::move(arr)));
+        MPS_LOG_DEBUG("Created zero-sized MlxBuffer: dtype=%d, shape=[", dtype);
+        for (size_t i = 0; i < dims.size(); ++i) {
+            MPS_LOG_DEBUG("%lld%s", dims[i], i < dims.size() - 1 ? ", " : "");
+        }
+        MPS_LOG_DEBUG("], byte_size=%zu\n", buffer->byte_size_);
+        return buffer;
+    }
+
     // Check if we have contiguous data (no strides or default strides)
     bool is_contiguous = byte_strides.empty();
     if (!is_contiguous) {
@@ -236,6 +255,11 @@ bool MlxBuffer::ToHostBuffer(void* dst) {
         return false;
     }
 
+    // Zero-sized tensors have nothing to copy
+    if (byte_size_ == 0) {
+        return true;
+    }
+
     if (!dst) {
         MPS_LOG_ERROR("Null destination buffer\n");
         return false;
@@ -258,7 +282,6 @@ bool MlxBuffer::ToHostBuffer(void* dst) {
         return false;
     }
 
-    // Copy data to destination
     std::memcpy(dst, array_.data<void>(), byte_size_);
 
     MPS_LOG_DEBUG("Copied %zu bytes to host\n", byte_size_);

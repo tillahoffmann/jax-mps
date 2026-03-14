@@ -255,24 +255,22 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
         return MakeError(
             "No Metal GPU device available. MPS backend requires Apple Silicon or AMD GPU.");
     }
-    if (!args->data) {
-        return MakeError("Cannot create buffer: null data pointer provided");
-    }
-
     std::vector<int64_t> dims(args->dims, args->dims + args->num_dims);
     std::vector<int64_t> byte_strides;
     if (args->byte_strides && args->num_byte_strides > 0) {
         byte_strides.assign(args->byte_strides, args->byte_strides + args->num_byte_strides);
     }
 
-    // Check for zero-sized tensors (any dimension is 0)
-    for (size_t i = 0; i < dims.size(); i++) {
-        if (dims[i] == 0) {
-            return MakeError(
-                "Zero-sized tensors are not supported by MPS. "
-                "Dimension " +
-                std::to_string(i) + " has size 0.");
+    // Check for null data pointer (allowed for zero-sized tensors)
+    bool is_zero_sized = false;
+    for (int64_t dim : dims) {
+        if (dim == 0) {
+            is_zero_sized = true;
+            break;
         }
+    }
+    if (!args->data && !is_zero_sized) {
+        return MakeError("Cannot create buffer: null data pointer provided");
     }
 
     auto mps_buffer = client->client->BufferFromHostBuffer(
