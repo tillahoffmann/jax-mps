@@ -2,6 +2,9 @@
 
 A JAX backend for Apple Silicon using [MLX](https://github.com/ml-explore/mlx), enabling GPU-accelerated JAX computations on Mac.
 
+> [!NOTE]
+> Our CI currently only validates that the project compiles because GitHub's hosted runners don't have access to Apple GPUs. If you have a Mac (e.g., a Mac Mini) that could serve as a [self-hosted GitHub Actions runner](https://docs.github.com/en/actions/hosting-your-own-runners) for this project, please [open an issue](https://github.com/tillahoffmann/jax-mps/issues) — it would let us run the full test suite on every PR and help us move much faster.
+
 ## Example
 
 jax-mps achieves a ~3.7x speed-up over the CPU backend when training a simple ResNet18 model on CIFAR-10 using an M4 MacBook Air.
