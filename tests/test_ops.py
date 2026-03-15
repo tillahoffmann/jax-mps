@@ -192,6 +192,10 @@ result.block_until_ready()
         ],
         capture_output=True,
         text=True,
+        env={**os.environ, "JAX_PLATFORMS": "mps"},
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed with return code {result.returncode}:\n{result.stderr}"
     )
     assert "[MPS ERROR]" not in result.stderr, (
         f"Spurious MPS ERROR messages in stderr:\n{result.stderr}"

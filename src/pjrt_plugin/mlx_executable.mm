@@ -334,6 +334,7 @@ struct ExecContext {
 // Propagates through DispatchOp without logging, allowing the compile() attempt
 // to fail cleanly and fall back to direct execution.
 class CompileIncompatibleError : public std::runtime_error {
+public:
     using std::runtime_error::runtime_error;
 };
 
