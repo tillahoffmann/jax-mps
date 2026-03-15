@@ -1,6 +1,7 @@
 __pycache__/
 .cache/
 .claude/
+!.claude/commands/
 .DS_Store
 .venv/
 .vscode/
