@@ -3691,6 +3691,138 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         return true;
     }
 
+    // Window scatter: scatter dim has window extent > 1 (not in insertedWindowDims).
+    // We expand start indices to per-element indices within the window.
+    if (scatterDimsToOperandDims.size() == 1 && insertedWindowDims.empty()) {
+        int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
+
+        auto indices = scatterIndices;
+        if (indexVectorDim < static_cast<int>(indices.shape().size()) &&
+            indices.shape(indexVectorDim) == 1) {
+            indices = mlx::core::squeeze(indices, {indexVectorDim});
+        }
+        if (indices.dtype() != mlx::core::int32) {
+            indices = mlx::core::astype(indices, mlx::core::int32);
+        }
+        if (indices.ndim() == 0) {
+            indices = mlx::core::reshape(indices, {1});
+        }
+
+        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
+
+        // Find the update dim that corresponds to the scatter operand dim.
+        // updateWindowDims maps (in order) to operand dims not in insertedWindowDims.
+        // Since insertedWindowDims is empty, operand dim i maps to updateWindowDims[i].
+        int windowDimForScatterAxis = static_cast<int>(updateWindowDims[scatterDim]);
+        int windowSize = static_cast<int>(updates.shape(windowDimForScatterAxis));
+
+        // Expand start indices: for each start index, generate start + arange(windowSize)
+        auto offsets = mlx::core::arange(windowSize, mlx::core::int32);
+
+        // indices shape: (num_starts,...), offsets shape: (windowSize,)
+        // Broadcast: indices[..., None] + offsets -> (..., windowSize)
+        auto idxShape = indices.shape();
+        mlx::core::Shape broadcastIdxShape = idxShape;
+        broadcastIdxShape.push_back(1);
+        auto reshapedIdx = mlx::core::reshape(indices, broadcastIdxShape);
+
+        mlx::core::Shape broadcastOffsetShape(indices.ndim(), 1);
+        broadcastOffsetShape.push_back(windowSize);
+        auto reshapedOffsets = mlx::core::reshape(offsets, broadcastOffsetShape);
+
+        auto expandedIndices = mlx::core::add(reshapedIdx, reshapedOffsets);
+        // Flatten to 1D
+        int totalIndices = 1;
+        for (auto s : expandedIndices.shape())
+            totalIndices *= static_cast<int>(s);
+        expandedIndices = mlx::core::reshape(expandedIndices, {totalIndices});
+
+        // Reshape updates for MLX: move scatter-axis window elements into idx_shape,
+        // insert size-1 at the scatter axis position in slice_shape.
+        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+        auto updShape = updates.shape();
+        int updNdim = static_cast<int>(updShape.size());
+
+        // Transpose: index dims first, then scatter-axis window dim, then other window dims
+        std::vector<int> transposeOrder;
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) == 0)
+                transposeOrder.push_back(i);
+        }
+        transposeOrder.push_back(windowDimForScatterAxis);
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) != 0 && i != windowDimForScatterAxis)
+                transposeOrder.push_back(i);
+        }
+
+        auto transposedUpdates = updates;
+        bool needsTranspose = false;
+        for (int i = 0; i < updNdim; ++i) {
+            if (transposeOrder[i] != i) {
+                needsTranspose = true;
+                break;
+            }
+        }
+        if (needsTranspose) {
+            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
+        }
+        auto tShape = transposedUpdates.shape();
+
+        // tShape: (idx_dims..., scatterWindowSize, other_window_dims...)
+        int numIdxDims = updNdim - static_cast<int>(updateWindowDims.size());
+        // Merge idx dims and scatter window dim into one flat idx dim
+        int flatIdxSize = 1;
+        for (int i = 0; i <= numIdxDims; ++i) {
+            flatIdxSize *= static_cast<int>(tShape[i]);
+        }
+
+        // Build: (flatIdxSize, 1_at_scatter_axis, other_operand_dims...)
+        mlx::core::Shape newShape;
+        newShape.push_back(flatIdxSize);
+        int otherWindowIdx = numIdxDims + 1;
+        for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim()); ++operandDim) {
+            if (operandDim == scatterDim) {
+                newShape.push_back(1);
+            } else {
+                newShape.push_back(static_cast<int>(tShape[otherWindowIdx]));
+                ++otherWindowIdx;
+            }
+        }
+        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
+
+        std::vector<mlx::core::array> idxVec = {expandedIndices};
+        std::vector<int> axesVec = {scatterDim};
+
+        mlx::core::array result = operand;
+        switch (scatterType) {
+            case ScatterType::Update:
+                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Add:
+                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Sub:
+                result = mlx::core::scatter_add(operand, idxVec,
+                                                mlx::core::negative(reshapedUpdates), axesVec);
+                break;
+            case ScatterType::Mul:
+                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Min:
+                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            case ScatterType::Max:
+                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
+                break;
+            default:
+                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type (window)\n");
+                return false;
+        }
+
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
     MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter pattern "
                   "(scatterDimsToOperandDims.size=%zu, insertedWindowDims.size=%zu)\n",
                   scatterDimsToOperandDims.size(), insertedWindowDims.size());
