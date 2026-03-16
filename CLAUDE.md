@@ -11,17 +11,29 @@
 
 # CI is Always Green
 
-Tests, linting, and compilation on the `main` branch and in Continuous Integration testing ALWAYS pass. This means that any failures MUST be related to changes we made. You may NEVER claim that failures are "known issues," "unrelated to our changes," or similar.
+Tests, linting, and compilation on the `main` branch and in Continuous Integration testing ALWAYS pass. There are NO pre-existing failures. Any test failure you observe MUST be caused by changes we made. You may NEVER claim that failures are "known issues," "unrelated to our changes," "flaky," or similar.
 
 # Naming Conventions
 
 - Handler functions MUST use PascalCase: `HandleAdd`, `HandleExp`, `HandleBroadcastInDim`
 
+# MLX-First Implementation
+
+When implementing or modifying op handlers, ALWAYS check what MLX provides natively before writing manual logic. The MLX C++ API headers are at `build/*/mlx-src/mlx/ops.h` (built after first `uv pip install -e .`). Key operations to know about:
+
+- `mlx::core::gather(a, indices, axes, slice_sizes)` — multi-axis gather with per-axis index arrays
+- `mlx::core::scatter(a, indices, updates, axes)` — multi-axis scatter (also `scatter_add`, `scatter_prod`, `scatter_min`, `scatter_max`)
+- `mlx::core::slice(a, start_array, axes, slice_sizes)` — dynamic slice with runtime start indices
+- `mlx::core::slice_update(src, update, start_array, axes)` — dynamic slice update
+- `mlx::core::take(a, indices, axis)` / `mlx::core::take_along_axis(a, indices, axis)` — single-axis indexing
+
+Prefer these native functions over manual index computation (linear index math, flatten+take, transpose+reshape workarounds). Read the implementation in `mlx/ops.cpp` if the semantics are unclear.
+
 # Adding New Ops
 
 1. Identify the StableHLO op name (e.g., `stablehlo.multiply`). Run a test and look for the error message which includes the op name.
 
-2. Find the matching MLX function in the [MLX documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (e.g., `mlx::core::multiply`).
+2. Find the matching MLX function in the [MLX documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (e.g., `mlx::core::multiply`). Check the C++ headers (`mlx/ops.h`) for the full API — the Python docs don't cover everything.
 
 3. Add a handler function in `src/pjrt_plugin/mlx_executable.mm`:
    ```cpp
