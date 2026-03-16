@@ -1078,17 +1078,37 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
         mlx::core::array result = operand;
 
         if (collapsedSet.empty()) {
-            // No collapsed dims: dynamic sub-tensor slice.
+            // No collapsed dims: dynamic sub-tensor slice (single slice position).
+            // Verify all non-index-vector dims of startIndices are size 1.
+            bool singleSlice = true;
+            for (int d = 0; d < indices.ndim(); ++d) {
+                if (d != indexVectorDim && indices.shape(d) != 1) {
+                    singleSlice = false;
+                    break;
+                }
+            }
+            if (!singleSlice) {
+                MPS_LOG_ERROR("stablehlo.gather: multi-dim no-collapse path requires "
+                              "single slice position (non-index-vector dims must be 1)\n");
+                return false;
+            }
+
             // Use MLX dynamic slice with per-axis start indices.
             auto sliceSizesAttr = gatherOp.getSliceSizes();
             mlx::core::Shape mlxSliceSizes;
             for (auto s : sliceSizesAttr) {
                 mlxSliceSizes.push_back(static_cast<int>(s));
             }
+
+            // Re-clamp indices for slice: valid start is [0, shape - slice_size].
             std::vector<mlx::core::array> flatIdx;
             flatIdx.reserve(idxVec.size());
-            for (auto& idx : idxVec) {
-                flatIdx.push_back(mlx::core::reshape(idx, {1}));
+            for (size_t i = 0; i < idxVec.size(); ++i) {
+                int axis = axes[i];
+                int maxStart = operand.shape(axis) - mlxSliceSizes[axis];
+                auto clamped = mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
+                                               mlx::core::array(maxStart, mlx::core::int32));
+                flatIdx.push_back(mlx::core::reshape(clamped, {1}));
             }
             auto startArr = mlx::core::concatenate(flatIdx, 0);
             if (startArr.dtype() != mlx::core::int32) {
@@ -3887,8 +3907,25 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     // This is the inverse of the multi-dim gather with no collapsed dims.
     // Uses MLX slice_update with dynamic start indices.
     if (scatterDimsToOperandDims.size() > 1 && insertedWindowDims.empty() &&
-        indexVectorDim < static_cast<int>(scatterIndices.shape().size())) {
+        indexVectorDim < static_cast<int>(scatterIndices.shape().size()) &&
+        static_cast<size_t>(scatterIndices.shape(indexVectorDim)) >=
+            scatterDimsToOperandDims.size()) {
         auto indices = scatterIndices;
+
+        // This path handles single-position slice updates only.
+        // Verify all non-index-vector dims of scatterIndices are size 1.
+        bool singleUpdate = true;
+        for (int d = 0; d < indices.ndim(); ++d) {
+            if (d != indexVectorDim && indices.shape(d) != 1) {
+                singleUpdate = false;
+                break;
+            }
+        }
+        if (!singleUpdate) {
+            MPS_LOG_ERROR("stablehlo.scatter: multi-dim slice_update path requires "
+                          "single update position (non-index-vector dims must be 1)\n");
+            return false;
+        }
 
         // Extract per-axis start indices from the index vector dim
         std::vector<mlx::core::array> perAxisIdx;
@@ -3920,6 +3957,12 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             std::vector<int> squeezeDims;
             for (int d = 0; d < updateVal.ndim(); ++d) {
                 if (windowDimSet.count(d) == 0) {
+                    if (updateVal.shape(d) != 1) {
+                        MPS_LOG_ERROR("stablehlo.scatter: non-window dim %d has size %d "
+                                      "(expected 1) in multi-dim slice_update path\n",
+                                      d, updateVal.shape(d));
+                        return false;
+                    }
                     squeezeDims.push_back(d);
                 }
             }
