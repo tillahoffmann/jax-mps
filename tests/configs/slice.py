@@ -375,4 +375,25 @@ def make_slice_op_configs():
                 lambda key: random.randint(key, (2, 3), 0, 4),
                 name="batched_gather_offset_dims",
             ),
+            # Multi-dim scatter (slice_update) with no inserted window dims.
+            # Inverse of multi_dim_gather_no_collapse: updates a sub-tensor at
+            # dynamic (row, col) start position. Tests ScatterType::Update.
+            OperationTestConfig(
+                lambda x: lax.dynamic_update_slice(
+                    x,
+                    jnp.ones((2, 1, 1)),
+                    (0, 1, 2),
+                ),
+                lambda key: random.normal(key, (2, 3, 3)),
+                name="multi_dim_scatter_slice_update",
+            ),
+            # Multi-dim scatter with Add semantics: the gradient of
+            # dynamic_update_slice produces a scatter-add into a zeros tensor.
+            # This exercises the ScatterType::Add path in multi-dim slice_update.
+            OperationTestConfig(
+                lambda x, u: lax.dynamic_update_slice(x, u, (0, 1, 2)),
+                lambda key: random.normal(key, (2, 3, 3)),
+                lambda key: random.normal(key, (2, 1, 1)),
+                name="multi_dim_scatter_slice_add",
+            ),
         ]
