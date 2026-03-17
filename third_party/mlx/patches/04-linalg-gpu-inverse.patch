@@ -1,13 +1,11 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index a1449c3..3c3fd8f 100644
+index 81176d3..ac803e0 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -185,4 +185,143 @@
-           r += M;
-         }
+@@ -203,4 +203,141 @@ array ensure_row_contiguous(const array& src) {
        }));
-+}
-+
+ }
+ 
 +void Inverse::eval_gpu(const std::vector<array>& inputs, array& output) {
 +  const auto& a = inputs[0];
 +
@@ -34,7 +32,7 @@ index a1449c3..3c3fd8f 100644
 +  //   1. Copy A into a temporary and LU-factor it in-place.
 +  //   2. Solve LU * X = I  =>  X = A^{-1}.
 +
-+  // Temporary for the LU-factored matrix.
++  // Copy input to a temporary for in-place LU factorization.
 +  array lu_temp(a.shape(), a.dtype(), nullptr, {});
 +  copy_gpu(
 +      a,
@@ -162,7 +160,7 @@ index bdea469..5764ddd 100644
  // Cholesky::eval_gpu is in linalg.mm
  
 diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
-index 20d43a6..24558ff 100644
+index c89de42..7eda94f 100644
 --- a/mlx/linalg.cpp
 +++ b/mlx/linalg.cpp
 @@ -294,7 +294,6 @@ svd(const array& a, bool compute_uv, StreamOrDevice s /* = {} */) {

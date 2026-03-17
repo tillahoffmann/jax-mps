@@ -1,5 +1,5 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index b791d82..a1449c3 100644
+index b791d82..81176d3 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
 @@ -1,5 +1,6 @@
@@ -10,7 +10,30 @@ index b791d82..a1449c3 100644
  #include "mlx/backend/gpu/copy.h"
  #include "mlx/backend/metal/device.h"
  #include "mlx/primitives.h"
-@@ -75,4 +76,113 @@
+@@ -9,6 +10,22 @@
+ 
+ namespace mlx::core {
+ 
++namespace {
++
++// Return a row-contiguous copy of `src`, or `src` itself if already contiguous.
++// When a copy is made, the caller must keep the returned array alive (e.g. via
++// d.add_temporary) until GPU work that references it has completed.
++array ensure_row_contiguous(const array& src) {
++  if (src.flags().row_contiguous) {
++    return src;
++  }
++  array dst(src.shape(), src.dtype(), nullptr, {});
++  copy_gpu(src, dst, CopyType::General);
++  return dst;
++}
++
++} // namespace
++
+ void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
+   const auto& a = inputs[0];
+ 
+@@ -75,4 +92,115 @@
    }
  }
  
@@ -123,6 +146,8 @@ index b791d82..a1449c3 100644
 +          r += M;
 +        }
 +      }));
++}
++
  } // namespace mlx::core
 diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
 index 1969ada..bdea469 100644
@@ -141,33 +166,14 @@ index 1969ada..bdea469 100644
  
  } // namespace mlx::core
 diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
-index 7130a40..20d43a6 100644
+index 7130a40..c89de42 100644
 --- a/mlx/linalg.cpp
 +++ b/mlx/linalg.cpp
-@@ -502,7 +502,7 @@ void validate_eig(
+@@ -569,7 +569,6 @@ void validate_lu(
      const array& a,
      const StreamOrDevice& stream,
      const std::string& fname) {
 -  check_cpu_stream(stream, fname);
-+  
-   check_float_or_complex(a.dtype(), fname);
- 
-   if (a.ndim() < 2) {
-@@ -569,7 +569,7 @@ void validate_lu(
-     const array& a,
-     const StreamOrDevice& stream,
-     const std::string& fname) {
--  check_cpu_stream(stream, fname);
-+  
    check_float(a.dtype(), fname);
  
    if (a.ndim() < 2) {
-@@ -636,7 +636,7 @@ void validate_solve(
-     const array& b,
-     const StreamOrDevice& stream,
-     const std::string& fname) {
--  check_cpu_stream(stream, fname);
-+  
-   if (a.ndim() < 2) {
-     std::ostringstream msg;
-     msg << fname << " First input must have >= 2 dimensions. "

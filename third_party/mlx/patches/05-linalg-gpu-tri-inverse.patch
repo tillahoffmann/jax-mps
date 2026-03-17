@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index 3c3fd8f..7952aa9 100644
+index ac803e0..cf6f8a2 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -205,8 +205,115 @@
+@@ -221,8 +221,111 @@ array ensure_row_contiguous(const array& src) {
    size_t elem_size = size_of(a.dtype());
  
    if (tri_) {
@@ -10,12 +10,8 @@ index 3c3fd8f..7952aa9 100644
 -        "[Inverse::eval_gpu] Triangular inverse NYI on Metal.");
 +    // Triangular inverse: solve A * X = I using MPSMatrixSolveTriangular.
 +
-+    // Copy input to a contiguous temporary (MPS requires row-major layout).
-+    array a_temp(a.shape(), a.dtype(), nullptr, {});
-+    copy_gpu(
-+        a,
-+        a_temp,
-+        a.flags().row_contiguous ? CopyType::Vector : CopyType::General);
++    // Ensure input is row-contiguous for MPS.
++    array a_temp = ensure_row_contiguous(a);
 +
 +    // Temporary identity matrix (RHS for the solve).
 +    array identity_temp(a.shape(), a.dtype(), nullptr, {});
