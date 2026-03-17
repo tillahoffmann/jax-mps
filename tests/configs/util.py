@@ -71,6 +71,9 @@ class OperationTestConfig:
         "stablehlo.broadcast",
         "stablehlo.dot",
         "stablehlo.erf",
+        # Composite ops only appear in JAX 0.9.1+; tested via test_composite_op
+        # using raw StableHLO text since JAX 0.9.0 doesn't generate them.
+        "stablehlo.composite",
     }
     ACTIVE_MODULE_NAME: ClassVar[str | None] = None
 

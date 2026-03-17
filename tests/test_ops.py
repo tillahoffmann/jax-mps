@@ -202,6 +202,78 @@ result.block_until_ready()
     )
 
 
+@pytest.mark.parametrize(
+    "composite_name,decomposition_body,expected_fn",
+    [
+        pytest.param(
+            "chlo.asin",
+            # arcsin(x) = atan2(x, sqrt(1 - x*x))
+            """
+    %cst = stablehlo.constant dense<1.000000e+00> : tensor<4xf32>
+    %0 = stablehlo.multiply %arg0, %arg0 : tensor<4xf32>
+    %1 = stablehlo.subtract %cst, %0 : tensor<4xf32>
+    %2 = stablehlo.sqrt %1 : tensor<4xf32>
+    %3 = stablehlo.atan2 %arg0, %2 : tensor<4xf32>
+    return %3 : tensor<4xf32>
+""",
+            numpy.arcsin,
+            id="arcsin",
+        ),
+        pytest.param(
+            "chlo.sinh",
+            # sinh(x) = (exp(x) - exp(-x)) / 2
+            """
+    %0 = stablehlo.exponential %arg0 : tensor<4xf32>
+    %1 = stablehlo.negate %arg0 : tensor<4xf32>
+    %2 = stablehlo.exponential %1 : tensor<4xf32>
+    %3 = stablehlo.subtract %0, %2 : tensor<4xf32>
+    %cst = stablehlo.constant dense<2.000000e+00> : tensor<4xf32>
+    %4 = stablehlo.divide %3, %cst : tensor<4xf32>
+    return %4 : tensor<4xf32>
+""",
+            numpy.sinh,
+            id="sinh",
+        ),
+    ],
+)
+def test_composite_op(composite_name, decomposition_body, expected_fn) -> None:
+    """Test that stablehlo.composite ops execute correctly.
+
+    Regression test for https://github.com/tillahoffmann/jax-mps/issues/95.
+    JAX 0.9.1+ wraps CHLO ops (arcsin, sinh, erf, etc.) as stablehlo.composite
+    ops instead of dispatching them as custom_call or chlo.* ops directly.
+    """
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    from jax._src import xla_bridge
+    from jaxlib import xla_client
+
+    impl_name = f"{composite_name}.impl"
+    stablehlo_text = f"""
+module @test {{
+  func.func private @{impl_name}(%arg0: tensor<4xf32>) -> tensor<4xf32> {{
+{decomposition_body}
+  }}
+  func.func @main(%arg0: tensor<4xf32>) -> tensor<4xf32> {{
+    %0 = stablehlo.composite "{composite_name}" %arg0 {{decomposition = @{impl_name}}} : (tensor<4xf32>) -> tensor<4xf32>
+    return %0 : tensor<4xf32>
+  }}
+}}
+"""
+
+    client = xla_bridge.get_backend("mps")
+    devices = client.local_devices()
+    device_list = xla_client.DeviceList(tuple(devices[:1]))
+    exe = client.compile_and_load(stablehlo_text.encode(), device_list)
+
+    x = numpy.array([0.0, 0.5, -0.5, 0.9], dtype=numpy.float32)
+    buf = client.buffer_from_pyval(x, devices[0])
+    result = numpy.asarray(exe.execute([buf])[0])
+    expected = expected_fn(x)
+    numpy.testing.assert_allclose(result, expected, atol=1e-5, rtol=1e-5)
+
+
 def test_unsupported_op_error_message(jit: bool) -> None:
     """Check that unsupported-op errors link to the issue template and CONTRIBUTING.md."""
     if TEST_MODE == "cpu":

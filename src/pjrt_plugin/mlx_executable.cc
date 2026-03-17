@@ -3240,6 +3240,93 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     return false;
 }
 
+// Handler for stablehlo.composite
+// JAX 0.9.1+ wraps CHLO ops (arcsin, sinh, erf, etc.) as composite ops.
+// Each composite references a decomposition function that implements the op
+// using primitive StableHLO operations. We look up and execute that function.
+bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                     ExecContext& ctx) {
+    auto compositeOp = mlir::dyn_cast<mlir::stablehlo::CompositeOp>(op);
+    if (!compositeOp) {
+        MPS_LOG_ERROR("stablehlo.composite: failed to cast\n");
+        return false;
+    }
+
+    auto compositeName = compositeOp.getName().str();
+    auto decompositionName = compositeOp.getDecomposition().str();
+
+    MPS_LOG_DEBUG("stablehlo.composite: name=%s decomposition=%s\n", compositeName.c_str(),
+                  decompositionName.c_str());
+
+    // Gather inputs
+    std::vector<mlx::core::array> inputs;
+    for (auto operand : op->getOperands()) {
+        auto val_opt = GetValue(values, operand);
+        if (!val_opt) {
+            MPS_LOG_ERROR("stablehlo.composite %s: operand not found\n", compositeName.c_str());
+            return false;
+        }
+        inputs.push_back(val_opt->get());
+    }
+
+    // Try native MLX dispatch for known single-input CHLO composite ops.
+    // NOTE: String keys here use a "chlo." prefix (matching the composite name attribute).
+    // They are NOT dispatch table entries — do not confuse with GetOpHandlers() registration.
+    if (inputs.size() == 1) {
+        using UnaryFn = mlx::core::array (*)(const mlx::core::array&, mlx::core::StreamOrDevice);
+        // clang-format off
+        static const std::unordered_map<std::string, UnaryFn> nativeUnary{
+            {"chlo.asin",    mlx::core::arcsin},   {"chlo.acos",    mlx::core::arccos},
+            {"chlo.atan",    mlx::core::arctan},   {"chlo.asinh",   mlx::core::arcsinh},
+            {"chlo.acosh",   mlx::core::arccosh},  {"chlo.atanh",   mlx::core::arctanh},
+            {"chlo.sinh",    mlx::core::sinh},     {"chlo.cosh",    mlx::core::cosh},
+            {"chlo.tan",     mlx::core::tan},      {"chlo.erf",     mlx::core::erf},
+            {"chlo.erf_inv", mlx::core::erfinv},
+        };
+        // clang-format on
+
+        auto it = nativeUnary.find(compositeName);
+        if (it != nativeUnary.end()) {
+            values.emplace(ToKey(op->getResult(0)), it->second(inputs[0], {}));
+            return true;
+        }
+    }
+
+    // Try native MLX dispatch for known two-input CHLO composite ops
+    if (inputs.size() == 2 && compositeName == "chlo.atan2") {
+        values.emplace(ToKey(op->getResult(0)), mlx::core::arctan2(inputs[0], inputs[1], {}));
+        return true;
+    }
+
+    // Fallback: execute the decomposition function
+    auto decompFunc = ctx.module.lookupSymbol<mlir::func::FuncOp>(decompositionName);
+    if (!decompFunc) {
+        MPS_LOG_ERROR("stablehlo.composite %s: decomposition function '%s' not found\n",
+                      compositeName.c_str(), decompositionName.c_str());
+        return false;
+    }
+
+    std::vector<mlx::core::array> decompOutputs;
+    if (!ExecuteFunction(decompFunc, inputs, decompOutputs, ctx)) {
+        MPS_LOG_ERROR("stablehlo.composite %s: decomposition execution failed\n",
+                      compositeName.c_str());
+        return false;
+    }
+
+    // Map decomposition outputs to composite results
+    if (decompOutputs.size() != op->getNumResults()) {
+        MPS_LOG_ERROR("stablehlo.composite %s: result count mismatch (got %zu, expected %u)\n",
+                      compositeName.c_str(), decompOutputs.size(), op->getNumResults());
+        return false;
+    }
+
+    for (size_t i = 0; i < decompOutputs.size(); ++i) {
+        values.emplace(ToKey(op->getResult(i)), std::move(decompOutputs[i]));
+    }
+
+    return true;
+}
+
 // Handler for stablehlo.optimization_barrier
 // This op is an identity — it passes operands through unchanged. Its purpose is to
 // prevent optimization passes from reordering ops across it. At runtime, it's a no-op.
@@ -4305,6 +4392,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         {"func.return", HandleReturn},
         {"func.call", HandleCall},
         {"stablehlo.custom_call", HandleCustomCall},
+        {"stablehlo.composite", HandleComposite},
         {"stablehlo.optimization_barrier", HandleOptimizationBarrier},
         {"stablehlo.while", HandleWhile},
         {"stablehlo.case", HandleCase},
