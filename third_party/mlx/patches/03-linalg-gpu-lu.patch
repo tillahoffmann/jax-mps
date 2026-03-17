@@ -1,0 +1,180 @@
+diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
+index b791d82..2dfaa9d 100644
+--- a/mlx/backend/metal/linalg.mm
++++ b/mlx/backend/metal/linalg.mm
+@@ -1,5 +1,6 @@
+-// GPU implementation of Cholesky using Metal Performance Shaders.
++// GPU implementation of linalg ops using Metal Performance Shaders.
+ 
++#include "mlx/allocator.h"
+ #include "mlx/backend/gpu/copy.h"
+ #include "mlx/backend/metal/device.h"
+ #include "mlx/primitives.h"
+@@ -9,6 +10,22 @@
+ 
+ namespace mlx::core {
+ 
++namespace {
++
++// Return a row-contiguous copy of `src`, or `src` itself if already contiguous.
++// When a copy is made, the caller must keep the returned array alive (e.g. via
++// d.add_temporary) until GPU work that references it has completed.
++array ensure_row_contiguous(const array& src) {
++  if (src.flags().row_contiguous) {
++    return src;
++  }
++  array dst(src.shape(), src.dtype(), nullptr, {});
++  copy_gpu(src, dst, CopyType::General);
++  return dst;
++}
++
++} // namespace
++
+ void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
+   const auto& a = inputs[0];
+ 
+@@ -75,4 +92,116 @@
+   }
+ }
+ 
++void LUF::eval_gpu(
++    const std::vector<array>& inputs,
++    std::vector<array>& outputs) {
++  const auto& a = inputs[0];
++  auto& lu = outputs[0];
++  auto& pivots = outputs[1];
++  auto& row_indices = outputs[2];
++
++  if (a.dtype() != float32) {
++    throw std::runtime_error(
++        "[LUF::eval_gpu] Only float32 is supported.");
++  }
++
++  int M = a.shape(-2);
++  int N = a.shape(-1);
++  int K = std::min(M, N);
++
++  // Copy input to lu output.
++  copy_gpu(
++      a,
++      lu,
++      a.flags().row_contiguous ? CopyType::Vector : CopyType::General);
++
++  // Allocate pivots and row_indices.
++  pivots.set_data(allocator::malloc(pivots.nbytes()));
++  row_indices.set_data(allocator::malloc(row_indices.nbytes()));
++
++  if (K == 0) {
++    return;
++  }
++
++  size_t num_matrices = a.size() / (M * N);
++
++  auto& s = stream();
++  auto& d = metal::device(s.device);
++
++  d.end_encoding(s.index);
++  auto* cb = d.get_command_buffer(s.index);
++  id<MTLCommandBuffer> cmd_buf =
++      (__bridge id<MTLCommandBuffer>)cb;
++  id<MTLDevice> mtl_dev =
++      (__bridge id<MTLDevice>)d.mtl_device();
++
++  id<MTLBuffer> lu_buf =
++      (__bridge id<MTLBuffer>)(const_cast<void*>(lu.buffer().ptr()));
++  id<MTLBuffer> piv_buf =
++      (__bridge id<MTLBuffer>)(const_cast<void*>(pivots.buffer().ptr()));
++  size_t elem_size = lu.itemsize();
++  size_t piv_elem_size = pivots.itemsize();
++
++  MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
++      matrixDescriptorWithRows:(NSUInteger)M
++                       columns:(NSUInteger)N
++                      rowBytes:(NSUInteger)(N * elem_size)
++                      dataType:MPSDataTypeFloat32];
++
++  MPSMatrixDescriptor* piv_desc = [MPSMatrixDescriptor
++      matrixDescriptorWithRows:1
++                       columns:(NSUInteger)K
++                      rowBytes:(NSUInteger)(K * piv_elem_size)
++                      dataType:MPSDataTypeUInt32];
++
++  MPSMatrixDecompositionLU* lu_kernel =
++      [[MPSMatrixDecompositionLU alloc] initWithDevice:mtl_dev
++                                                  rows:(NSUInteger)M
++                                               columns:(NSUInteger)N];
++
++  for (size_t i = 0; i < num_matrices; i++) {
++    size_t mat_byte_offset = (lu.offset() + i * M * N) * elem_size;
++    size_t piv_byte_offset = (pivots.offset() + i * K) * piv_elem_size;
++
++    MPSMatrix* src_mat = [[MPSMatrix alloc] initWithBuffer:lu_buf
++                                                    offset:mat_byte_offset
++                                                descriptor:mat_desc];
++    MPSMatrix* dst_mat = [[MPSMatrix alloc] initWithBuffer:lu_buf
++                                                    offset:mat_byte_offset
++                                                descriptor:mat_desc];
++    MPSMatrix* piv_mat = [[MPSMatrix alloc] initWithBuffer:piv_buf
++                                                    offset:piv_byte_offset
++                                                descriptor:piv_desc];
++
++    [lu_kernel encodeToCommandBuffer:cmd_buf
++                        sourceMatrix:src_mat
++                        resultMatrix:dst_mat
++                        pivotIndices:piv_mat
++                              status:nil];
++  }
++
++  // Compute row_indices from pivots after GPU work completes.
++  // MLX's eval model waits for command buffer completion before consuming
++  // outputs, so the completion handler is safe w.r.t. downstream GPU work.
++  auto* piv_ptr = pivots.data<uint32_t>();
++  auto* ri_ptr = row_indices.data<uint32_t>();
++  cb->addCompletedHandler(MTL::HandlerFunction(
++      [piv_ptr, ri_ptr, num_matrices, M, K](MTL::CommandBuffer*) {
++        auto* p = piv_ptr;
++        auto* r = ri_ptr;
++        for (size_t i = 0; i < num_matrices; i++) {
++          for (int j = 0; j < M; j++) {
++            r[j] = j;
++          }
++          for (int j = K - 1; j >= 0; j--) {
++            auto tmp = r[p[j]];
++            r[p[j]] = r[j];
++            r[j] = tmp;
++          }
++          p += K;
++          r += M;
++        }
++      }));
++}
++
+ } // namespace mlx::core
+diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
+index 1969ada..bdea469 100644
+--- a/mlx/backend/metal/primitives.cpp
++++ b/mlx/backend/metal/primitives.cpp
+@@ -230,10 +230,6 @@ void Eigh::eval_gpu(
+   throw std::runtime_error("[Eigh::eval_gpu] Metal Eigh NYI.");
+ }
+ 
+-void LUF::eval_gpu(
+-    const std::vector<array>& inputs,
+-    std::vector<array>& outputs) {
+-  throw std::runtime_error("[LUF::eval_gpu] Metal LU factorization NYI.");
+-}
++// LUF::eval_gpu is in linalg.mm
+ 
+ } // namespace mlx::core
+diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
+index 7130a40..c89de42 100644
+--- a/mlx/linalg.cpp
++++ b/mlx/linalg.cpp
+@@ -569,7 +569,6 @@ void validate_lu(
+     const array& a,
+     const StreamOrDevice& stream,
+     const std::string& fname) {
+-  check_cpu_stream(stream, fname);
+   check_float(a.dtype(), fname);
+ 
+   if (a.ndim() < 2) {

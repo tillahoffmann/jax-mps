@@ -1,0 +1,124 @@
+diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
+index 2d25fee..d399e8e 100644
+--- a/mlx/backend/metal/linalg.mm
++++ b/mlx/backend/metal/linalg.mm
+@@ -222,8 +222,117 @@ array ensure_row_contiguous(const array& src) {
+   size_t elem_size = size_of(a.dtype());
+ 
+   if (tri_) {
+-    throw std::runtime_error(
+-        "[Inverse::eval_gpu] Triangular inverse NYI on Metal.");
++    // Triangular inverse: solve A * X = I using MPSMatrixSolveTriangular.
++
++    // Ensure input is row-contiguous for MPS.
++    array a_temp = ensure_row_contiguous(a);
++
++    // Temporary identity matrix (RHS for the solve).
++    array identity_temp(a.shape(), a.dtype(), nullptr, {});
++    identity_temp.set_data(allocator::malloc(identity_temp.nbytes()));
++    auto* id_ptr = identity_temp.data<float>();
++    std::memset(id_ptr, 0, identity_temp.nbytes());
++    for (size_t i = 0; i < num_matrices; i++) {
++      for (int j = 0; j < N; j++) {
++        id_ptr[i * N * N + j * N + j] = 1.0f;
++      }
++    }
++
++    // Allocate output.
++    output.set_data(allocator::malloc(output.nbytes()));
++
++    auto& s = stream();
++    auto& d = metal::device(s.device);
++
++    d.end_encoding(s.index);
++    auto* cb = d.get_command_buffer(s.index);
++    id<MTLCommandBuffer> cmd_buf =
++        (__bridge id<MTLCommandBuffer>)cb;
++    id<MTLDevice> mtl_dev =
++        (__bridge id<MTLDevice>)d.mtl_device();
++
++    id<MTLBuffer> a_buf =
++        (__bridge id<MTLBuffer>)(const_cast<void*>(a_temp.buffer().ptr()));
++    id<MTLBuffer> id_buf =
++        (__bridge id<MTLBuffer>)(const_cast<void*>(
++            identity_temp.buffer().ptr()));
++    id<MTLBuffer> out_buf =
++        (__bridge id<MTLBuffer>)(const_cast<void*>(output.buffer().ptr()));
++
++    MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
++        matrixDescriptorWithRows:(NSUInteger)N
++                         columns:(NSUInteger)N
++                        rowBytes:(NSUInteger)(N * elem_size)
++                        dataType:MPSDataTypeFloat32];
++
++    MPSMatrixSolveTriangular* solver =
++        [[MPSMatrixSolveTriangular alloc]
++            initWithDevice:mtl_dev
++                     right:NO
++                     upper:upper_ ? YES : NO
++                 transpose:NO
++                      unit:NO
++                     order:(NSUInteger)N
++    numberOfRightHandSides:(NSUInteger)N
++                     alpha:1.0];
++
++    for (size_t i = 0; i < num_matrices; i++) {
++      size_t a_byte_offset =
++          (a_temp.offset() + i * N * N) * elem_size;
++      size_t id_byte_offset =
++          (identity_temp.offset() + i * N * N) * elem_size;
++      size_t out_byte_offset =
++          (output.offset() + i * N * N) * elem_size;
++
++      MPSMatrix* a_mat = [[MPSMatrix alloc] initWithBuffer:a_buf
++                                                    offset:a_byte_offset
++                                                descriptor:mat_desc];
++      MPSMatrix* rhs_mat = [[MPSMatrix alloc] initWithBuffer:id_buf
++                                                      offset:id_byte_offset
++                                                  descriptor:mat_desc];
++      MPSMatrix* sol_mat = [[MPSMatrix alloc] initWithBuffer:out_buf
++                                                      offset:out_byte_offset
++                                                  descriptor:mat_desc];
++
++      [solver encodeToCommandBuffer:cmd_buf
++                       sourceMatrix:a_mat
++                rightHandSideMatrix:rhs_mat
++                     solutionMatrix:sol_mat];
++    }
++
++    // Keep temporaries alive until GPU work completes.
++    d.add_temporary(std::move(a_temp), s.index);
++    d.add_temporary(std::move(identity_temp), s.index);
++
++    // Zero out the other triangle (MPS solve may leave garbage there).
++    // This runs in a completion handler after the command buffer finishes.
++    // MLX's eval model waits for command buffer completion before consuming
++    // outputs, so this is safe with respect to downstream GPU work.
++    auto* out_ptr = output.data<float>();
++    bool is_upper = upper_;
++    cb->addCompletedHandler(MTL::HandlerFunction(
++        [out_ptr, num_matrices, N, is_upper](MTL::CommandBuffer*) {
++          for (size_t m = 0; m < num_matrices; m++) {
++            auto* mat = out_ptr + m * N * N;
++            if (is_upper) {
++              // Zero below diagonal.
++              for (int i = 0; i < N; i++) {
++                for (int j = 0; j < i; j++) {
++                  mat[i * N + j] = 0.0f;
++                }
++              }
++            } else {
++              // Zero above diagonal.
++              for (int i = 0; i < N; i++) {
++                for (int j = i + 1; j < N; j++) {
++                  mat[i * N + j] = 0.0f;
++                }
++              }
++            }
++          }
++        }));
++
++    return;
+   }
+ 
+   // General inverse: A^{-1} via LU factorization + LU solve.
