@@ -1,5 +1,5 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index b791d82..4e97b6a 100644
+index b791d82..a1449c3 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
 @@ -1,5 +1,6 @@
@@ -10,7 +10,7 @@ index b791d82..4e97b6a 100644
  #include "mlx/backend/gpu/copy.h"
  #include "mlx/backend/metal/device.h"
  #include "mlx/primitives.h"
-@@ -75,4 +76,114 @@
+@@ -75,4 +76,113 @@
    }
  }
  
@@ -64,21 +64,26 @@ index b791d82..4e97b6a 100644
 +  size_t elem_size = lu.itemsize();
 +  size_t piv_elem_size = pivots.itemsize();
 +
++  MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
++      matrixDescriptorWithRows:(NSUInteger)M
++                       columns:(NSUInteger)N
++                      rowBytes:(NSUInteger)(N * elem_size)
++                      dataType:MPSDataTypeFloat32];
++
++  MPSMatrixDescriptor* piv_desc = [MPSMatrixDescriptor
++      matrixDescriptorWithRows:1
++                       columns:(NSUInteger)K
++                      rowBytes:(NSUInteger)(K * piv_elem_size)
++                      dataType:MPSDataTypeUInt32];
++
++  MPSMatrixDecompositionLU* lu_kernel =
++      [[MPSMatrixDecompositionLU alloc] initWithDevice:mtl_dev
++                                                  rows:(NSUInteger)M
++                                               columns:(NSUInteger)N];
++
 +  for (size_t i = 0; i < num_matrices; i++) {
 +    size_t mat_byte_offset = (lu.offset() + i * M * N) * elem_size;
 +    size_t piv_byte_offset = (pivots.offset() + i * K) * piv_elem_size;
-+
-+    MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
-+        matrixDescriptorWithRows:(NSUInteger)M
-+                         columns:(NSUInteger)N
-+                        rowBytes:(NSUInteger)(N * elem_size)
-+                        dataType:MPSDataTypeFloat32];
-+
-+    MPSMatrixDescriptor* piv_desc = [MPSMatrixDescriptor
-+        matrixDescriptorWithRows:1
-+                         columns:(NSUInteger)K
-+                        rowBytes:(NSUInteger)(K * piv_elem_size)
-+                        dataType:MPSDataTypeUInt32];
 +
 +    MPSMatrix* src_mat = [[MPSMatrix alloc] initWithBuffer:lu_buf
 +                                                    offset:mat_byte_offset
@@ -90,10 +95,6 @@ index b791d82..4e97b6a 100644
 +                                                    offset:piv_byte_offset
 +                                                descriptor:piv_desc];
 +
-+    MPSMatrixDecompositionLU* lu_kernel =
-+        [[MPSMatrixDecompositionLU alloc] initWithDevice:mtl_dev
-+                                                    rows:(NSUInteger)M
-+                                                 columns:(NSUInteger)N];
 +    [lu_kernel encodeToCommandBuffer:cmd_buf
 +                        sourceMatrix:src_mat
 +                        resultMatrix:dst_mat
@@ -122,8 +123,6 @@ index b791d82..4e97b6a 100644
 +          r += M;
 +        }
 +      }));
-+}
-+
  } // namespace mlx::core
 diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
 index 1969ada..bdea469 100644
@@ -142,14 +141,33 @@ index 1969ada..bdea469 100644
  
  } // namespace mlx::core
 diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
-index 7130a40..c89de42 100644
+index 7130a40..20d43a6 100644
 --- a/mlx/linalg.cpp
 +++ b/mlx/linalg.cpp
-@@ -569,7 +569,6 @@ void validate_lu(
+@@ -502,7 +502,7 @@ void validate_eig(
      const array& a,
      const StreamOrDevice& stream,
      const std::string& fname) {
 -  check_cpu_stream(stream, fname);
++  
+   check_float_or_complex(a.dtype(), fname);
+ 
+   if (a.ndim() < 2) {
+@@ -569,7 +569,7 @@ void validate_lu(
+     const array& a,
+     const StreamOrDevice& stream,
+     const std::string& fname) {
+-  check_cpu_stream(stream, fname);
++  
    check_float(a.dtype(), fname);
  
    if (a.ndim() < 2) {
+@@ -636,7 +636,7 @@ void validate_solve(
+     const array& b,
+     const StreamOrDevice& stream,
+     const std::string& fname) {
+-  check_cpu_stream(stream, fname);
++  
+   if (a.ndim() < 2) {
+     std::ostringstream msg;
+     msg << fname << " First input must have >= 2 dimensions. "

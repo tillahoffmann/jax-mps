@@ -271,7 +271,7 @@ def make_linalg_op_configs():
         # --- SVD (needs 'svd'/'eigh' primitives not available on MPS) ---
 
         _xfail_no_prim = xfail_match(
-            "not found for platform mps|custom call target|Output count mismatch"
+            "not found for platform mps|unsupported target|Output count mismatch"
         )
 
         # SVD singular values (no sign ambiguity)
@@ -534,6 +534,11 @@ def make_linalg_op_configs():
         # --- Matrix Power ---
 
         yield OperationTestConfig(
+            lambda A: jnp.linalg.matrix_power(A, 0),
+            lambda key: _random_invertible(key, 3),
+            name="matrix_power_0",
+        )
+        yield OperationTestConfig(
             lambda A: jnp.linalg.matrix_power(A, 2),
             lambda key: _random_invertible(key, 3),
             name="matrix_power_2",
@@ -542,4 +547,9 @@ def make_linalg_op_configs():
             lambda A: jnp.linalg.matrix_power(A, 3),
             lambda key: _random_invertible(key, 3),
             name="matrix_power_3",
+        )
+        yield OperationTestConfig(
+            lambda A: jnp.linalg.matrix_power(A, -1),
+            lambda key: _random_invertible(key, 3),
+            name="matrix_power_neg1",
         )

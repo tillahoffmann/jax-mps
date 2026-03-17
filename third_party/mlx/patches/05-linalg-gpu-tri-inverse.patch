@@ -1,14 +1,21 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index 7465d13..3ad16e5 100644
+index 3c3fd8f..7952aa9 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -204,8 +204,106 @@
+@@ -205,8 +205,115 @@
    size_t elem_size = size_of(a.dtype());
  
    if (tri_) {
 -    throw std::runtime_error(
 -        "[Inverse::eval_gpu] Triangular inverse NYI on Metal.");
 +    // Triangular inverse: solve A * X = I using MPSMatrixSolveTriangular.
++
++    // Copy input to a contiguous temporary (MPS requires row-major layout).
++    array a_temp(a.shape(), a.dtype(), nullptr, {});
++    copy_gpu(
++        a,
++        a_temp,
++        a.flags().row_contiguous ? CopyType::Vector : CopyType::General);
 +
 +    // Temporary identity matrix (RHS for the solve).
 +    array identity_temp(a.shape(), a.dtype(), nullptr, {});
@@ -35,22 +42,33 @@ index 7465d13..3ad16e5 100644
 +        (__bridge id<MTLDevice>)d.mtl_device();
 +
 +    id<MTLBuffer> a_buf =
-+        (__bridge id<MTLBuffer>)(const_cast<void*>(a.buffer().ptr()));
++        (__bridge id<MTLBuffer>)(const_cast<void*>(a_temp.buffer().ptr()));
 +    id<MTLBuffer> id_buf =
 +        (__bridge id<MTLBuffer>)(const_cast<void*>(
 +            identity_temp.buffer().ptr()));
 +    id<MTLBuffer> out_buf =
 +        (__bridge id<MTLBuffer>)(const_cast<void*>(output.buffer().ptr()));
 +
-+    for (size_t i = 0; i < num_matrices; i++) {
-+      size_t a_byte_offset = (a.offset() + i * N * N) * elem_size;
-+      size_t mat_byte_offset = i * N * N * elem_size;
++    MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
++        matrixDescriptorWithRows:(NSUInteger)N
++                         columns:(NSUInteger)N
++                        rowBytes:(NSUInteger)(N * elem_size)
++                        dataType:MPSDataTypeFloat32];
 +
-+      MPSMatrixDescriptor* mat_desc = [MPSMatrixDescriptor
-+          matrixDescriptorWithRows:(NSUInteger)N
-+                           columns:(NSUInteger)N
-+                          rowBytes:(NSUInteger)(N * elem_size)
-+                          dataType:MPSDataTypeFloat32];
++    MPSMatrixSolveTriangular* solver =
++        [[MPSMatrixSolveTriangular alloc]
++            initWithDevice:mtl_dev
++                     right:NO
++                     upper:upper_ ? YES : NO
++                 transpose:NO
++                      unit:NO
++                     order:(NSUInteger)N
++    numberOfRightHandSides:(NSUInteger)N
++                     alpha:1.0];
++
++    for (size_t i = 0; i < num_matrices; i++) {
++      size_t a_byte_offset = i * N * N * elem_size;
++      size_t mat_byte_offset = i * N * N * elem_size;
 +
 +      MPSMatrix* a_mat = [[MPSMatrix alloc] initWithBuffer:a_buf
 +                                                    offset:a_byte_offset
@@ -62,23 +80,14 @@ index 7465d13..3ad16e5 100644
 +                                                      offset:mat_byte_offset
 +                                                  descriptor:mat_desc];
 +
-+      MPSMatrixSolveTriangular* solver =
-+          [[MPSMatrixSolveTriangular alloc]
-+              initWithDevice:mtl_dev
-+                       right:NO
-+                       upper:upper_ ? YES : NO
-+                   transpose:NO
-+                        unit:NO
-+                       order:(NSUInteger)N
-+      numberOfRightHandSides:(NSUInteger)N
-+                       alpha:1.0];
 +      [solver encodeToCommandBuffer:cmd_buf
 +                       sourceMatrix:a_mat
 +                rightHandSideMatrix:rhs_mat
 +                     solutionMatrix:sol_mat];
 +    }
 +
-+    // Keep identity temporary alive until GPU work completes.
++    // Keep temporaries alive until GPU work completes.
++    d.add_temporary(std::move(a_temp), s.index);
 +    d.add_temporary(std::move(identity_temp), s.index);
 +
 +    // Zero out the other triangle (MPS solve may leave garbage there).
