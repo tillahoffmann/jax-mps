@@ -10,7 +10,7 @@ from .util import OperationTestConfig, xfail_match
 def _random_invertible(key, n: int, batch_shape: tuple[int, ...] = ()):
     """Generate random well-conditioned invertible matrices."""
     shape = (*batch_shape, n, n)
-    A = random.normal(key, shape)
+    A = random.normal(key, shape, dtype=jnp.float32)
     # Add n * I to ensure well-conditioned (diagonally dominant)
     return A + n * jnp.eye(n, dtype=jnp.float32)
 
@@ -18,7 +18,7 @@ def _random_invertible(key, n: int, batch_shape: tuple[int, ...] = ()):
 def _random_symmetric(key, n: int, batch_shape: tuple[int, ...] = ()):
     """Generate random symmetric matrices."""
     shape = (*batch_shape, n, n)
-    A = random.normal(key, shape)
+    A = random.normal(key, shape, dtype=jnp.float32)
     return (A + jnp.swapaxes(A, -2, -1)) / 2
 
 
@@ -36,8 +36,9 @@ def _svd_reconstruct(A):
 def _qr_r(A):
     """Return R factor only (avoids sign ambiguity in Q)."""
     Q, R = jnp.linalg.qr(A)
-    # Normalize sign: make R diagonal positive
+    # Normalize sign: make R diagonal positive (treat zero as +1)
     signs = jnp.sign(jnp.diag(R))
+    signs = jnp.where(signs == 0, 1, signs)
     return R * signs[:, None]
 
 

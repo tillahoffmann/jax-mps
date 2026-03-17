@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index f51a617..194d270 100644
+index 2d25fee..d399e8e 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -221,8 +221,115 @@ array ensure_row_contiguous(const array& src) {
+@@ -222,8 +222,117 @@ array ensure_row_contiguous(const array& src) {
    size_t elem_size = size_of(a.dtype());
  
    if (tri_) {
@@ -91,7 +91,9 @@ index f51a617..194d270 100644
 +    d.add_temporary(std::move(identity_temp), s.index);
 +
 +    // Zero out the other triangle (MPS solve may leave garbage there).
-+    // This is done via a completion handler on shared memory.
++    // This runs in a completion handler after the command buffer finishes.
++    // MLX's eval model waits for command buffer completion before consuming
++    // outputs, so this is safe with respect to downstream GPU work.
 +    auto* out_ptr = output.data<float>();
 +    bool is_upper = upper_;
 +    cb->addCompletedHandler(MTL::HandlerFunction(

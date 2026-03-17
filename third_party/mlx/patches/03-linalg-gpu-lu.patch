@@ -1,5 +1,5 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index b791d82..81176d3 100644
+index b791d82..2dfaa9d 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
 @@ -1,5 +1,6 @@
@@ -33,7 +33,7 @@ index b791d82..81176d3 100644
  void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
    const auto& a = inputs[0];
  
-@@ -75,4 +92,115 @@
+@@ -75,4 +92,116 @@
    }
  }
  
@@ -126,7 +126,8 @@ index b791d82..81176d3 100644
 +  }
 +
 +  // Compute row_indices from pivots after GPU work completes.
-+  // Use a completion handler to avoid blocking the CPU.
++  // MLX's eval model waits for command buffer completion before consuming
++  // outputs, so the completion handler is safe w.r.t. downstream GPU work.
 +  auto* piv_ptr = pivots.data<uint32_t>();
 +  auto* ri_ptr = row_indices.data<uint32_t>();
 +  cb->addCompletedHandler(MTL::HandlerFunction(
