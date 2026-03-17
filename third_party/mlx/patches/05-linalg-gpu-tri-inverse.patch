@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index ac803e0..cf6f8a2 100644
+index f51a617..194d270 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -221,8 +221,111 @@ array ensure_row_contiguous(const array& src) {
+@@ -221,8 +221,115 @@ array ensure_row_contiguous(const array& src) {
    size_t elem_size = size_of(a.dtype());
  
    if (tri_) {
@@ -63,17 +63,21 @@ index ac803e0..cf6f8a2 100644
 +                     alpha:1.0];
 +
 +    for (size_t i = 0; i < num_matrices; i++) {
-+      size_t a_byte_offset = i * N * N * elem_size;
-+      size_t mat_byte_offset = i * N * N * elem_size;
++      size_t a_byte_offset =
++          (a_temp.offset() + i * N * N) * elem_size;
++      size_t id_byte_offset =
++          (identity_temp.offset() + i * N * N) * elem_size;
++      size_t out_byte_offset =
++          (output.offset() + i * N * N) * elem_size;
 +
 +      MPSMatrix* a_mat = [[MPSMatrix alloc] initWithBuffer:a_buf
 +                                                    offset:a_byte_offset
 +                                                descriptor:mat_desc];
 +      MPSMatrix* rhs_mat = [[MPSMatrix alloc] initWithBuffer:id_buf
-+                                                      offset:mat_byte_offset
++                                                      offset:id_byte_offset
 +                                                  descriptor:mat_desc];
 +      MPSMatrix* sol_mat = [[MPSMatrix alloc] initWithBuffer:out_buf
-+                                                      offset:mat_byte_offset
++                                                      offset:out_byte_offset
 +                                                  descriptor:mat_desc];
 +
 +      [solver encodeToCommandBuffer:cmd_buf
