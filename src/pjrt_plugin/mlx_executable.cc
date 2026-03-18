@@ -1088,8 +1088,9 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
                 }
             }
             if (!singleSlice) {
-                MPS_LOG_ERROR("stablehlo.gather: multi-dim no-collapse path requires "
-                              "single slice position (non-index-vector dims must be 1)\n");
+                MPS_LOG_ERROR(
+                    "stablehlo.gather: multi-dim no-collapse path requires "
+                    "single slice position (non-index-vector dims must be 1)\n");
                 return false;
             }
 
@@ -1213,9 +1214,10 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
         return true;
     }
 
-    MPS_LOG_ERROR("stablehlo.gather: unsupported gather pattern (indexVectorDim=%d, "
-                  "startIndexMap.size=%zu, collapsedSliceDims.size=%zu)\n",
-                  indexVectorDim, startIndexMap.size(), collapsedSliceDims.size());
+    MPS_LOG_ERROR(
+        "stablehlo.gather: unsupported gather pattern (indexVectorDim=%d, "
+        "startIndexMap.size=%zu, collapsedSliceDims.size=%zu)\n",
+        indexVectorDim, startIndexMap.size(), collapsedSliceDims.size());
     return false;
 }
 
@@ -3922,8 +3924,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             }
         }
         if (!singleUpdate) {
-            MPS_LOG_ERROR("stablehlo.scatter: multi-dim slice_update path requires "
-                          "single update position (non-index-vector dims must be 1)\n");
+            MPS_LOG_ERROR(
+                "stablehlo.scatter: multi-dim slice_update path requires "
+                "single update position (non-index-vector dims must be 1)\n");
             return false;
         }
 
@@ -3958,9 +3961,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             for (int d = 0; d < updateVal.ndim(); ++d) {
                 if (windowDimSet.count(d) == 0) {
                     if (updateVal.shape(d) != 1) {
-                        MPS_LOG_ERROR("stablehlo.scatter: non-window dim %d has size %d "
-                                      "(expected 1) in multi-dim slice_update path\n",
-                                      d, updateVal.shape(d));
+                        MPS_LOG_ERROR(
+                            "stablehlo.scatter: non-window dim %d has size %d "
+                            "(expected 1) in multi-dim slice_update path\n",
+                            d, updateVal.shape(d));
                         return false;
                     }
                     squeezeDims.push_back(d);
@@ -3987,8 +3991,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                 break;
             }
             default:
-                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type "
-                              "for multi-dim slice update\n");
+                MPS_LOG_ERROR(
+                    "stablehlo.scatter: unsupported scatter update type "
+                    "for multi-dim slice update\n");
                 return false;
         }
 
@@ -3996,9 +4001,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         return true;
     }
 
-    MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter pattern "
-                  "(scatterDimsToOperandDims.size=%zu, insertedWindowDims.size=%zu)\n",
-                  scatterDimsToOperandDims.size(), insertedWindowDims.size());
+    MPS_LOG_ERROR(
+        "stablehlo.scatter: unsupported scatter pattern "
+        "(scatterDimsToOperandDims.size=%zu, insertedWindowDims.size=%zu)\n",
+        scatterDimsToOperandDims.size(), insertedWindowDims.size());
     return false;
 }
 

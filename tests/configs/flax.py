@@ -64,7 +64,7 @@ def make_flax_op_configs():
             ),
             # Depthwise convolution (feature_group_count = in_features)
             # FIXME: Weight gradients fail on MPS: batch_group_count != 1 not supported.
-            # Need to implement grouped conv weight gradients in conv_ops.mm.
+            # Need to implement grouped conv weight gradients in mlx_executable.cc.
             OperationTestConfig(
                 _call_module,
                 lambda key: nnx.Conv(
@@ -77,7 +77,7 @@ def make_flax_op_configs():
             ),
             # Grouped convolution
             # FIXME: Weight gradients fail on MPS: batch_group_count != 1 not supported.
-            # Need to implement grouped conv weight gradients in conv_ops.mm.
+            # Need to implement grouped conv weight gradients in mlx_executable.cc.
             OperationTestConfig(
                 _call_module,
                 lambda key: nnx.Conv(

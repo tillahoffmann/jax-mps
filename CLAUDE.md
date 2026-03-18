@@ -35,7 +35,7 @@ Prefer these native functions over manual index computation (linear index math, 
 
 2. Find the matching MLX function in the [MLX documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (e.g., `mlx::core::multiply`). Check the C++ headers (`mlx/ops.h`) for the full API — the Python docs don't cover everything.
 
-3. Add a handler function in `src/pjrt_plugin/mlx_executable.mm`:
+3. Add a handler function in `src/pjrt_plugin/mlx_executable.cc`:
    ```cpp
    bool HandleMultiply(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
        auto lhs_opt = GetValue(values, op->getOperand(0));
@@ -49,7 +49,7 @@ Prefer these native functions over manual index computation (linear index math, 
    }
    ```
 
-4. Register the handler in `GetOpHandlers()` in `src/pjrt_plugin/mlx_executable.mm`:
+4. Register the handler in `GetOpHandlers()` in `src/pjrt_plugin/mlx_executable.cc`:
    ```cpp
    {"stablehlo.multiply", HandleMultiply},
    ```

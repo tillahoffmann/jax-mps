@@ -69,9 +69,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         "stablehlo.erf",
     }
 
-    # Discover ops from the dispatch table in mlx_executable.mm
+    # Discover ops from the dispatch table in mlx_executable.cc
     dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)"')
-    executable_file = pjrt_dir / "mlx_executable.mm"
+    executable_file = pjrt_dir / "mlx_executable.cc"
     assert executable_file.is_file()
     with executable_file.open() as fp:
         op_names = set(dispatch_pattern.findall(fp.read()))

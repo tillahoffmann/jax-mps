@@ -3,8 +3,7 @@
 
 #include "pjrt_plugin/stablehlo_parser.h"
 
-#import <Foundation/Foundation.h>
-
+#include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
 
@@ -35,7 +34,7 @@ namespace {
 const std::unordered_set<std::string>& getSupportedOps() {
     static std::unordered_set<std::string> supported = []() {
         auto ops = jax_mps::OpRegistry::GetRegisteredOps();
-        // Add ops handled directly in mlx_executable.mm (not via OpRegistry).
+        // Add ops handled directly in mlx_executable.cc (not via OpRegistry).
         ops.insert("func.return");
         ops.insert("func.call");
         return ops;
@@ -72,8 +71,9 @@ bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
         mlir::stablehlo::createStablehloAggressiveSimplificationPass());
 
     if (mlir::failed(pm.run(module))) {
-        NSLog(@"ERROR: StableHLO optimization pass failed. The module may be in a partially "
-              @"transformed state. Set JAX_MPS_NO_OPTIMIZE=1 to skip optimization passes.");
+        fprintf(stderr,
+                "ERROR: StableHLO optimization pass failed. The module may be in a partially "
+                "transformed state. Set JAX_MPS_NO_OPTIMIZE=1 to skip optimization passes.\n");
         return false;
     }
 

@@ -25,7 +25,7 @@ Pre-commit hooks run clang-format, ruff, pyright, a rebuild, and the full test s
 
 1. **Find the MLX function matching the operation.** See the [MLX C++ documentation](https://ml-explore.github.io/mlx/build/html/python/ops.html) (Python API mirrors C++).
 
-2. **Add a handler function** in `src/pjrt_plugin/mlx_executable.mm`:
+2. **Add a handler function** in `src/pjrt_plugin/mlx_executable.cc`:
 
 ```cpp
 bool HandleCosine(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs, ExecContext& ctx) {

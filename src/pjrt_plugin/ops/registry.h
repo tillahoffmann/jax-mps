@@ -1,5 +1,5 @@
 // MLX op registry
-// Single source of truth: ops are registered in GetOpHandlers() in mlx_executable.mm
+// Single source of truth: ops are registered in GetOpHandlers() in mlx_executable.cc
 // This file provides access to the op names for parsing/validation
 
 #pragma once
@@ -9,7 +9,7 @@
 
 namespace jax_mps {
 
-// Forward declaration - implemented in mlx_executable.mm
+// Forward declaration - implemented in mlx_executable.cc
 // Returns the set of op names that have handlers
 std::unordered_set<std::string> GetSupportedOpNames();
 
