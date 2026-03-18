@@ -5,8 +5,8 @@ repos:
     rev: v19.1.6
     hooks:
       - id: clang-format
-        types_or: [c++, c, objective-c++]
-        files: \.(cc|mm|h)$
+        types_or: [c++, c]
+        files: \.(cc|h)$
 
   - repo: local
     hooks:
@@ -45,7 +45,7 @@ repos:
             find src -type f -name "*.cc" ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) uv run clang-tidy-cache "$CLANG_TIDY" -p build
           '
         language: system
-        files: \.(cc|mm|h)$
+        files: \.(cc|h)$
         pass_filenames: false
       - id: pytest
         name: pytest
