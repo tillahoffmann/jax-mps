@@ -2362,8 +2362,8 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     if (paddingAttr) {
         auto vals = paddingAttr.getValues<int64_t>();
         for (int64_t i = 0; i < rank; i++) {
-            padLow[i] = vals[{(uint64_t)i, 0}];
-            padHigh[i] = vals[{(uint64_t)i, 1}];
+            padLow[i] = vals[{static_cast<uint64_t>(i), 0}];
+            padHigh[i] = vals[{static_cast<uint64_t>(i), 1}];
         }
     }
 
@@ -2644,8 +2644,8 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     if (auto p = ssOp.getPaddingAttr()) {
         auto vals = p.getValues<int64_t>();
         for (int64_t i = 0; i < rank; i++) {
-            padLow[i] = vals[{(uint64_t)i, 0}];
-            padHigh[i] = vals[{(uint64_t)i, 1}];
+            padLow[i] = vals[{static_cast<uint64_t>(i), 0}];
+            padHigh[i] = vals[{static_cast<uint64_t>(i), 1}];
         }
     }
 
