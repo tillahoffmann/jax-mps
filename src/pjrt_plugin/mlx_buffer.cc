@@ -148,11 +148,38 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
         }
     }
 
+    // If non-contiguous, copy strided data into a contiguous buffer.
+    // Declared in outer scope so it stays alive through array construction.
+    std::vector<uint8_t> contiguous_buf;
     if (!is_contiguous) {
-        // Non-contiguous data requires copying with stride handling
-        // For now, log an error and return nullptr
-        MPS_LOG_ERROR("Non-contiguous strides not supported - data must be contiguous\n");
-        return nullptr;
+        size_t num_elements = 1;
+        for (auto d : dims)
+            num_elements *= d;
+
+        contiguous_buf.resize(num_elements * elem_size);
+        size_t ndim = dims.size();
+        std::vector<int64_t> indices(ndim, 0);
+        const auto* src = static_cast<const uint8_t*>(data);
+
+        for (size_t flat = 0; flat < num_elements; ++flat) {
+            // Compute source offset from strides
+            size_t src_offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                src_offset += indices[d] * byte_strides[d];
+            }
+            std::memcpy(contiguous_buf.data() + flat * elem_size, src + src_offset, elem_size);
+
+            // Increment indices (row-major order: last dimension fastest)
+            for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+                if (++indices[d] < dims[d])
+                    break;
+                indices[d] = 0;
+            }
+        }
+
+        data = contiguous_buf.data();
+        MPS_LOG_DEBUG("Copied non-contiguous data to contiguous buffer: %zu elements\n",
+                      num_elements);
     }
 
     // Create MLX array from host data - cast to correct type based on dtype
