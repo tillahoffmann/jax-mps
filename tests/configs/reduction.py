@@ -204,3 +204,89 @@ def make_reduction_op_configs():
                 differentiable_argnums=(),
             ),
         ]
+
+    # Tests targeting select_and_scatter edge cases (PR #100 regressions).
+    with OperationTestConfig.module_name("reduction-real"):
+        # Issue 1: Max pool gradient with tied values.
+        # When multiple elements in a pooling window are equal (common after ReLU),
+        # the gradient must match CPU semantics (first-occurrence wins), not
+        # replicate the full gradient to every tied position.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(
+                x, -jnp.inf, lax.max, (1, 2, 2, 1), (1, 2, 2, 1), "valid"
+            ),
+            # Deterministic input with many zeros (ties) — simulates post-ReLU.
+            lambda key: jnp.array(
+                [
+                    [
+                        [[0.0], [0.0], [1.0], [0.0]],
+                        [[0.0], [0.0], [0.0], [0.0]],
+                        [[2.0], [0.0], [0.0], [0.0]],
+                        [[0.0], [0.0], [0.0], [3.0]],
+                    ]
+                ],
+                dtype=jnp.float32,
+            ),
+            name="maxpool2d-tied-grad",
+        )
+
+        # Issue 1b: Overlapping max pool with tied values (mask-based path).
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(
+                x, -jnp.inf, lax.max, (1, 3, 3, 1), (1, 1, 1, 1), "valid"
+            ),
+            lambda key: jnp.array(
+                [
+                    [
+                        [[0.0], [0.0], [0.0], [0.0], [0.0]],
+                        [[0.0], [5.0], [5.0], [0.0], [0.0]],
+                        [[0.0], [5.0], [0.0], [0.0], [0.0]],
+                        [[0.0], [0.0], [0.0], [0.0], [0.0]],
+                        [[0.0], [0.0], [0.0], [0.0], [0.0]],
+                    ]
+                ],
+                dtype=jnp.float32,
+            ),
+            name="maxpool2d-overlapping-tied-grad",
+        )
+
+        # Issue 1c: 1D max pool with tied values.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(x, -jnp.inf, lax.max, (1, 2), (1, 2), "valid"),
+            lambda key: jnp.array(
+                [[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 0.0]], dtype=jnp.float32
+            ),
+            name="maxpool1d-tied-grad",
+        )
+
+        # 1D max pool with SAME padding — tests 1D padding path.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(x, -jnp.inf, lax.max, (1, 3), (1, 2), "same"),
+            lambda key: random.normal(key, (2, 7)),
+            name="maxpool1d-same",
+        )
+
+        # Issue 1f: NCHW-style pooling layout — window on dims 2,3 with
+        # batch=0 and channel=1. Tests the transpose logic in optimized paths.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(
+                x, -jnp.inf, lax.max, (1, 1, 2, 2), (1, 1, 2, 2), "valid"
+            ),
+            lambda key: random.normal(key, (2, 3, 8, 8)),
+            name="maxpool2d-nchw-valid",
+        )
+
+        # Issue 2: 3D max pool (5D tensor) — tests that the generic fallback
+        # still works for configurations outside the 1D/2D fast paths.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(
+                x,
+                -jnp.inf,
+                lax.max,
+                (1, 2, 2, 2, 1),
+                (1, 2, 2, 2, 1),
+                "valid",
+            ),
+            lambda key: random.normal(key, (2, 4, 4, 4, 3)),
+            name="maxpool3d-valid",
+        )

@@ -115,4 +115,19 @@ def make_conv_op_configs():
                 lambda key: random.normal(key, (3, 3, 4)),
                 name="lax.conv_general_dilated-1d-stride2-dilated",
             ),
+            # Large-kernel conv where kernel_size >= input_size with SAME padding.
+            # This can false-positive match the weight-gradient VJP heuristic
+            # (kH >= 2*out_H) since the output is small relative to the kernel.
+            OperationTestConfig(
+                lambda x, kernel: lax.conv_general_dilated(
+                    x,
+                    kernel,
+                    window_strides=(1, 1),
+                    padding="SAME",
+                    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+                ),
+                lambda key: random.normal(key, (1, 4, 4, 3)),
+                lambda key: random.normal(key, (8, 8, 3, 16)),
+                name="lax.conv_general_dilated-large-kernel",
+            ),
         ]
