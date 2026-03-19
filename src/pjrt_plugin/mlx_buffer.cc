@@ -152,25 +152,43 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
     // Declared in outer scope so it stays alive through array construction.
     std::vector<uint8_t> contiguous_buf;
     if (!is_contiguous) {
+        // Reject negative strides — these would require computing a base offset
+        // into the source buffer, which PJRT does not provide.
+        for (size_t i = 0; i < byte_strides.size(); ++i) {
+            if (byte_strides[i] < 0) {
+                MPS_LOG_ERROR("Negative byte stride (%lld) at dim %zu not supported\n",
+                              static_cast<long long>(byte_strides[i]), i);
+                return nullptr;
+            }
+        }
+
         size_t num_elements = 1;
         for (auto d : dims)
             num_elements *= d;
 
         contiguous_buf.resize(num_elements * elem_size);
         size_t ndim = dims.size();
-        std::vector<int64_t> indices(ndim, 0);
         const auto* src = static_cast<const uint8_t*>(data);
 
-        for (size_t flat = 0; flat < num_elements; ++flat) {
-            // Compute source offset from strides
-            size_t src_offset = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                src_offset += indices[d] * byte_strides[d];
-            }
-            std::memcpy(contiguous_buf.data() + flat * elem_size, src + src_offset, elem_size);
+        // Fast path: if the innermost dimension is contiguous, copy whole rows.
+        size_t inner_count = 1;
+        if (ndim > 0 && byte_strides[ndim - 1] == static_cast<int64_t>(elem_size)) {
+            inner_count = dims[ndim - 1];
+        }
+        size_t row_bytes = inner_count * elem_size;
+        size_t outer_dims = (inner_count > 1 && ndim > 1) ? ndim - 1 : ndim;
+        size_t num_rows = num_elements / inner_count;
 
-            // Increment indices (row-major order: last dimension fastest)
-            for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+        std::vector<int64_t> indices(outer_dims, 0);
+        for (size_t row = 0; row < num_rows; ++row) {
+            size_t src_offset = 0;
+            for (size_t d = 0; d < outer_dims; ++d) {
+                src_offset += indices[d] * static_cast<size_t>(byte_strides[d]);
+            }
+            std::memcpy(contiguous_buf.data() + row * row_bytes, src + src_offset, row_bytes);
+
+            // Increment outer indices (row-major order)
+            for (int d = static_cast<int>(outer_dims) - 1; d >= 0; --d) {
                 if (++indices[d] < dims[d])
                     break;
                 indices[d] = 0;
