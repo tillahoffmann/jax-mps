@@ -1,3 +1,4 @@
+import numpy
 from jax import lax, random
 from jax import numpy as jnp
 
@@ -11,6 +12,31 @@ def make_misc_op_configs():
             OperationTestConfig(
                 lambda x: x,
                 lambda key: random.normal(key, (4, 5, 6, 8)).transpose((2, 0, 1, 3)),
+            ),
+            # Non-contiguous host-to-device transfers via numpy arrays.
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.arange(24, dtype=numpy.float32).reshape(4, 6).T,
+                name="non-contiguous-transpose-2d",
+            ),
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.arange(120, dtype=numpy.float32)
+                .reshape(2, 3, 4, 5)
+                .transpose(2, 0, 1, 3),
+                name="non-contiguous-transpose-4d",
+            ),
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.arange(48, dtype=numpy.float32).reshape(8, 6)[::2],
+                name="non-contiguous-sliced-rows",
+            ),
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.asfortranarray(
+                    numpy.arange(24, dtype=numpy.float32).reshape(4, 6)
+                ),
+                name="non-contiguous-fortran-order",
             ),
             OperationTestConfig(
                 lambda x: jnp.fft.fft(x),
