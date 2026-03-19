@@ -17,12 +17,12 @@ JAX_PLATFORMS=mps uv run examples/resnet/main.py --steps=30
 
 ## Benchmark
 
-On an M4 MacBook Air, MPS achieves ~3x speedup over CPU:
+On an M4 MacBook Air, MPS achieves ~4.7x speedup over CPU:
 
 | Backend | Time per step |
 |---------|---------------|
-| CPU     | 3.0s          |
-| MPS     | 1.0s          |
+| CPU     | 3.2s          |
+| MPS     | 0.7s          |
 
 ## Files
 
