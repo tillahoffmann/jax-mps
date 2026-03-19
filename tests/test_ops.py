@@ -243,6 +243,7 @@ def test_composite_op(composite_name, decomposition_body, expected_fn) -> None:
     JAX 0.9.1+ wraps CHLO ops (arcsin, sinh, erf, etc.) as stablehlo.composite
     ops instead of dispatching them as custom_call or chlo.* ops directly.
     """
+    OperationTestConfig.EXERCISED_STABLEHLO_OPS.add("stablehlo.composite")
     if TEST_MODE == "cpu":
         pytest.skip("MPS-specific test skipped in CPU-only mode")
 

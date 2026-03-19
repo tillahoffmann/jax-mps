@@ -3272,7 +3272,7 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     // Try native MLX dispatch for known single-input CHLO composite ops.
     // NOTE: String keys here use a "chlo." prefix (matching the composite name attribute).
     // They are NOT dispatch table entries — do not confuse with GetOpHandlers() registration.
-    if (inputs.size() == 1) {
+    if (inputs.size() == 1 && op->getNumResults() == 1) {
         using UnaryFn = mlx::core::array (*)(const mlx::core::array&, mlx::core::StreamOrDevice);
         // clang-format off
         static const std::unordered_map<std::string, UnaryFn> nativeUnary{
@@ -3293,7 +3293,7 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     }
 
     // Try native MLX dispatch for known two-input CHLO composite ops
-    if (inputs.size() == 2 && compositeName == "chlo.atan2") {
+    if (inputs.size() == 2 && op->getNumResults() == 1 && compositeName == "chlo.atan2") {
         values.emplace(ToKey(op->getResult(0)), mlx::core::arctan2(inputs[0], inputs[1], {}));
         return true;
     }
