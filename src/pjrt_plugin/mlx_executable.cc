@@ -2685,267 +2685,111 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     }
 
     // =========================================================================
-    // Optimized implementation using VJP (non-overlapping) or mask-based slicing
-    // (overlapping). Avoids the expensive as_strided+argmax+scatter_add path.
-    //
-    // Note on tie-breaking: MLX's max backward distributes gradients equally
-    // among tied values (valid subgradient), while XLA's select_and_scatter
-    // sends the gradient to only the first occurrence. This is an inherent
-    // difference between MLX and XLA/JAX (confirmed via mlx.nn.MaxPool2d vs
-    // jax.lax.reduce_window) and does not affect training in practice, as ties
-    // typically only occur at zero after ReLU where the gradient is zeroed.
+    // Mask-based select_and_scatter for arbitrary rank.
+    // For each window position (iterated in row-major order over all dims),
+    // compares the strided input slice against the forward pool result.
+    // Uses first-occurrence selection to match XLA/CPU GE comparator semantics:
+    // only the first matching position per output element receives the gradient.
     // =========================================================================
 
-    // Identify spatial dimensions (where window > 1) vs batch/channel dims.
-    std::vector<int> spatialDims;
-    std::vector<int> nonSpatialDims;
-    for (int64_t i = 0; i < rank; ++i) {
-        if (windowDims[i] > 1)
-            spatialDims.push_back(static_cast<int>(i));
-        else
-            nonSpatialDims.push_back(static_cast<int>(i));
-    }
-
-    // --- 2D pooling fast path (4D tensor, NHWC or NCHW) ---
-    if (rank == 4 && spatialDims.size() == 2 && nonSpatialDims.size() == 2) {
-        int h_dim = spatialDims[0];
-        int w_dim = spatialDims[1];
-        int n_dim = -1;
-        int c_dim = -1;
-        if (nonSpatialDims.size() >= 2) {
-            n_dim = (nonSpatialDims[0] == 0) ? nonSpatialDims[0] : nonSpatialDims[1];
-            c_dim = (nonSpatialDims[0] == 0) ? nonSpatialDims[1] : nonSpatialDims[0];
-        }
-
-        int win_h = static_cast<int>(windowDims[h_dim]);
-        int win_w = static_cast<int>(windowDims[w_dim]);
-        int str_h = static_cast<int>(strides[h_dim]);
-        int str_w = static_cast<int>(strides[w_dim]);
-        int N = static_cast<int>(operand.shape(n_dim));
-        int H = static_cast<int>(operand.shape(h_dim));
-        int W = static_cast<int>(operand.shape(w_dim));
-        int C = static_cast<int>(operand.shape(c_dim));
-        int H_out = static_cast<int>(source.shape(h_dim));
-        int W_out = static_cast<int>(source.shape(w_dim));
-
-        // VJP fast path: non-overlapping pool (stride == window, no padding, exact division)
-        if (n_dim == 0 && str_h == win_h && str_w == win_w && H == H_out * win_h &&
-            W == W_out * win_w && padLow[h_dim] == 0 && padLow[w_dim] == 0 && padHigh[h_dim] == 0 &&
-            padHigh[w_dim] == 0) {
-            // Transpose to NHWC if needed
-            auto op_nhwc = operand;
-            auto src_nhwc = source;
-            bool needTranspose = (c_dim != static_cast<int>(rank) - 1);
-            if (needTranspose) {
-                std::vector<int> toNHWC = {n_dim, h_dim, w_dim, c_dim};
-                op_nhwc = mlx::core::transpose(operand, toNHWC);
-                src_nhwc = mlx::core::transpose(source, toNHWC);
-            }
-
-            // VJP of reshape → max:
-            // reshape [N, H_out, win_h, W_out, win_w, C] → max over axes {2,4}
-            bool isMax = selectMax;
-            auto vjpFn =
-                [N, H_out, W_out, win_h, win_w, C, isMax](
-                    const std::vector<mlx::core::array>& primals) -> std::vector<mlx::core::array> {
-                auto r = mlx::core::reshape(primals[0], {N, H_out, win_h, W_out, win_w, C});
-                auto w = mlx::core::transpose(r, {0, 1, 3, 2, 4, 5});
-                return {isMax ? mlx::core::max(w, {3, 4}) : mlx::core::min(w, {3, 4})};
-            };
-            auto [fwdOut, vjps] = mlx::core::vjp(vjpFn, {op_nhwc}, {src_nhwc});
-            auto result = vjps[0];
-
-            // Transpose back to original layout
-            if (needTranspose) {
-                std::vector<int> fromNHWC(4);
-                fromNHWC[n_dim] = 0;
-                fromNHWC[h_dim] = 1;
-                fromNHWC[w_dim] = 2;
-                fromNHWC[c_dim] = 3;
-                result = mlx::core::transpose(result, fromNHWC);
-            }
-            values.emplace(ToKey(op->getResult(0)), std::move(result));
-            return true;
-        }
-
-        // General 2D path: mask-based gradient (handles overlapping pools, padding)
-        {
-            // Pad operand if needed
-            mlx::core::array paddedOp = operand;
-            if (padLow[h_dim] != 0 || padHigh[h_dim] != 0 || padLow[w_dim] != 0 ||
-                padHigh[w_dim] != 0) {
-                float padScalar = selectMax ? -std::numeric_limits<float>::infinity()
-                                            : std::numeric_limits<float>::infinity();
-                auto padVal = mlx::core::full({}, padScalar, operand.dtype());
-                std::vector<std::pair<int, int>> padWidth(rank, {0, 0});
-                for (int64_t i = 0; i < rank; i++)
-                    padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
-                paddedOp = mlx::core::pad(operand, padWidth, padVal);
-            }
-
-            // Compute forward pool to get the selected values
-            auto fwdResult =
-                selectMax ? mlx::core::full(source.shape(), -std::numeric_limits<float>::infinity(),
-                                            operand.dtype())
-                          : mlx::core::full(source.shape(), std::numeric_limits<float>::infinity(),
-                                            operand.dtype());
-
-            int ndim = static_cast<int>(rank);
-            for (int wh = 0; wh < win_h; ++wh) {
-                for (int ww = 0; ww < win_w; ++ww) {
-                    std::vector<int> si(ndim, 0);
-                    std::vector<int> ei(ndim);
-                    std::vector<int> st(ndim, 1);
-                    for (int d = 0; d < ndim; ++d)
-                        ei[d] = static_cast<int>(paddedOp.shape(d));
-                    si[h_dim] = wh;
-                    ei[h_dim] = wh + H_out * str_h;
-                    st[h_dim] = str_h;
-                    si[w_dim] = ww;
-                    ei[w_dim] = ww + W_out * str_w;
-                    st[w_dim] = str_w;
-                    auto vals = mlx::core::slice(paddedOp, mlx::core::Shape(si.begin(), si.end()),
-                                                 mlx::core::Shape(ei.begin(), ei.end()),
-                                                 mlx::core::Shape(st.begin(), st.end()));
-                    fwdResult = selectMax ? mlx::core::maximum(fwdResult, vals)
-                                          : mlx::core::minimum(fwdResult, vals);
-                }
-            }
-
-            // Scatter gradients using mask (initialize with init_value)
-            auto initVal = mlx::core::astype(init_opt->get(), operand.dtype());
-            auto sasResult = mlx::core::broadcast_to(initVal, paddedOp.shape());
-            for (int wh = 0; wh < win_h; ++wh) {
-                for (int ww = 0; ww < win_w; ++ww) {
-                    std::vector<int> si(ndim, 0);
-                    std::vector<int> ei(ndim);
-                    std::vector<int> st(ndim, 1);
-                    for (int d = 0; d < ndim; ++d)
-                        ei[d] = static_cast<int>(paddedOp.shape(d));
-                    si[h_dim] = wh;
-                    ei[h_dim] = wh + H_out * str_h;
-                    st[h_dim] = str_h;
-                    si[w_dim] = ww;
-                    ei[w_dim] = ww + W_out * str_w;
-                    st[w_dim] = str_w;
-                    auto slicerStart = mlx::core::Shape(si.begin(), si.end());
-                    auto slicerEnd = mlx::core::Shape(ei.begin(), ei.end());
-                    auto slicerStride = mlx::core::Shape(st.begin(), st.end());
-
-                    auto inputSlice =
-                        mlx::core::slice(paddedOp, slicerStart, slicerEnd, slicerStride);
-                    auto mask =
-                        mlx::core::astype(mlx::core::equal(inputSlice, fwdResult), operand.dtype());
-                    auto gradContrib = mlx::core::multiply(source, mask);
-                    auto curSlice =
-                        mlx::core::slice(sasResult, slicerStart, slicerEnd, slicerStride);
-                    sasResult =
-                        mlx::core::slice_update(sasResult, mlx::core::add(curSlice, gradContrib),
-                                                slicerStart, slicerEnd, slicerStride);
-                }
-            }
-
-            // If we padded, extract the unpadded region
-            if (padLow[h_dim] != 0 || padHigh[h_dim] != 0 || padLow[w_dim] != 0 ||
-                padHigh[w_dim] != 0) {
-                std::vector<int> sliceStart(ndim, 0);
-                std::vector<int> sliceEnd(ndim);
-                for (int d = 0; d < ndim; ++d) {
-                    sliceStart[d] = static_cast<int>(padLow[d]);
-                    sliceEnd[d] = sliceStart[d] + static_cast<int>(operand.shape(d));
-                }
-                sasResult = mlx::core::slice(sasResult,
-                                             mlx::core::Shape(sliceStart.begin(), sliceStart.end()),
-                                             mlx::core::Shape(sliceEnd.begin(), sliceEnd.end()));
-            }
-            values.emplace(ToKey(op->getResult(0)), std::move(sasResult));
-            return true;
+    // Pad operand with -inf (max) or +inf (min) so padded elements are never selected.
+    mlx::core::array paddedOp = operand;
+    bool needsPad = false;
+    for (int64_t i = 0; i < rank; i++) {
+        if (padLow[i] != 0 || padHigh[i] != 0) {
+            needsPad = true;
+            break;
         }
     }
-
-    // --- 1D pooling path ---
-    if (spatialDims.size() == 1) {
-        int s_dim = spatialDims[0];
-        int win_s = static_cast<int>(windowDims[s_dim]);
-        int str_s = static_cast<int>(strides[s_dim]);
-        int S_out = static_cast<int>(source.shape(s_dim));
-        int ndim = static_cast<int>(rank);
-
-        // Pad operand if needed
-        mlx::core::array paddedOp1D = operand;
-        if (padLow[s_dim] != 0 || padHigh[s_dim] != 0) {
-            float padScalar = selectMax ? -std::numeric_limits<float>::infinity()
-                                        : std::numeric_limits<float>::infinity();
-            auto padVal = mlx::core::full({}, padScalar, operand.dtype());
-            std::vector<std::pair<int, int>> padWidth(rank, {0, 0});
-            for (int64_t i = 0; i < rank; i++)
-                padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
-            paddedOp1D = mlx::core::pad(operand, padWidth, padVal);
-        }
-
-        auto fwdResult =
-            selectMax ? mlx::core::full(source.shape(), -std::numeric_limits<float>::infinity(),
-                                        operand.dtype())
-                      : mlx::core::full(source.shape(), std::numeric_limits<float>::infinity(),
-                                        operand.dtype());
-
-        for (int ws = 0; ws < win_s; ++ws) {
-            std::vector<int> si(ndim, 0);
-            std::vector<int> ei(ndim);
-            std::vector<int> st(ndim, 1);
-            for (int d = 0; d < ndim; ++d)
-                ei[d] = static_cast<int>(paddedOp1D.shape(d));
-            si[s_dim] = ws;
-            ei[s_dim] = ws + S_out * str_s;
-            st[s_dim] = str_s;
-            auto vals = mlx::core::slice(paddedOp1D, mlx::core::Shape(si.begin(), si.end()),
-                                         mlx::core::Shape(ei.begin(), ei.end()),
-                                         mlx::core::Shape(st.begin(), st.end()));
-            fwdResult = selectMax ? mlx::core::maximum(fwdResult, vals)
-                                  : mlx::core::minimum(fwdResult, vals);
-        }
-
-        auto initVal1D = mlx::core::astype(init_opt->get(), operand.dtype());
-        auto sasResult = mlx::core::broadcast_to(initVal1D, paddedOp1D.shape());
-        for (int ws = 0; ws < win_s; ++ws) {
-            std::vector<int> si(ndim, 0);
-            std::vector<int> ei(ndim);
-            std::vector<int> st(ndim, 1);
-            for (int d = 0; d < ndim; ++d)
-                ei[d] = static_cast<int>(paddedOp1D.shape(d));
-            si[s_dim] = ws;
-            ei[s_dim] = ws + S_out * str_s;
-            st[s_dim] = str_s;
-            auto slicerStart = mlx::core::Shape(si.begin(), si.end());
-            auto slicerEnd = mlx::core::Shape(ei.begin(), ei.end());
-            auto slicerStride = mlx::core::Shape(st.begin(), st.end());
-
-            auto inputSlice = mlx::core::slice(paddedOp1D, slicerStart, slicerEnd, slicerStride);
-            auto mask = mlx::core::astype(mlx::core::equal(inputSlice, fwdResult), operand.dtype());
-            auto gradContrib = mlx::core::multiply(source, mask);
-            auto curSlice = mlx::core::slice(sasResult, slicerStart, slicerEnd, slicerStride);
-            sasResult = mlx::core::slice_update(sasResult, mlx::core::add(curSlice, gradContrib),
-                                                slicerStart, slicerEnd, slicerStride);
-        }
-
-        // If we padded, extract the unpadded region
-        if (padLow[s_dim] != 0 || padHigh[s_dim] != 0) {
-            std::vector<int> sliceStart(ndim, 0);
-            std::vector<int> sliceEnd(ndim);
-            for (int d = 0; d < ndim; ++d) {
-                sliceStart[d] = static_cast<int>(padLow[d]);
-                sliceEnd[d] = sliceStart[d] + static_cast<int>(operand.shape(d));
-            }
-            sasResult =
-                mlx::core::slice(sasResult, mlx::core::Shape(sliceStart.begin(), sliceStart.end()),
-                                 mlx::core::Shape(sliceEnd.begin(), sliceEnd.end()));
-        }
-        values.emplace(ToKey(op->getResult(0)), std::move(sasResult));
-        return true;
+    if (needsPad) {
+        float padScalar = selectMax ? -std::numeric_limits<float>::infinity()
+                                    : std::numeric_limits<float>::infinity();
+        auto padVal = mlx::core::full({}, padScalar, operand.dtype());
+        std::vector<std::pair<int, int>> padWidth(rank, {0, 0});
+        for (int64_t i = 0; i < rank; i++)
+            padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
+        paddedOp = mlx::core::pad(operand, padWidth, padVal);
     }
 
-    MPS_LOG_ERROR("stablehlo.select_and_scatter: unsupported rank/spatial config\n");
-    return false;
+    int ndim = static_cast<int>(rank);
+
+    // Compute total number of window positions (product of all windowDims).
+    int64_t totalWinPositions = 1;
+    for (int64_t i = 0; i < rank; i++)
+        totalWinPositions *= windowDims[i];
+
+    // Helper: build slice params for a flat window position index.
+    // Decomposes flatIdx into per-dimension offsets in row-major order.
+    auto makeSliceParams = [&](int64_t flatWinIdx) {
+        std::vector<int> si(ndim, 0);
+        std::vector<int> ei(ndim);
+        std::vector<int> st(ndim, 1);
+        for (int d = 0; d < ndim; ++d)
+            ei[d] = static_cast<int>(paddedOp.shape(d));
+
+        int64_t remaining = flatWinIdx;
+        for (int d = ndim - 1; d >= 0; --d) {
+            int64_t wd = windowDims[d];
+            int64_t offset = remaining % wd;
+            remaining /= wd;
+            int outSize = static_cast<int>(source.shape(d));
+            int str = static_cast<int>(strides[d]);
+            si[d] = static_cast<int>(offset);
+            ei[d] = static_cast<int>(offset) + outSize * str;
+            st[d] = str;
+        }
+        return std::make_tuple(mlx::core::Shape(si.begin(), si.end()),
+                               mlx::core::Shape(ei.begin(), ei.end()),
+                               mlx::core::Shape(st.begin(), st.end()));
+    };
+
+    // Pass 1: Compute forward pool result (max/min over all window positions).
+    auto fwdResult = selectMax
+                         ? mlx::core::full(source.shape(), -std::numeric_limits<float>::infinity(),
+                                           operand.dtype())
+                         : mlx::core::full(source.shape(), std::numeric_limits<float>::infinity(),
+                                           operand.dtype());
+
+    for (int64_t wi = 0; wi < totalWinPositions; ++wi) {
+        auto [si, ei, st] = makeSliceParams(wi);
+        auto vals = mlx::core::slice(paddedOp, si, ei, st);
+        fwdResult =
+            selectMax ? mlx::core::maximum(fwdResult, vals) : mlx::core::minimum(fwdResult, vals);
+    }
+
+    // Pass 2: Scatter gradients using first-occurrence mask.
+    auto initVal = mlx::core::astype(init_opt->get(), operand.dtype());
+    auto sasResult = mlx::core::broadcast_to(initVal, paddedOp.shape());
+    auto won = mlx::core::zeros(source.shape(), mlx::core::bool_);
+
+    for (int64_t wi = 0; wi < totalWinPositions; ++wi) {
+        auto [slicerStart, slicerEnd, slicerStride] = makeSliceParams(wi);
+        auto inputSlice = mlx::core::slice(paddedOp, slicerStart, slicerEnd, slicerStride);
+        auto isMatch = mlx::core::equal(inputSlice, fwdResult);
+        auto isFirst = mlx::core::logical_and(isMatch, mlx::core::logical_not(won));
+        won = mlx::core::logical_or(won, isFirst);
+        auto mask = mlx::core::astype(isFirst, operand.dtype());
+        auto gradContrib = mlx::core::multiply(source, mask);
+        auto curSlice = mlx::core::slice(sasResult, slicerStart, slicerEnd, slicerStride);
+        sasResult = mlx::core::slice_update(sasResult, mlx::core::add(curSlice, gradContrib),
+                                            slicerStart, slicerEnd, slicerStride);
+    }
+
+    // If we padded, extract the unpadded region.
+    if (needsPad) {
+        std::vector<int> sliceStart(ndim, 0);
+        std::vector<int> sliceEnd(ndim);
+        for (int d = 0; d < ndim; ++d) {
+            sliceStart[d] = static_cast<int>(padLow[d]);
+            sliceEnd[d] = sliceStart[d] + static_cast<int>(operand.shape(d));
+        }
+        sasResult =
+            mlx::core::slice(sasResult, mlx::core::Shape(sliceStart.begin(), sliceStart.end()),
+                             mlx::core::Shape(sliceEnd.begin(), sliceEnd.end()));
+    }
+
+    values.emplace(ToKey(op->getResult(0)), std::move(sasResult));
+    return true;
 }
 
 // Handler for stablehlo.dot_general
