@@ -1078,44 +1078,27 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
         mlx::core::array result = operand;
 
         if (collapsedSet.empty()) {
-            // No collapsed dims: dynamic sub-tensor slice (single slice position).
-            // Verify all non-index-vector dims of startIndices are size 1.
-            bool singleSlice = true;
-            for (int d = 0; d < indices.ndim(); ++d) {
-                if (d != indexVectorDim && indices.shape(d) != 1) {
-                    singleSlice = false;
-                    break;
-                }
-            }
-            if (!singleSlice) {
-                MPS_LOG_ERROR(
-                    "stablehlo.gather: multi-dim no-collapse path requires "
-                    "single slice position (non-index-vector dims must be 1)\n");
-                return false;
-            }
-
-            // Use MLX dynamic slice with per-axis start indices.
+            // No collapsed dims: use MLX gather for multi-axis sub-tensor slicing.
+            // This handles both single and multiple batch positions.
             auto sliceSizesAttr = gatherOp.getSliceSizes();
             mlx::core::Shape mlxSliceSizes;
             for (auto s : sliceSizesAttr) {
                 mlxSliceSizes.push_back(static_cast<int>(s));
             }
 
-            // Re-clamp indices for slice: valid start is [0, shape - slice_size].
-            std::vector<mlx::core::array> flatIdx;
-            flatIdx.reserve(idxVec.size());
+            // Re-clamp indices for gather: valid start is [0, shape - slice_size].
+            std::vector<mlx::core::array> clampedIdx;
+            clampedIdx.reserve(idxVec.size());
             for (size_t i = 0; i < idxVec.size(); ++i) {
                 int axis = axes[i];
                 int maxStart = operand.shape(axis) - mlxSliceSizes[axis];
-                auto clamped = mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
-                                               mlx::core::array(maxStart, mlx::core::int32));
-                flatIdx.push_back(mlx::core::reshape(clamped, {1}));
+                auto clamped =
+                    mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
+                                    mlx::core::array(std::max(0, maxStart), mlx::core::int32));
+                clampedIdx.push_back(clamped);
             }
-            auto startArr = mlx::core::concatenate(flatIdx, 0);
-            if (startArr.dtype() != mlx::core::int32) {
-                startArr = mlx::core::astype(startArr, mlx::core::int32);
-            }
-            result = mlx::core::slice(operand, startArr, axes, mlxSliceSizes);
+
+            result = mlx::core::gather(operand, clampedIdx, axes, mlxSliceSizes);
         } else if (offsetOperandDims.empty()) {
             // Full-index gather: all dims collapsed, flatten and use linear indices
             auto flatOperand = mlx::core::flatten(operand);
@@ -4049,8 +4032,7 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             scatterDimsToOperandDims.size()) {
         auto indices = scatterIndices;
 
-        // This path handles single-position slice updates only.
-        // Verify all non-index-vector dims of scatterIndices are size 1.
+        // Check if we have single or multiple batch positions.
         bool singleUpdate = true;
         for (int d = 0; d < indices.ndim(); ++d) {
             if (d != indexVectorDim && indices.shape(d) != 1) {
@@ -4058,78 +4040,131 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                 break;
             }
         }
-        if (!singleUpdate) {
-            MPS_LOG_ERROR(
-                "stablehlo.scatter: multi-dim slice_update path requires "
-                "single update position (non-index-vector dims must be 1)\n");
-            return false;
-        }
 
-        // Extract per-axis start indices from the index vector dim
-        std::vector<mlx::core::array> perAxisIdx;
-        std::vector<int> axes;
-        for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
-            axes.push_back(static_cast<int>(scatterDimsToOperandDims[i]));
-
-            mlx::core::Shape starts(indices.ndim(), 0);
-            mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
-            starts[indexVectorDim] = static_cast<int>(i);
-            stops[indexVectorDim] = static_cast<int>(i) + 1;
-            auto axisIdx =
-                mlx::core::squeeze(mlx::core::slice(indices, starts, stops), {indexVectorDim});
-            if (axisIdx.dtype() != mlx::core::int32) {
-                axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
+        // Compute batch size for the multi-batch path
+        int batchSize = 1;
+        std::vector<int> batchDims;
+        for (int d = 0; d < indices.ndim(); ++d) {
+            if (d != indexVectorDim) {
+                batchSize *= indices.shape(d);
+                batchDims.push_back(d);
             }
-            perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
         }
 
-        // Build the start array for slice_update
-        auto startArr = mlx::core::concatenate(perAxisIdx, 0);
+        std::vector<int> axes;
+        axes.reserve(scatterDimsToOperandDims.size());
+        for (long long scatterDim : scatterDimsToOperandDims) {
+            axes.push_back(static_cast<int>(scatterDim));
+        }
 
-        // StableHLO updates may have extra index dims beyond the window dims.
-        // Squeeze out non-window dims to get the right shape for slice_update.
         auto updateWindowDims = dimNumbers.getUpdateWindowDims();
-        auto updateVal = updates;
-        if (static_cast<int>(updateWindowDims.size()) < updateVal.ndim()) {
-            std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
-            std::vector<int> squeezeDims;
-            for (int d = 0; d < updateVal.ndim(); ++d) {
-                if (windowDimSet.count(d) == 0) {
-                    if (updateVal.shape(d) != 1) {
-                        MPS_LOG_ERROR(
-                            "stablehlo.scatter: non-window dim %d has size %d "
-                            "(expected 1) in multi-dim slice_update path\n",
-                            d, updateVal.shape(d));
-                        return false;
+
+        // Helper: extract per-axis start array for a single batch position
+        auto extractStartArr = [&](int batchIdx) -> mlx::core::array {
+            std::vector<mlx::core::array> perAxisIdx;
+            for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
+                mlx::core::Shape starts(indices.ndim(), 0);
+                mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
+                starts[indexVectorDim] = static_cast<int>(i);
+                stops[indexVectorDim] = static_cast<int>(i) + 1;
+                // Set batch dim to select the specific batch position
+                if (!singleUpdate) {
+                    // For simplicity, flatten batch dims: use linear index
+                    int remaining = batchIdx;
+                    for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
+                        int dim = batchDims[bd];
+                        starts[dim] = remaining % indices.shape(dim);
+                        stops[dim] = starts[dim] + 1;
+                        remaining /= indices.shape(dim);
                     }
+                }
+                auto axisIdx = mlx::core::squeeze(
+                    mlx::core::slice(indices, starts, stops),
+                    singleUpdate ? std::vector<int>{indexVectorDim} : [&]() {
+                        std::vector<int> sq;
+                        sq.push_back(indexVectorDim);
+                        for (int bd : batchDims)
+                            sq.push_back(bd);
+                        return sq;
+                    }());
+                if (axisIdx.dtype() != mlx::core::int32) {
+                    axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
+                }
+                perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
+            }
+            return mlx::core::concatenate(perAxisIdx, 0);
+        };
+
+        // Helper: extract update for a single batch position
+        auto extractUpdate = [&](int batchIdx) -> mlx::core::array {
+            auto updateVal = updates;
+            if (singleUpdate) {
+                // Squeeze out non-window dims
+                if (static_cast<int>(updateWindowDims.size()) < updateVal.ndim()) {
+                    std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+                    std::vector<int> squeezeDims;
+                    for (int d = 0; d < updateVal.ndim(); ++d) {
+                        if (windowDimSet.count(d) == 0) {
+                            squeezeDims.push_back(d);
+                        }
+                    }
+                    if (!squeezeDims.empty()) {
+                        updateVal = mlx::core::squeeze(updateVal, squeezeDims);
+                    }
+                }
+            } else {
+                // Slice out the batch position from updates
+                // Updates shape: [batch_dims..., window_dims...]
+                int numBatchDims = static_cast<int>(updateVal.ndim() - updateWindowDims.size());
+                mlx::core::Shape starts(updateVal.ndim(), 0);
+                mlx::core::Shape stops(updateVal.shape().begin(), updateVal.shape().end());
+                int remaining = batchIdx;
+                for (int bd = numBatchDims - 1; bd >= 0; --bd) {
+                    starts[bd] = remaining % updateVal.shape(bd);
+                    stops[bd] = starts[bd] + 1;
+                    remaining /= updateVal.shape(bd);
+                }
+                updateVal = mlx::core::slice(updateVal, starts, stops);
+                // Squeeze batch dims
+                std::vector<int> squeezeDims;
+                squeezeDims.reserve(numBatchDims);
+                for (int d = 0; d < numBatchDims; ++d) {
                     squeezeDims.push_back(d);
                 }
-            }
-            if (!squeezeDims.empty()) {
-                updateVal = mlx::core::squeeze(updateVal, squeezeDims);
-            }
-        }
-
-        mlx::core::array result = operand;
-        switch (scatterType) {
-            case ScatterType::Update:
-                result = mlx::core::slice_update(operand, updateVal, startArr, axes);
-                break;
-            case ScatterType::Add: {
-                mlx::core::Shape sliceSizes(operand.shape());
-                for (int axis : axes) {
-                    sliceSizes[axis] = updateVal.shape(axis);
+                if (!squeezeDims.empty()) {
+                    updateVal = mlx::core::squeeze(updateVal, squeezeDims);
                 }
-                auto current = mlx::core::slice(operand, startArr, axes, sliceSizes);
-                result = mlx::core::slice_update(operand, mlx::core::add(current, updateVal),
-                                                 startArr, axes);
-                break;
             }
-            default:
-                MPS_LOG_ERROR(
-                    "stablehlo.scatter: unsupported scatter update type "
-                    "for multi-dim slice update\n");
-                return false;
+            return updateVal;
+        };
+
+        // Apply slice updates: loop for multi-batch, single call for single batch.
+        int numPositions = singleUpdate ? 1 : batchSize;
+        mlx::core::array result = operand;
+        for (int b = 0; b < numPositions; ++b) {
+            auto startArr = extractStartArr(b);
+            auto updateVal = extractUpdate(b);
+
+            switch (scatterType) {
+                case ScatterType::Update:
+                    result = mlx::core::slice_update(result, updateVal, startArr, axes);
+                    break;
+                case ScatterType::Add: {
+                    mlx::core::Shape sliceSizes(operand.shape());
+                    for (int axis : axes) {
+                        sliceSizes[axis] = updateVal.shape(axis);
+                    }
+                    auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
+                    result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
+                                                     startArr, axes);
+                    break;
+                }
+                default:
+                    MPS_LOG_ERROR(
+                        "stablehlo.scatter: unsupported scatter update type "
+                        "for multi-dim slice update\n");
+                    return false;
+            }
         }
 
         values.emplace(ToKey(op->getResult(0)), std::move(result));

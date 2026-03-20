@@ -365,6 +365,23 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (2, 3, 3)),
                 name="multi_dim_gather_no_collapse",
             ),
+            # Multi-dim gather with no collapsed dims and multiple batch positions.
+            # Same as multi_dim_gather_no_collapse but with 3 batch positions
+            # instead of 1, triggering the multi-batch code path (issue #102).
+            OperationTestConfig(
+                lambda x: lax.gather(
+                    x,
+                    jnp.array([[0, 1], [1, 2], [0, 0]]),
+                    dimension_numbers=lax.GatherDimensionNumbers(
+                        offset_dims=(1, 2, 3),
+                        collapsed_slice_dims=(),
+                        start_index_map=(1, 2),
+                    ),
+                    slice_sizes=(2, 1, 1),
+                ),
+                lambda key: random.normal(key, (2, 3, 3)),
+                name="multi_dim_gather_no_collapse_batched",
+            ),
             # Batched gather with offset dims: per-batch column permutation.
             # operand_batching_dims=[0], start_index_map=[1] with offset_dims
             # that require proper index expansion (not just trailing 1s).
