@@ -3618,6 +3618,8 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
                         break;
                     case ScatterType::Add: {
+                        // updateVal has operand-rank shape (insertedWindowDims is always empty
+                        // on this path), so indexing by operand axis is valid.
                         mlx::core::Shape sliceSizes(operand.shape());
                         for (int axis : axes) {
                             sliceSizes[axis] = updateVal.shape(axis);
@@ -3740,8 +3742,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     }
 
     // ===== General point scatter path =====
-    // All scatter axes are in insertedWindowDims (point scatter).
-    // This handles simple 1D, multi-dim, and batched patterns uniformly.
+    // All scatter axes are point-like: either in insertedWindowDims or in
+    // dims with window extent 1 (no window scatter). This handles simple 1D,
+    // multi-dim, and batched patterns uniformly.
 
     // Determine if index_vector_dim is a real dimension in scatter_indices
     bool hasIdxVecDim = indexVectorDim < scatterIndices.ndim();
