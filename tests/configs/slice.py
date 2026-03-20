@@ -311,6 +311,28 @@ def make_slice_op_configs():
                 lambda key: jnp.zeros((5, 4), dtype=jnp.float32),
                 name="window_scatter_slice_set_2d",
             ),
+            # Batched window scatter: vmap over slice set.
+            # Exercises the single-axis window scatter path with inputBatchingDims.
+            OperationTestConfig(
+                lambda x, y: jax.vmap(lambda a, b: a.at[1:3].set(b))(x, y),
+                lambda key: jnp.zeros((4, 5), dtype=jnp.float32),
+                lambda key: random.normal(key, (4, 2)),
+                name="batched_window_scatter_set",
+            ),
+            # Batched window scatter with add mode.
+            OperationTestConfig(
+                lambda x, y: jax.vmap(lambda a, b: a.at[1:3].add(b))(x, y),
+                lambda key: random.normal(key, (3, 6)),
+                lambda key: random.normal(key, (3, 2)),
+                name="batched_window_scatter_add",
+            ),
+            # Window scatter gradient: backward pass of a slice gather creates
+            # a scatter with non-inserted scatter dim and window size 1.
+            OperationTestConfig(
+                lambda x: x.at[1:3].set(jnp.ones((2, 4))),
+                lambda key: random.normal(key, (5, 4)),
+                name="window_scatter_slice_set_2d_grad",
+            ),
             # Partial-index gather with non-sorted startIndexMap.
             # start_index_map=(2, 0) means idx[0]->dim2, idx[1]->dim0.
             # Strides must follow sorted collapsed-dim order, not startIndexMap order.
