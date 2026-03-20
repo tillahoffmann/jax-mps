@@ -413,4 +413,26 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (2, 1, 1)),
                 name="multi_dim_scatter_slice_add",
             ),
+            # Gradient of dynamic_update_slice along a single axis with
+            # slice_size > 1. The backward pass generates a gather with
+            # start_index_map=[axis], no collapsed dims, and
+            # slice_sizes[axis] > 1 — a dynamic sub-tensor slice, not a
+            # point gather (issue #104).
+            OperationTestConfig(
+                lambda x, u: lax.dynamic_update_slice(x, u, (0, 0)),
+                lambda key: random.normal(key, (10, 4)),
+                lambda key: random.normal(key, (3, 4)),
+                name="dynamic_update_slice_single_axis_wide",
+            ),
+            # Scatter-add with non-contiguous update_window_dims.
+            # Gradient of x[:, idx] where idx is a dynamic index array
+            # produces a scatter with update_window_dims=[0,2,...] (gap at
+            # the scatter axis). The reshape must use the actual
+            # update_window_dim positions, not sequential indexing (issue #104).
+            OperationTestConfig(
+                lambda x, idx: (x[:, idx] * jnp.arange(1, 4, dtype=jnp.float32)).sum(),
+                lambda key: random.normal(key, (4, 8, 3)),
+                lambda key: random.randint(key, (4,), 0, 8),
+                name="gather_non_contiguous_window_dims_grad",
+            ),
         ]

@@ -267,6 +267,26 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     }
     size_t expectedSize = numElements * elemSize;
 
+    // MLIR stores i1 (boolean) data as bit-packed: 1 bit per element.
+    // MLX expects 1 byte per bool, so we must unpack before creating the array.
+    if (mlxDtype == mlx::core::bool_) {
+        size_t expectedBitPackedSize = (numElements + 7) / 8;
+        if (rawData.size() < expectedBitPackedSize) {
+            MPS_LOG_ERROR(
+                "Boolean constant data size mismatch: got %zu bytes, expected %zu (bit-packed for "
+                "%zu elements)\n",
+                rawData.size(), expectedBitPackedSize, numElements);
+            return std::nullopt;
+        }
+        std::vector<uint8_t> unpacked(numElements);
+        const uint8_t* bits = reinterpret_cast<const uint8_t*>(rawData.data());
+        for (size_t i = 0; i < numElements; ++i) {
+            unpacked[i] = (bits[i / 8] >> (i % 8)) & 1;
+        }
+        auto arr = mlx::core::array(unpacked.data(), shape, mlx::core::uint8);
+        return mlx::core::astype(arr, mlx::core::bool_);
+    }
+
     if (rawData.size() < expectedSize) {
         MPS_LOG_ERROR("Constant data size mismatch: got %zu bytes, expected %zu\n", rawData.size(),
                       expectedSize);
@@ -988,7 +1008,34 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             indices = mlx::core::astype(indices, mlx::core::int32);
         }
 
+        // Check if this is a dynamic slice (slice_sizes > 1 on the gather dim)
+        // rather than a point gather.
+        auto sliceSizesAttr = gatherOp.getSliceSizes();
+        int gatherSliceSize = static_cast<int>(sliceSizesAttr[gatherDim]);
+        bool isDynamicSlice = !collapsed && gatherSliceSize > 1;
+
         mlx::core::array result = [&]() {
+            if (isDynamicSlice) {
+                // Dynamic slice: extract a contiguous sub-tensor along gatherDim.
+                // Use mlx::core::gather with slice_sizes for correct sub-tensor extraction.
+                mlx::core::Shape mlxSliceSizes;
+                for (auto s : sliceSizesAttr) {
+                    mlxSliceSizes.push_back(static_cast<int>(s));
+                }
+                auto idx = indices;
+                if (indexVectorDim < static_cast<int>(startIndices.shape().size()) &&
+                    startIndices.shape(indexVectorDim) == 1) {
+                    idx = mlx::core::squeeze(startIndices, {indexVectorDim});
+                }
+                if (idx.dtype() != mlx::core::int32) {
+                    idx = mlx::core::astype(idx, mlx::core::int32);
+                }
+                int maxStart = operand.shape(gatherDim) - gatherSliceSize;
+                auto clamped =
+                    mlx::core::clip(idx, mlx::core::array(0, mlx::core::int32),
+                                    mlx::core::array(std::max(0, maxStart), mlx::core::int32));
+                return mlx::core::gather(operand, {clamped}, {gatherDim}, mlxSliceSizes);
+            }
             if (!operandBatchingDims.empty()) {
                 // Batched gather: use take_along_axis.
                 // Build indices shape to match operand ndim, placing the index
@@ -3729,14 +3776,19 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     newShape.push_back(1);
                 }
             } else {
-                int windowIdx = static_cast<int>(updateWindowDims[0]);
+                // Map each non-inserted operand dim to the corresponding
+                // update_window_dim entry. update_window_dims may be
+                // non-contiguous (e.g. [0, 2, 3, 4] when dim 1 is the
+                // scatter/index dim in the updates tensor).
+                int winCount = 0;
                 for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim());
                      ++operandDim) {
                     if (operandDim == insertedDim) {
                         newShape.push_back(1);
                     } else {
-                        newShape.push_back(updShape[windowIdx]);
-                        ++windowIdx;
+                        int updateDim = static_cast<int>(updateWindowDims[winCount]);
+                        newShape.push_back(updShape[updateDim]);
+                        ++winCount;
                     }
                 }
             }
