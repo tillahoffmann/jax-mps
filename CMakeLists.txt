@@ -126,6 +126,14 @@ set(PJRT_SOURCES
     src/pjrt_plugin/mlx_device.cc
     src/pjrt_plugin/mlx_buffer.cc
     src/pjrt_plugin/mlx_executable.cc
+    src/pjrt_plugin/ops/arithmetic.cc
+    src/pjrt_plugin/ops/shape.cc
+    src/pjrt_plugin/ops/slice.cc
+    src/pjrt_plugin/ops/gather_scatter.cc
+    src/pjrt_plugin/ops/reduction.cc
+    src/pjrt_plugin/ops/linalg.cc
+    src/pjrt_plugin/ops/control_flow.cc
+    src/pjrt_plugin/ops/sort_fft_complex.cc
     ${PROTO_SRCS}
 )
 

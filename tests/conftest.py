@@ -72,12 +72,16 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         "stablehlo.erf",
     }
 
-    # Discover ops from the dispatch table in mlx_executable.cc
-    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)",\s*Handle')
-    executable_file = pjrt_dir / "mlx_executable.cc"
-    assert executable_file.is_file()
-    with executable_file.open() as fp:
-        op_names = set(dispatch_pattern.findall(fp.read()))
+    # Discover ops from the dispatch table in mlx_executable.cc and ops/*.cc
+    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)",\s*(?:Handle|Make)')
+    op_names: set[str] = set()
+    cc_files = [pjrt_dir / "mlx_executable.cc"] + sorted(
+        (pjrt_dir / "ops").glob("*.cc")
+    )
+    assert (pjrt_dir / "mlx_executable.cc").is_file()
+    for cc_file in cc_files:
+        with cc_file.open() as fp:
+            op_names.update(dispatch_pattern.findall(fp.read()))
 
     assert op_names, "Failed to discover any ops."
     exercised = exercised_ops - mlir_lowered_ops
