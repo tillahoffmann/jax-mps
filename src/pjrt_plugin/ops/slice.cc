@@ -1,5 +1,7 @@
 // Slice, dynamic slice, pad op handlers.
 
+#include <algorithm>
+
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 

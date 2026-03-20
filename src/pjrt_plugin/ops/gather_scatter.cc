@@ -1,5 +1,6 @@
 // Gather and scatter op handlers.
 
+#include <algorithm>
 #include <set>
 
 #include "pjrt_plugin/ops/handler_utils.h"

@@ -1,6 +1,7 @@
 // Reduction op handlers (reduce, reduce_window, select_and_scatter).
 
 #include <limits>
+#include <tuple>
 
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"

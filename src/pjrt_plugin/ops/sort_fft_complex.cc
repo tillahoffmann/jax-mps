@@ -2,6 +2,8 @@
 
 #include <mlx/fft.h>
 
+#include <complex>
+
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
