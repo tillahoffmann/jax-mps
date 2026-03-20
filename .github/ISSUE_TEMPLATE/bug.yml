@@ -1,0 +1,31 @@
+name: Bug report
+description: Report incorrect behavior or a crash with a reproducible example.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! To help us fix it quickly, please provide a **minimal code snippet** that reproduces the issue.
+  - type: textarea
+    id: code-snippet
+    attributes:
+      label: Code to reproduce
+      description: A minimal, self-contained code snippet that reproduces the bug. Remove any dependencies on local data or private code.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected vs actual behavior
+      description: What did you expect to happen, and what happened instead? Include any error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: version-info
+    attributes:
+      label: Version and runtime information
+      description: "Paste the output of: `python -m jax_plugins.mps.sysinfo`. If the command is not available, please upgrade first: `pip install -U jax-mps`."
+      render: text
+    validations:
+      required: true
