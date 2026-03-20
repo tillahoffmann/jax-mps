@@ -1008,7 +1008,34 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
             indices = mlx::core::astype(indices, mlx::core::int32);
         }
 
+        // Check if this is a dynamic slice (slice_sizes > 1 on the gather dim)
+        // rather than a point gather.
+        auto sliceSizesAttr = gatherOp.getSliceSizes();
+        int gatherSliceSize = static_cast<int>(sliceSizesAttr[gatherDim]);
+        bool isDynamicSlice = !collapsed && gatherSliceSize > 1;
+
         mlx::core::array result = [&]() {
+            if (isDynamicSlice) {
+                // Dynamic slice: extract a contiguous sub-tensor along gatherDim.
+                // Use mlx::core::gather with slice_sizes for correct sub-tensor extraction.
+                mlx::core::Shape mlxSliceSizes;
+                for (auto s : sliceSizesAttr) {
+                    mlxSliceSizes.push_back(static_cast<int>(s));
+                }
+                auto idx = indices;
+                if (indexVectorDim < static_cast<int>(startIndices.shape().size()) &&
+                    startIndices.shape(indexVectorDim) == 1) {
+                    idx = mlx::core::squeeze(startIndices, {indexVectorDim});
+                }
+                if (idx.dtype() != mlx::core::int32) {
+                    idx = mlx::core::astype(idx, mlx::core::int32);
+                }
+                int maxStart = operand.shape(gatherDim) - gatherSliceSize;
+                auto clamped =
+                    mlx::core::clip(idx, mlx::core::array(0, mlx::core::int32),
+                                    mlx::core::array(std::max(0, maxStart), mlx::core::int32));
+                return mlx::core::gather(operand, {clamped}, {gatherDim}, mlxSliceSizes);
+            }
             if (!operandBatchingDims.empty()) {
                 // Batched gather: use take_along_axis.
                 // Build indices shape to match operand ndim, placing the index
