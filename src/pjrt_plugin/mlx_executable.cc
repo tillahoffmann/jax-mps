@@ -975,280 +975,140 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     auto& operand = operand_opt->get();
     auto& startIndices = indices_opt->get();
 
-    auto dimNumbers = gatherOp.getDimensionNumbers();
-    auto collapsedSliceDims = dimNumbers.getCollapsedSliceDims();
-    auto startIndexMap = dimNumbers.getStartIndexMap();
-    auto indexVectorDim = static_cast<int>(dimNumbers.getIndexVectorDim());
-    auto operandBatchingDims = dimNumbers.getOperandBatchingDims();
+    auto dn = gatherOp.getDimensionNumbers();
+    auto offsetDims = dn.getOffsetDims();
+    auto collapsedSliceDims = dn.getCollapsedSliceDims();
+    auto startIndexMap = dn.getStartIndexMap();
+    int indexVectorDim = static_cast<int>(dn.getIndexVectorDim());
+    auto operandBatchingDims = dn.getOperandBatchingDims();
+    auto startIndicesBatchingDims = dn.getStartIndicesBatchingDims();
 
-    // Simple case: single index dimension, optionally collapsed
-    // This handles patterns like: gather(data, indices) -> data[indices]
-    // When collapsedSliceDims is non-empty, the gathered dim is removed from output.
-    // When collapsedSliceDims is empty, the gathered dim is kept (as a slice dim).
-    if (startIndexMap.size() == 1 &&
-        (collapsedSliceDims.empty() ||
-         (collapsedSliceDims.size() == 1 &&
-          static_cast<int64_t>(startIndexMap[0]) == static_cast<int64_t>(collapsedSliceDims[0])))) {
-        int gatherDim = static_cast<int>(startIndexMap[0]);
-        bool collapsed = !collapsedSliceDims.empty();
-
-        // Extract the index vector
-        auto indices = startIndices;
-        if (indexVectorDim < static_cast<int>(startIndices.shape().size())) {
-            // Index vector dim exists - squeeze it if it's size 1 and the dim is collapsed
-            // When not collapsed, keep the index vector dim so take_along_axis
-            // produces the right output shape (with the slice dimension).
-            if (collapsed && startIndices.shape(indexVectorDim) == 1) {
-                indices = mlx::core::squeeze(startIndices, {indexVectorDim});
-            }
-        }
-
-        // Ensure indices are int32
-        if (indices.dtype() != mlx::core::int32) {
-            indices = mlx::core::astype(indices, mlx::core::int32);
-        }
-
-        // Check if this is a dynamic slice (slice_sizes > 1 on the gather dim)
-        // rather than a point gather.
-        auto sliceSizesAttr = gatherOp.getSliceSizes();
-        int gatherSliceSize = static_cast<int>(sliceSizesAttr[gatherDim]);
-        bool isDynamicSlice = !collapsed && gatherSliceSize > 1;
-
-        mlx::core::array result = [&]() {
-            if (isDynamicSlice) {
-                // Dynamic slice: extract a contiguous sub-tensor along gatherDim.
-                // Use mlx::core::gather with slice_sizes for correct sub-tensor extraction.
-                mlx::core::Shape mlxSliceSizes;
-                for (auto s : sliceSizesAttr) {
-                    mlxSliceSizes.push_back(static_cast<int>(s));
-                }
-                auto idx = indices;
-                if (indexVectorDim < static_cast<int>(startIndices.shape().size()) &&
-                    startIndices.shape(indexVectorDim) == 1) {
-                    idx = mlx::core::squeeze(startIndices, {indexVectorDim});
-                }
-                if (idx.dtype() != mlx::core::int32) {
-                    idx = mlx::core::astype(idx, mlx::core::int32);
-                }
-                int maxStart = operand.shape(gatherDim) - gatherSliceSize;
-                auto clamped =
-                    mlx::core::clip(idx, mlx::core::array(0, mlx::core::int32),
-                                    mlx::core::array(std::max(0, maxStart), mlx::core::int32));
-                return mlx::core::gather(operand, {clamped}, {gatherDim}, mlxSliceSizes);
-            }
-            if (!operandBatchingDims.empty()) {
-                // Batched gather: use take_along_axis.
-                // Build indices shape to match operand ndim, placing the index
-                // positions at gatherDim and inserting size-1 for offset dims.
-                auto batchedIndices = indices;
-                int batchCount = static_cast<int>(operandBatchingDims.size());
-
-                if (batchedIndices.ndim() < operand.ndim()) {
-                    // Place index positions at gatherDim, with size-1 for offset dims.
-                    // This ensures take_along_axis selects along the correct axis and
-                    // broadcasts properly across offset dims.
-                    mlx::core::Shape expandedShape;
-                    int idxDimUsed = 0;
-                    for (int d = 0; d < operand.ndim(); ++d) {
-                        if (d < batchCount) {
-                            expandedShape.push_back(batchedIndices.shape(idxDimUsed++));
-                        } else if (d == gatherDim) {
-                            expandedShape.push_back(idxDimUsed < batchedIndices.ndim()
-                                                        ? batchedIndices.shape(idxDimUsed++)
-                                                        : 1);
-                        } else {
-                            expandedShape.push_back(1);
-                        }
-                    }
-                    batchedIndices = mlx::core::reshape(batchedIndices, expandedShape);
-                }
-                return mlx::core::take_along_axis(operand, batchedIndices, gatherDim);
-            }
-            return mlx::core::take(operand, indices, gatherDim);
-        }();
-
-        // Check if we need to rearrange dimensions to match the expected output layout
-        auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-        if (resultType) {
-            auto expectedShape = GetShape(resultType);
-            auto actualShape = result.shape();
-            if (actualShape != expectedShape) {
-                result = mlx::core::reshape(result, expectedShape);
-            }
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
+    // Build slice_sizes
+    mlx::core::Shape sliceSizes;
+    for (auto s : gatherOp.getSliceSizes()) {
+        sliceSizes.push_back(static_cast<int>(s));
     }
 
-    // Multi-dim gather: multiple start_index_map dims packed into an index vector.
-    // Handles both collapsed and non-collapsed patterns.
-    // Requires indexVectorDim < indices rank and the vector is large enough.
-    if (startIndexMap.size() > 1 &&
-        indexVectorDim < static_cast<int>(startIndices.shape().size()) &&
-        static_cast<size_t>(startIndices.shape(indexVectorDim)) >= startIndexMap.size()) {
-        auto indices = startIndices;
-        auto idxShape = indices.shape();
+    // Determine if index_vector_dim is a real dimension in start_indices
+    bool hasIdxVecDim = indexVectorDim < startIndices.ndim();
 
-        // Build per-axis index arrays and extract from index_vector_dim
-        std::vector<mlx::core::array> idxVec;
-        std::vector<int> axes;
-        for (size_t i = 0; i < startIndexMap.size(); ++i) {
-            int axis = static_cast<int>(startIndexMap[i]);
-            axes.push_back(axis);
+    // Compute index batch shape: start_indices shape with index_vector_dim removed
+    mlx::core::Shape idxBatchShape;
+    for (int d = 0; d < startIndices.ndim(); ++d) {
+        if (!hasIdxVecDim || d != indexVectorDim) {
+            idxBatchShape.push_back(startIndices.shape(d));
+        }
+    }
 
-            mlx::core::Shape starts(indices.ndim(), 0);
-            mlx::core::Shape stops(idxShape.begin(), idxShape.end());
+    // Step 1: Extract per-axis index arrays from start_indices
+    std::vector<mlx::core::array> idxVec;
+    std::vector<int> axes;
+
+    for (size_t i = 0; i < startIndexMap.size(); ++i) {
+        int axis = static_cast<int>(startIndexMap[i]);
+        axes.push_back(axis);
+
+        mlx::core::array axisIdx = startIndices;
+        if (hasIdxVecDim) {
+            // Slice component i from index_vector_dim, then squeeze that dim
+            mlx::core::Shape starts(startIndices.ndim(), 0);
+            mlx::core::Shape stops(startIndices.shape().begin(), startIndices.shape().end());
             starts[indexVectorDim] = static_cast<int>(i);
             stops[indexVectorDim] = static_cast<int>(i) + 1;
-            auto axisIndices =
-                mlx::core::squeeze(mlx::core::slice(indices, starts, stops), {indexVectorDim});
-            if (axisIndices.dtype() != mlx::core::int32) {
-                axisIndices = mlx::core::astype(axisIndices, mlx::core::int32);
-            }
-            // Clamp to valid range
-            axisIndices =
-                mlx::core::clip(axisIndices, mlx::core::array(0, mlx::core::int32),
-                                mlx::core::array(operand.shape(axis) - 1, mlx::core::int32));
-            idxVec.push_back(axisIndices);
+            axisIdx =
+                mlx::core::squeeze(mlx::core::slice(startIndices, starts, stops), {indexVectorDim});
         }
 
-        // Identify which operand dims are offset dims (not collapsed)
-        std::set<int> collapsedSet(collapsedSliceDims.begin(), collapsedSliceDims.end());
-        std::vector<int> offsetOperandDims;
-        for (int d = 0; d < operand.ndim(); ++d) {
-            if (collapsedSet.count(d) == 0) {
-                offsetOperandDims.push_back(d);
-            }
+        if (axisIdx.dtype() != mlx::core::int32) {
+            axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
         }
 
-        mlx::core::array result = operand;
-
-        if (collapsedSet.empty()) {
-            // No collapsed dims: use MLX gather for multi-axis sub-tensor slicing.
-            // This handles both single and multiple batch positions.
-            auto sliceSizesAttr = gatherOp.getSliceSizes();
-            mlx::core::Shape mlxSliceSizes;
-            for (auto s : sliceSizesAttr) {
-                mlxSliceSizes.push_back(static_cast<int>(s));
-            }
-
-            // Re-clamp indices for gather: valid start is [0, shape - slice_size].
-            std::vector<mlx::core::array> clampedIdx;
-            clampedIdx.reserve(idxVec.size());
-            for (size_t i = 0; i < idxVec.size(); ++i) {
-                int axis = axes[i];
-                int maxStart = operand.shape(axis) - mlxSliceSizes[axis];
-                auto clamped =
-                    mlx::core::clip(idxVec[i], mlx::core::array(0, mlx::core::int32),
-                                    mlx::core::array(std::max(0, maxStart), mlx::core::int32));
-                clampedIdx.push_back(clamped);
-            }
-
-            result = mlx::core::gather(operand, clampedIdx, axes, mlxSliceSizes);
-        } else if (offsetOperandDims.empty()) {
-            // Full-index gather: all dims collapsed, flatten and use linear indices
-            auto flatOperand = mlx::core::flatten(operand);
-            auto linearIdx = mlx::core::array(0, mlx::core::int32);
-            for (size_t i = 0; i < axes.size(); ++i) {
-                int stride = 1;
-                for (int d = axes[i] + 1; d < operand.ndim(); ++d) {
-                    stride *= operand.shape(d);
-                }
-                linearIdx = mlx::core::add(
-                    linearIdx,
-                    mlx::core::multiply(idxVec[i], mlx::core::array(stride, mlx::core::int32)));
-            }
-            result = mlx::core::take(flatOperand, linearIdx, 0);
-        } else {
-            // Partial-index gather: some dims are offset (preserved), rest are collapsed.
-            // Transpose operand to put offset dims first, collapsed dims last,
-            // flatten the collapsed dims, compute linear indices, then use take_along_axis.
-            std::vector<int> perm;
-            perm.reserve(operand.ndim());
-            for (int d : offsetOperandDims) {
-                perm.push_back(d);
-            }
-            for (int d = 0; d < operand.ndim(); ++d) {
-                if (collapsedSet.count(d) != 0) {
-                    perm.push_back(d);
-                }
-            }
-
-            bool needsPerm = false;
-            for (int i = 0; i < static_cast<int>(perm.size()); ++i) {
-                if (perm[i] != i) {
-                    needsPerm = true;
-                    break;
-                }
-            }
-            auto permuted = needsPerm ? mlx::core::transpose(operand, perm) : operand;
-
-            // Flatten collapsed dims into a single dim
-            int numOffset = static_cast<int>(offsetOperandDims.size());
-            mlx::core::Shape flatShape;
-            for (int i = 0; i < numOffset; ++i) {
-                flatShape.push_back(permuted.shape(i));
-            }
-            int flattenedSize = 1;
-            for (int i = numOffset; i < permuted.ndim(); ++i) {
-                flattenedSize *= permuted.shape(i);
-            }
-            flatShape.push_back(flattenedSize);
-            auto flatOperand = mlx::core::reshape(permuted, flatShape);
-
-            // Compute linear indices within the collapsed dims.
-            // Collapsed dims are flattened in sorted operand-dim order, so compute
-            // strides based on that order rather than startIndexMap order.
-            std::vector<int> collapsedDimsSorted(collapsedSet.begin(), collapsedSet.end());
-            std::sort(collapsedDimsSorted.begin(), collapsedDimsSorted.end());
-            std::map<int, int> strideMap;
-            int s = 1;
-            for (int i = static_cast<int>(collapsedDimsSorted.size()) - 1; i >= 0; --i) {
-                strideMap[collapsedDimsSorted[i]] = s;
-                s *= operand.shape(collapsedDimsSorted[i]);
-            }
-            auto linearIdx = mlx::core::array(0, mlx::core::int32);
-            for (size_t i = 0; i < axes.size(); ++i) {
-                linearIdx = mlx::core::add(
-                    linearIdx, mlx::core::multiply(idxVec[i], mlx::core::array(strideMap[axes[i]],
-                                                                               mlx::core::int32)));
-            }
-
-            // Expand linearIdx to have ndim == flatOperand.ndim() for take_along_axis.
-            // Prepend numOffset singleton dims (offset axes) and append any missing
-            // trailing dims so the total rank matches flatOperand exactly.
-            mlx::core::Shape expandedShape(numOffset, 1);
-            auto idxBatchShape = linearIdx.shape();
-            for (int d : idxBatchShape) {
-                expandedShape.push_back(d);
-            }
-            while (static_cast<int>(expandedShape.size()) < flatOperand.ndim()) {
-                expandedShape.push_back(1);
-            }
-            linearIdx = mlx::core::reshape(linearIdx, expandedShape);
-
-            result = mlx::core::take_along_axis(flatOperand, linearIdx, numOffset);
-        }
-
-        // Reshape to expected output shape
-        auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-        if (resultType) {
-            auto expectedShape = GetShape(resultType);
-            if (result.shape() != expectedShape) {
-                result = mlx::core::reshape(result, expectedShape);
-            }
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
+        // Clamp to valid range [0, shape[axis] - slice_sizes[axis]]
+        int maxStart = operand.shape(axis) - sliceSizes[axis];
+        axisIdx = mlx::core::clip(axisIdx, mlx::core::array(0, mlx::core::int32),
+                                  mlx::core::array(std::max(0, maxStart), mlx::core::int32));
+        idxVec.push_back(axisIdx);
     }
 
-    MPS_LOG_ERROR(
-        "stablehlo.gather: unsupported gather pattern (indexVectorDim=%d, "
-        "startIndexMap.size=%zu, collapsedSliceDims.size=%zu)\n",
-        indexVectorDim, startIndexMap.size(), collapsedSliceDims.size());
-    return false;
+    // Step 2: Add iota indices for operand_batching_dims
+    for (size_t i = 0; i < operandBatchingDims.size(); ++i) {
+        int operandAxis = static_cast<int>(operandBatchingDims[i]);
+        int idxBatchDim = static_cast<int>(startIndicesBatchingDims[i]);
+        // Adjust for the squeezed index_vector_dim
+        if (hasIdxVecDim && idxBatchDim > indexVectorDim) {
+            --idxBatchDim;
+        }
+
+        axes.push_back(operandAxis);
+
+        int batchSize = operand.shape(operandAxis);
+        mlx::core::Shape iotaShape(idxBatchShape.size(), 1);
+        iotaShape[idxBatchDim] = batchSize;
+        auto iota = mlx::core::reshape(mlx::core::arange(batchSize, mlx::core::int32), iotaShape);
+        iota = mlx::core::broadcast_to(iota, idxBatchShape);
+        idxVec.push_back(iota);
+    }
+
+    // Step 3: Call mlx::core::gather
+    // Output shape: [*idxBatchShape, *sliceSizes]
+    auto result = mlx::core::gather(operand, idxVec, axes, sliceSizes);
+
+    // Step 4: Squeeze collapsed_slice_dims and operand_batching_dims
+    // These are in the operand-dims portion of the result, offset by len(idxBatchShape)
+    int idxNdim = static_cast<int>(idxBatchShape.size());
+    std::vector<int> squeezeDims;
+    for (auto d : collapsedSliceDims) {
+        squeezeDims.push_back(idxNdim + static_cast<int>(d));
+    }
+    for (auto d : operandBatchingDims) {
+        squeezeDims.push_back(idxNdim + static_cast<int>(d));
+    }
+    std::sort(squeezeDims.begin(), squeezeDims.end());
+    if (!squeezeDims.empty()) {
+        result = mlx::core::squeeze(result, squeezeDims);
+    }
+
+    // Step 5: Transpose to place offset_dims at their specified positions
+    // After squeeze, layout is [batch_dims..., offset_dims...].
+    // The offsetDims attribute specifies where each offset dim should appear in the result.
+    int resultRank = static_cast<int>(result.ndim());
+    int numOffset = static_cast<int>(offsetDims.size());
+    int numBatch = resultRank - numOffset;
+
+    std::set<int> offsetDimSet(offsetDims.begin(), offsetDims.end());
+    std::vector<int> perm;
+    int batchIdx = 0;
+    int offsetIdx = 0;
+    for (int p = 0; p < resultRank; ++p) {
+        if (offsetDimSet.count(p)) {
+            perm.push_back(numBatch + offsetIdx++);
+        } else {
+            perm.push_back(batchIdx++);
+        }
+    }
+
+    bool needsTranspose = false;
+    for (int i = 0; i < resultRank; ++i) {
+        if (perm[i] != i) {
+            needsTranspose = true;
+            break;
+        }
+    }
+    if (needsTranspose) {
+        result = mlx::core::transpose(result, perm);
+    }
+
+    // Step 6: Safety reshape to expected output shape
+    auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (resultType) {
+        auto expectedShape = GetShape(resultType);
+        if (result.shape() != expectedShape) {
+            result = mlx::core::reshape(result, expectedShape);
+        }
+    }
+
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
 }
 
 // Handler for stablehlo.constant
@@ -3553,6 +3413,29 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 }
 
 // Handler for stablehlo.scatter
+// Helper: apply the appropriate scatter variant based on ScatterType.
+mlx::core::array ApplyScatter(ScatterType scatterType, const mlx::core::array& operand,
+                              const std::vector<mlx::core::array>& idxVec,
+                              const mlx::core::array& updates, const std::vector<int>& axes) {
+    switch (scatterType) {
+        case ScatterType::Update:
+            return mlx::core::scatter(operand, idxVec, updates, axes);
+        case ScatterType::Add:
+            return mlx::core::scatter_add(operand, idxVec, updates, axes);
+        case ScatterType::Sub:
+            return mlx::core::scatter_add(operand, idxVec, mlx::core::negative(updates), axes);
+        case ScatterType::Mul:
+            return mlx::core::scatter_prod(operand, idxVec, updates, axes);
+        case ScatterType::Min:
+            return mlx::core::scatter_min(operand, idxVec, updates, axes);
+        case ScatterType::Max:
+            return mlx::core::scatter_max(operand, idxVec, updates, axes);
+        default:
+            MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
+            throw std::runtime_error("stablehlo.scatter: unsupported scatter update type");
+    }
+}
+
 bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                    ExecContext& ctx) {
     auto scatterOp = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op);
@@ -3579,664 +3462,398 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     auto& scatterIndices = indices_opt->get();
     auto& updates = updates_opt->get();
 
-    auto dimNumbers = scatterOp.getScatterDimensionNumbers();
-    auto insertedWindowDims = dimNumbers.getInsertedWindowDims();
-    auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
-    auto indexVectorDim = static_cast<int>(dimNumbers.getIndexVectorDim());
+    auto dn = scatterOp.getScatterDimensionNumbers();
+    auto insertedWindowDims = dn.getInsertedWindowDims();
+    auto scatterDimsToOperandDims = dn.getScatterDimsToOperandDims();
+    int indexVectorDim = static_cast<int>(dn.getIndexVectorDim());
+    auto updateWindowDims = dn.getUpdateWindowDims();
+    auto inputBatchingDims = dn.getInputBatchingDims();
+    auto scatterIndicesBatchingDims = dn.getScatterIndicesBatchingDims();
 
-    // Detect update type
     auto& body = scatterOp.getUpdateComputation();
     auto scatterType = DetectScatterType(body);
 
-    auto inputBatchingDims = dimNumbers.getInputBatchingDims();
-    auto scatterIndicesBatchingDims = dimNumbers.getScatterIndicesBatchingDims();
+    // Determine which operand dims have window extent > 1 (scatter axes NOT in insertedWindowDims).
+    // These require special handling: either index expansion or slice_update.
+    std::set<int> insertedSet(insertedWindowDims.begin(), insertedWindowDims.end());
+    std::set<int> batchingSet(inputBatchingDims.begin(), inputBatchingDims.end());
 
-    // Batched scatter: each batch element scatters independently.
-    // We use multi-axis scatter with iota indices for batch dims.
-    if (!inputBatchingDims.empty()) {
-        // Squeeze index_vector_dim if size 1
-        auto indices = scatterIndices;
-        if (indexVectorDim < static_cast<int>(indices.shape().size()) &&
-            indices.shape(indexVectorDim) == 1) {
-            indices = mlx::core::squeeze(indices, {indexVectorDim});
+    // Compute which operand dims are "window dims" in the updates
+    // (not inserted, not batching) — these map 1:1 to updateWindowDims entries
+    std::vector<int> windowOperandDims;
+    for (int d = 0; d < operand.ndim(); ++d) {
+        if (!insertedSet.count(d) && !batchingSet.count(d)) {
+            windowOperandDims.push_back(d);
         }
-        if (indices.dtype() != mlx::core::int32) {
-            indices = mlx::core::astype(indices, mlx::core::int32);
-        }
-
-        // Build axes and index arrays: scatter dims + batch dims
-        std::vector<int> axes;
-        std::vector<mlx::core::array> idxVec;
-
-        // Add scatter dim indices
-        for (auto dim : scatterDimsToOperandDims) {
-            axes.push_back(static_cast<int>(dim));
-        }
-        idxVec.push_back(indices);
-
-        // Add batch dim iota indices
-        for (size_t i = 0; i < inputBatchingDims.size(); ++i) {
-            int batchAxis = static_cast<int>(inputBatchingDims[i]);
-            axes.push_back(batchAxis);
-
-            // Create iota for this batch dimension, broadcast to indices shape
-            int batchSize = operand.shape(batchAxis);
-            mlx::core::Shape iotaShape(indices.ndim(), 1);
-
-            // Find which dim in indices corresponds to this batch dim
-            int idxBatchDim = static_cast<int>(scatterIndicesBatchingDims[i]);
-            // Adjust for squeezed index_vector_dim
-            if (indexVectorDim < idxBatchDim) {
-                --idxBatchDim;
-            }
-            iotaShape[idxBatchDim] = batchSize;
-
-            auto batchIota = mlx::core::reshape(mlx::core::arange(batchSize), iotaShape);
-            batchIota = mlx::core::broadcast_to(batchIota, indices.shape());
-            idxVec.push_back(batchIota);
-        }
-
-        // Reshape updates: (idx_shape..., operand_shape_with_1_at_covered_dims...)
-        // Covered dims = scatter dims + batch dims + inserted window dims
-        // Updates dims are split into index dims (not in update_window_dims)
-        // and window dims (in update_window_dims).
-        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
-        std::set<int> coveredDims;
-        for (auto d : scatterDimsToOperandDims) {
-            coveredDims.insert(static_cast<int>(d));
-        }
-        for (auto d : inputBatchingDims) {
-            coveredDims.insert(static_cast<int>(d));
-        }
-        for (auto d : insertedWindowDims) {
-            coveredDims.insert(static_cast<int>(d));
-        }
-
-        auto updShape = updates.shape();
-        int updNdim = static_cast<int>(updShape.size());
-        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
-
-        // Separate index dims and window dims, transpose if needed
-        std::vector<int> transposeOrder;
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) == 0) {
-                transposeOrder.push_back(i);
-            }
-        }
-        int numIdxDims = static_cast<int>(transposeOrder.size());
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) != 0) {
-                transposeOrder.push_back(i);
-            }
-        }
-        auto transposedUpdates = updates;
-        bool needsTranspose = false;
-        for (int i = 0; i < updNdim; ++i) {
-            if (transposeOrder[i] != i) {
-                needsTranspose = true;
-                break;
-            }
-        }
-        if (needsTranspose) {
-            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
-        }
-        auto tShape = transposedUpdates.shape();
-
-        // Build final shape: (idx_dims..., operand_dim_0, ...)
-        mlx::core::Shape newShape;
-        for (int i = 0; i < numIdxDims; ++i) {
-            newShape.push_back(tShape[i]);
-        }
-        int windowIdx = 0;
-        for (int dim = 0; dim < static_cast<int>(operand.ndim()); ++dim) {
-            if (coveredDims.count(dim) != 0) {
-                newShape.push_back(1);
-            } else {
-                newShape.push_back(tShape[numIdxDims + windowIdx]);
-                ++windowIdx;
-            }
-        }
-        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
-
-        mlx::core::array result = operand;
-        switch (scatterType) {
-            case ScatterType::Update:
-                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axes);
-                break;
-            case ScatterType::Add:
-                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axes);
-                break;
-            case ScatterType::Sub:
-                result = mlx::core::scatter_add(operand, idxVec,
-                                                mlx::core::negative(reshapedUpdates), axes);
-                break;
-            case ScatterType::Mul:
-                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axes);
-                break;
-            case ScatterType::Min:
-                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axes);
-                break;
-            case ScatterType::Max:
-                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axes);
-                break;
-            default:
-                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type (batched)\n");
-                return false;
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
     }
 
-    // Simple case: 1D scatter with single scatter dim
-    if (scatterDimsToOperandDims.size() == 1 && insertedWindowDims.size() == 1) {
-        int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
-
-        // Extract indices
-        auto indices = scatterIndices;
-        if (indexVectorDim < static_cast<int>(scatterIndices.shape().size()) &&
-            scatterIndices.shape(indexVectorDim) == 1) {
-            indices = mlx::core::squeeze(scatterIndices, {indexVectorDim});
-        }
-
-        // Ensure indices are int32 and at least 1D
-        if (indices.dtype() != mlx::core::int32) {
-            indices = mlx::core::astype(indices, mlx::core::int32);
-        }
-        if (indices.ndim() == 0) {
-            indices = mlx::core::reshape(indices, {1});
-        }
-
-        // MLX scatter expects updates with shape [idx_shape..., slice_shape...]
-        // where slice_shape includes all operand dims.
-        // StableHLO updates have inserted_window_dims collapsed, so we need
-        // to expand those dims back (insert size-1 dims).
-        auto reshapedUpdates = updates;
-        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
-        int insertedDim = static_cast<int>(insertedWindowDims[0]);
-
-        // MLX scatter expects updates with shape [idx_shape..., slice_shape_per_operand_dim...]
-        // where slice_shape has size-1 at scatter axes and original sizes elsewhere.
-        // StableHLO updates have inserted_window_dims collapsed.
-        // We need to expand updates to include idx_shape prefix and size-1 at inserted dims.
-        {
-            auto updShape = updates.shape();
-            mlx::core::Shape newShape;
-
-            // Batch dims come from indices shape
-            auto idxShape = indices.shape();
-            for (int dim : idxShape) {
-                newShape.push_back(dim);
-            }
-
-            // Then operand dims, with size-1 at inserted positions
-            if (updateWindowDims.empty()) {
-                // All operand dims are inserted
-                for (int i = 0; i < static_cast<int>(operand.ndim()); ++i) {
-                    newShape.push_back(1);
-                }
-            } else {
-                // Map each non-inserted operand dim to the corresponding
-                // update_window_dim entry. update_window_dims may be
-                // non-contiguous (e.g. [0, 2, 3, 4] when dim 1 is the
-                // scatter/index dim in the updates tensor).
-                int winCount = 0;
-                for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim());
-                     ++operandDim) {
-                    if (operandDim == insertedDim) {
-                        newShape.push_back(1);
-                    } else {
-                        int updateDim = static_cast<int>(updateWindowDims[winCount]);
-                        newShape.push_back(updShape[updateDim]);
-                        ++winCount;
+    // Check if any scatter axis has a window extent > 1
+    // (scatter axis NOT in insertedWindowDims AND its window size > 1)
+    bool hasWindowScatter = false;
+    for (auto dim : scatterDimsToOperandDims) {
+        int d = static_cast<int>(dim);
+        if (!insertedSet.count(d)) {
+            // Find position of this dim in windowOperandDims to get its update window dim
+            for (int j = 0; j < static_cast<int>(windowOperandDims.size()); ++j) {
+                if (windowOperandDims[j] == d) {
+                    int updateDim = static_cast<int>(updateWindowDims[j]);
+                    if (updates.shape(updateDim) > 1) {
+                        hasWindowScatter = true;
                     }
+                    break;
                 }
             }
-            reshapedUpdates = mlx::core::reshape(updates, newShape);
         }
-
-        mlx::core::array result = operand;
-        std::vector<mlx::core::array> idxVec = {indices};
-        std::vector<int> axesVec = {scatterDim};
-
-        switch (scatterType) {
-            case ScatterType::Update:
-                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Add:
-                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Sub:
-                result = mlx::core::scatter_add(operand, idxVec,
-                                                mlx::core::negative(reshapedUpdates), axesVec);
-                break;
-            case ScatterType::Mul:
-                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Min:
-                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Max:
-                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            default:
-                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
-                return false;
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
+        if (hasWindowScatter)
+            break;
     }
 
-    // Multi-dimensional scatter: inserted_window_dims == scatter_dims_to_operand_dims
-    // Handles both full index scatter (all operand dims are scatter targets)
-    // and partial index scatter (some operand dims are window dims).
-    if (scatterDimsToOperandDims.size() == insertedWindowDims.size()) {
-        auto indices = scatterIndices;
-        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
+    // ===== Window scatter path: scatter axes with window extent > 1 =====
+    // This handles dynamic_update_slice patterns where updates span a window.
+    if (hasWindowScatter) {
+        // For multi-axis window scatter, use slice_update loop
+        if (scatterDimsToOperandDims.size() > 1) {
+            bool hasIdxVecDim = indexVectorDim < scatterIndices.ndim();
 
-        // Build per-axis index arrays
-        std::vector<mlx::core::array> idxVec;
-        std::vector<int> axesVec;
-        for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
-            int axis = static_cast<int>(scatterDimsToOperandDims[i]);
-            axesVec.push_back(axis);
-
-            // Slice the index vector dim to get indices for this axis
-            mlx::core::Shape starts(indices.ndim(), 0);
-            mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
-            starts[indexVectorDim] = static_cast<int>(i);
-            stops[indexVectorDim] = static_cast<int>(i) + 1;
-            auto axisIndices =
-                mlx::core::squeeze(mlx::core::slice(indices, starts, stops), {indexVectorDim});
-            if (axisIndices.dtype() != mlx::core::int32) {
-                axisIndices = mlx::core::astype(axisIndices, mlx::core::int32);
+            // Compute batch positions (all non-index-vector dims)
+            std::vector<int> batchDims;
+            int batchSize = 1;
+            for (int d = 0; d < scatterIndices.ndim(); ++d) {
+                if (!hasIdxVecDim || d != indexVectorDim) {
+                    batchDims.push_back(d);
+                    batchSize *= scatterIndices.shape(d);
+                }
             }
-            idxVec.push_back(axisIndices);
-        }
 
-        // Reshape updates for MLX: (idx_shape..., operand_dims...)
-        // where scatter target dims get size 1 and window dims keep their size.
-        //
-        // StableHLO updates dims are split into:
-        //   - index dims: all dims NOT in update_window_dims
-        //   - window dims: dims IN update_window_dims (correspond to non-inserted operand dims)
-        // These can be interleaved, so we first transpose to put index dims first.
-        std::set<int> insertedSet(insertedWindowDims.begin(), insertedWindowDims.end());
-        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
-        auto updShape = updates.shape();
-        int updNdim = static_cast<int>(updShape.size());
+            bool singleUpdate = (batchSize == 1);
 
-        // Separate index dims and window dims in updates
-        std::vector<int> transposeOrder;
-        // Index dims first
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) == 0) {
-                transposeOrder.push_back(i);
+            std::vector<int> axes;
+            for (auto dim : scatterDimsToOperandDims) {
+                axes.push_back(static_cast<int>(dim));
             }
-        }
-        int numIdxDims = static_cast<int>(transposeOrder.size());
-        // Window dims second
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) != 0) {
-                transposeOrder.push_back(i);
-            }
-        }
 
-        // Transpose if needed
-        auto transposedUpdates = updates;
-        bool needsTranspose = false;
-        for (int i = 0; i < updNdim; ++i) {
-            if (transposeOrder[i] != i) {
-                needsTranspose = true;
-                break;
-            }
-        }
-        if (needsTranspose) {
-            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
-        }
-        auto tShape = transposedUpdates.shape();
-
-        // Build final shape: (idx_dims..., operand_dim_0, operand_dim_1, ...)
-        mlx::core::Shape newShape;
-        for (int i = 0; i < numIdxDims; ++i) {
-            newShape.push_back(tShape[i]);
-        }
-        int windowIdx = 0;
-        for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim()); ++operandDim) {
-            if (insertedSet.count(operandDim) != 0) {
-                newShape.push_back(1);
-            } else {
-                newShape.push_back(tShape[numIdxDims + windowIdx]);
-                ++windowIdx;
-            }
-        }
-        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
-
-        mlx::core::array result = operand;
-        switch (scatterType) {
-            case ScatterType::Update:
-                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Add:
-                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Sub:
-                result = mlx::core::scatter_add(operand, idxVec,
-                                                mlx::core::negative(reshapedUpdates), axesVec);
-                break;
-            case ScatterType::Mul:
-                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Min:
-                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Max:
-                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            default:
-                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
-                return false;
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
-    }
-
-    // Window scatter: scatter dim has window extent > 1 (not in insertedWindowDims).
-    // We expand start indices to per-element indices within the window.
-    if (scatterDimsToOperandDims.size() == 1 && insertedWindowDims.empty()) {
-        int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
-
-        auto indices = scatterIndices;
-        if (indexVectorDim < static_cast<int>(indices.shape().size()) &&
-            indices.shape(indexVectorDim) == 1) {
-            indices = mlx::core::squeeze(indices, {indexVectorDim});
-        }
-        if (indices.dtype() != mlx::core::int32) {
-            indices = mlx::core::astype(indices, mlx::core::int32);
-        }
-        if (indices.ndim() == 0) {
-            indices = mlx::core::reshape(indices, {1});
-        }
-
-        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
-
-        // Find the update dim that corresponds to the scatter operand dim.
-        // updateWindowDims maps (in order) to operand dims not in insertedWindowDims.
-        // Since insertedWindowDims is empty, operand dim i maps to updateWindowDims[i].
-        int windowDimForScatterAxis = static_cast<int>(updateWindowDims[scatterDim]);
-        int windowSize = static_cast<int>(updates.shape(windowDimForScatterAxis));
-
-        // Expand start indices: for each start index, generate start + arange(windowSize)
-        auto offsets = mlx::core::arange(windowSize, mlx::core::int32);
-
-        // indices shape: (num_starts,...), offsets shape: (windowSize,)
-        // Broadcast: indices[..., None] + offsets -> (..., windowSize)
-        auto idxShape = indices.shape();
-        mlx::core::Shape broadcastIdxShape = idxShape;
-        broadcastIdxShape.push_back(1);
-        auto reshapedIdx = mlx::core::reshape(indices, broadcastIdxShape);
-
-        mlx::core::Shape broadcastOffsetShape(indices.ndim(), 1);
-        broadcastOffsetShape.push_back(windowSize);
-        auto reshapedOffsets = mlx::core::reshape(offsets, broadcastOffsetShape);
-
-        auto expandedIndices = mlx::core::add(reshapedIdx, reshapedOffsets);
-        // Flatten to 1D
-        int totalIndices = 1;
-        for (auto s : expandedIndices.shape())
-            totalIndices *= static_cast<int>(s);
-        expandedIndices = mlx::core::reshape(expandedIndices, {totalIndices});
-
-        // Reshape updates for MLX: move scatter-axis window elements into idx_shape,
-        // insert size-1 at the scatter axis position in slice_shape.
-        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
-        auto updShape = updates.shape();
-        int updNdim = static_cast<int>(updShape.size());
-
-        // Transpose: index dims first, then scatter-axis window dim, then other window dims
-        std::vector<int> transposeOrder;
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) == 0)
-                transposeOrder.push_back(i);
-        }
-        transposeOrder.push_back(windowDimForScatterAxis);
-        for (int i = 0; i < updNdim; ++i) {
-            if (windowDimSet.count(i) != 0 && i != windowDimForScatterAxis)
-                transposeOrder.push_back(i);
-        }
-
-        auto transposedUpdates = updates;
-        bool needsTranspose = false;
-        for (int i = 0; i < updNdim; ++i) {
-            if (transposeOrder[i] != i) {
-                needsTranspose = true;
-                break;
-            }
-        }
-        if (needsTranspose) {
-            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
-        }
-        auto tShape = transposedUpdates.shape();
-
-        // tShape: (idx_dims..., scatterWindowSize, other_window_dims...)
-        int numIdxDims = updNdim - static_cast<int>(updateWindowDims.size());
-        // Merge idx dims and scatter window dim into one flat idx dim
-        int flatIdxSize = 1;
-        for (int i = 0; i <= numIdxDims; ++i) {
-            flatIdxSize *= static_cast<int>(tShape[i]);
-        }
-
-        // Build: (flatIdxSize, 1_at_scatter_axis, other_operand_dims...)
-        mlx::core::Shape newShape;
-        newShape.push_back(flatIdxSize);
-        int otherWindowIdx = numIdxDims + 1;
-        for (int operandDim = 0; operandDim < static_cast<int>(operand.ndim()); ++operandDim) {
-            if (operandDim == scatterDim) {
-                newShape.push_back(1);
-            } else {
-                newShape.push_back(static_cast<int>(tShape[otherWindowIdx]));
-                ++otherWindowIdx;
-            }
-        }
-        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
-
-        std::vector<mlx::core::array> idxVec = {expandedIndices};
-        std::vector<int> axesVec = {scatterDim};
-
-        mlx::core::array result = operand;
-        switch (scatterType) {
-            case ScatterType::Update:
-                result = mlx::core::scatter(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Add:
-                result = mlx::core::scatter_add(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Sub:
-                result = mlx::core::scatter_add(operand, idxVec,
-                                                mlx::core::negative(reshapedUpdates), axesVec);
-                break;
-            case ScatterType::Mul:
-                result = mlx::core::scatter_prod(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Min:
-                result = mlx::core::scatter_min(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            case ScatterType::Max:
-                result = mlx::core::scatter_max(operand, idxVec, reshapedUpdates, axesVec);
-                break;
-            default:
-                MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type (window)\n");
-                return false;
-        }
-
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
-        return true;
-    }
-
-    // Multi-dim dynamic slice update: no inserted window dims, multiple scatter dims.
-    // This is the inverse of the multi-dim gather with no collapsed dims.
-    // Uses MLX slice_update with dynamic start indices.
-    if (scatterDimsToOperandDims.size() > 1 && insertedWindowDims.empty() &&
-        indexVectorDim < static_cast<int>(scatterIndices.shape().size()) &&
-        static_cast<size_t>(scatterIndices.shape(indexVectorDim)) >=
-            scatterDimsToOperandDims.size()) {
-        auto indices = scatterIndices;
-
-        // Check if we have single or multiple batch positions.
-        bool singleUpdate = true;
-        for (int d = 0; d < indices.ndim(); ++d) {
-            if (d != indexVectorDim && indices.shape(d) != 1) {
-                singleUpdate = false;
-                break;
-            }
-        }
-
-        // Compute batch size for the multi-batch path
-        int batchSize = 1;
-        std::vector<int> batchDims;
-        for (int d = 0; d < indices.ndim(); ++d) {
-            if (d != indexVectorDim) {
-                batchSize *= indices.shape(d);
-                batchDims.push_back(d);
-            }
-        }
-
-        std::vector<int> axes;
-        axes.reserve(scatterDimsToOperandDims.size());
-        for (long long scatterDim : scatterDimsToOperandDims) {
-            axes.push_back(static_cast<int>(scatterDim));
-        }
-
-        auto updateWindowDims = dimNumbers.getUpdateWindowDims();
-
-        // Helper: extract per-axis start array for a single batch position
-        auto extractStartArr = [&](int batchIdx) -> mlx::core::array {
-            std::vector<mlx::core::array> perAxisIdx;
-            for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
-                mlx::core::Shape starts(indices.ndim(), 0);
-                mlx::core::Shape stops(indices.shape().begin(), indices.shape().end());
-                starts[indexVectorDim] = static_cast<int>(i);
-                stops[indexVectorDim] = static_cast<int>(i) + 1;
-                // Set batch dim to select the specific batch position
-                if (!singleUpdate) {
-                    // For simplicity, flatten batch dims: use linear index
-                    int remaining = batchIdx;
-                    for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
-                        int dim = batchDims[bd];
-                        starts[dim] = remaining % indices.shape(dim);
-                        stops[dim] = starts[dim] + 1;
-                        remaining /= indices.shape(dim);
+            int numPositions = singleUpdate ? 1 : batchSize;
+            mlx::core::array result = operand;
+            for (int b = 0; b < numPositions; ++b) {
+                // Extract per-axis start indices for this batch position
+                std::vector<mlx::core::array> perAxisIdx;
+                for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
+                    mlx::core::Shape starts(scatterIndices.ndim(), 0);
+                    mlx::core::Shape stops(scatterIndices.shape().begin(),
+                                           scatterIndices.shape().end());
+                    if (hasIdxVecDim) {
+                        starts[indexVectorDim] = static_cast<int>(i);
+                        stops[indexVectorDim] = static_cast<int>(i) + 1;
                     }
-                }
-                auto axisIdx = mlx::core::squeeze(
-                    mlx::core::slice(indices, starts, stops),
-                    singleUpdate ? std::vector<int>{indexVectorDim} : [&]() {
-                        std::vector<int> sq;
-                        sq.push_back(indexVectorDim);
+                    std::vector<int> squeezeDims;
+                    if (hasIdxVecDim)
+                        squeezeDims.push_back(indexVectorDim);
+                    if (!singleUpdate) {
+                        int remaining = b;
+                        for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
+                            int dim = batchDims[bd];
+                            starts[dim] = remaining % scatterIndices.shape(dim);
+                            stops[dim] = starts[dim] + 1;
+                            remaining /= scatterIndices.shape(dim);
+                        }
                         for (int bd : batchDims)
-                            sq.push_back(bd);
-                        return sq;
-                    }());
-                if (axisIdx.dtype() != mlx::core::int32) {
-                    axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
+                            squeezeDims.push_back(bd);
+                    } else {
+                        for (int bd : batchDims) {
+                            if (scatterIndices.shape(bd) == 1)
+                                squeezeDims.push_back(bd);
+                        }
+                    }
+                    auto axisIdx = mlx::core::slice(scatterIndices, starts, stops);
+                    if (!squeezeDims.empty()) {
+                        axisIdx = mlx::core::squeeze(axisIdx, squeezeDims);
+                    }
+                    if (axisIdx.dtype() != mlx::core::int32) {
+                        axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
+                    }
+                    perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
                 }
-                perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
-            }
-            return mlx::core::concatenate(perAxisIdx, 0);
-        };
+                auto startArr = mlx::core::concatenate(perAxisIdx, 0);
 
-        // Helper: extract update for a single batch position
-        auto extractUpdate = [&](int batchIdx) -> mlx::core::array {
-            auto updateVal = updates;
-            if (singleUpdate) {
-                // Squeeze out non-window dims
-                if (static_cast<int>(updateWindowDims.size()) < updateVal.ndim()) {
-                    std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+                // Extract update for this batch position
+                auto updateVal = updates;
+                std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+                if (singleUpdate) {
                     std::vector<int> squeezeDims;
                     for (int d = 0; d < updateVal.ndim(); ++d) {
-                        if (windowDimSet.count(d) == 0) {
-                            if (updateVal.shape(d) != 1) {
-                                MPS_LOG_ERROR(
-                                    "stablehlo.scatter: non-window dim %d has size %d (expected 1) "
-                                    "in single-update path\n",
-                                    d, updateVal.shape(d));
-                                throw std::runtime_error(
-                                    "stablehlo.scatter: non-window dim has size != 1 in "
-                                    "single-update path");
-                            }
+                        if (!windowDimSet.count(d) && updateVal.shape(d) == 1) {
                             squeezeDims.push_back(d);
                         }
                     }
                     if (!squeezeDims.empty()) {
                         updateVal = mlx::core::squeeze(updateVal, squeezeDims);
                     }
+                } else {
+                    int numBatchDims = static_cast<int>(updateVal.ndim()) -
+                                       static_cast<int>(updateWindowDims.size());
+                    mlx::core::Shape starts(updateVal.ndim(), 0);
+                    mlx::core::Shape stops(updateVal.shape().begin(), updateVal.shape().end());
+                    int remaining = b;
+                    for (int bd = numBatchDims - 1; bd >= 0; --bd) {
+                        starts[bd] = remaining % updateVal.shape(bd);
+                        stops[bd] = starts[bd] + 1;
+                        remaining /= updateVal.shape(bd);
+                    }
+                    updateVal = mlx::core::slice(updateVal, starts, stops);
+                    std::vector<int> squeezeDims;
+                    squeezeDims.reserve(numBatchDims);
+                    for (int d = 0; d < numBatchDims; ++d)
+                        squeezeDims.push_back(d);
+                    if (!squeezeDims.empty()) {
+                        updateVal = mlx::core::squeeze(updateVal, squeezeDims);
+                    }
                 }
-            } else {
-                // Slice out the batch position from updates
-                // Updates shape: [batch_dims..., window_dims...]
-                int numBatchDims = static_cast<int>(updateVal.ndim() - updateWindowDims.size());
-                mlx::core::Shape starts(updateVal.ndim(), 0);
-                mlx::core::Shape stops(updateVal.shape().begin(), updateVal.shape().end());
-                int remaining = batchIdx;
-                for (int bd = numBatchDims - 1; bd >= 0; --bd) {
-                    starts[bd] = remaining % updateVal.shape(bd);
-                    stops[bd] = starts[bd] + 1;
-                    remaining /= updateVal.shape(bd);
-                }
-                updateVal = mlx::core::slice(updateVal, starts, stops);
-                // Squeeze batch dims
-                std::vector<int> squeezeDims;
-                squeezeDims.reserve(numBatchDims);
-                for (int d = 0; d < numBatchDims; ++d) {
-                    squeezeDims.push_back(d);
-                }
-                if (!squeezeDims.empty()) {
-                    updateVal = mlx::core::squeeze(updateVal, squeezeDims);
+
+                switch (scatterType) {
+                    case ScatterType::Update:
+                        result = mlx::core::slice_update(result, updateVal, startArr, axes);
+                        break;
+                    case ScatterType::Add: {
+                        mlx::core::Shape sliceSizes(operand.shape());
+                        for (int axis : axes) {
+                            sliceSizes[axis] = updateVal.shape(axis);
+                        }
+                        auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
+                        result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
+                                                         startArr, axes);
+                        break;
+                    }
+                    default:
+                        MPS_LOG_ERROR(
+                            "stablehlo.scatter: unsupported scatter update type "
+                            "for multi-dim slice update\n");
+                        return false;
                 }
             }
-            return updateVal;
-        };
 
-        // Apply slice updates: loop for multi-batch, single call for single batch.
-        int numPositions = singleUpdate ? 1 : batchSize;
-        mlx::core::array result = operand;
-        for (int b = 0; b < numPositions; ++b) {
-            auto startArr = extractStartArr(b);
-            auto updateVal = extractUpdate(b);
+            values.emplace(ToKey(op->getResult(0)), std::move(result));
+            return true;
+        }
 
-            switch (scatterType) {
-                case ScatterType::Update:
-                    result = mlx::core::slice_update(result, updateVal, startArr, axes);
-                    break;
-                case ScatterType::Add: {
-                    mlx::core::Shape sliceSizes(operand.shape());
-                    for (int axis : axes) {
-                        sliceSizes[axis] = updateVal.shape(axis);
-                    }
-                    auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
-                    result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
-                                                     startArr, axes);
-                    break;
-                }
-                default:
-                    MPS_LOG_ERROR(
-                        "stablehlo.scatter: unsupported scatter update type "
-                        "for multi-dim slice update\n");
-                    return false;
+        // Single-axis window scatter: expand start indices to per-element indices
+        int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
+
+        auto indices = scatterIndices;
+        if (indexVectorDim < scatterIndices.ndim() && scatterIndices.shape(indexVectorDim) == 1) {
+            indices = mlx::core::squeeze(scatterIndices, {indexVectorDim});
+        }
+        if (indices.dtype() != mlx::core::int32) {
+            indices = mlx::core::astype(indices, mlx::core::int32);
+        }
+        if (indices.ndim() == 0) {
+            indices = mlx::core::reshape(indices, {1});
+        }
+
+        // Find the window size along the scatter axis
+        // windowOperandDims (non-inserted, non-batching operand dims) map to updateWindowDims
+        std::vector<int> windowOperandDims;
+        for (int d = 0; d < operand.ndim(); ++d) {
+            if (!insertedSet.count(d) && !batchingSet.count(d)) {
+                windowOperandDims.push_back(d);
+            }
+        }
+        int winIdx = 0;
+        for (int j = 0; j < static_cast<int>(windowOperandDims.size()); ++j) {
+            if (windowOperandDims[j] == scatterDim) {
+                winIdx = j;
+                break;
+            }
+        }
+        int windowDimForScatterAxis = static_cast<int>(updateWindowDims[winIdx]);
+        int windowSize = updates.shape(windowDimForScatterAxis);
+
+        // Expand: indices[..., None] + arange(windowSize)
+        auto offsets = mlx::core::arange(windowSize, mlx::core::int32);
+        auto idxShape = indices.shape();
+        mlx::core::Shape broadcastIdxShape = idxShape;
+        broadcastIdxShape.push_back(1);
+        auto reshapedIdx = mlx::core::reshape(indices, broadcastIdxShape);
+        mlx::core::Shape broadcastOffsetShape(indices.ndim(), 1);
+        broadcastOffsetShape.push_back(windowSize);
+        auto reshapedOffsets = mlx::core::reshape(offsets, broadcastOffsetShape);
+        auto expandedIndices = mlx::core::add(reshapedIdx, reshapedOffsets);
+
+        int totalIndices = 1;
+        for (auto s : expandedIndices.shape())
+            totalIndices *= static_cast<int>(s);
+        expandedIndices = mlx::core::reshape(expandedIndices, {totalIndices});
+
+        // Reshape updates: index dims first, scatter window dim, other window dims
+        std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+        int updNdim = static_cast<int>(updates.ndim());
+
+        std::vector<int> transposeOrder;
+        for (int i = 0; i < updNdim; ++i) {
+            if (!windowDimSet.count(i))
+                transposeOrder.push_back(i);
+        }
+        transposeOrder.push_back(windowDimForScatterAxis);
+        for (int i = 0; i < updNdim; ++i) {
+            if (windowDimSet.count(i) && i != windowDimForScatterAxis) {
+                transposeOrder.push_back(i);
             }
         }
 
+        auto transposedUpdates = updates;
+        bool needsTranspose = false;
+        for (int i = 0; i < updNdim; ++i) {
+            if (transposeOrder[i] != i) {
+                needsTranspose = true;
+                break;
+            }
+        }
+        if (needsTranspose) {
+            transposedUpdates = mlx::core::transpose(updates, transposeOrder);
+        }
+        auto tShape = transposedUpdates.shape();
+
+        int numIdxDims = updNdim - static_cast<int>(updateWindowDims.size());
+        int flatIdxSize = 1;
+        for (int i = 0; i <= numIdxDims; ++i)
+            flatIdxSize *= tShape[i];
+
+        mlx::core::Shape newShape;
+        newShape.push_back(flatIdxSize);
+        int otherWindowIdx = numIdxDims + 1;
+        for (int d = 0; d < operand.ndim(); ++d) {
+            if (d == scatterDim) {
+                newShape.push_back(1);
+            } else {
+                newShape.push_back(tShape[otherWindowIdx++]);
+            }
+        }
+        auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
+
+        auto result =
+            ApplyScatter(scatterType, operand, {expandedIndices}, reshapedUpdates, {scatterDim});
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
 
-    MPS_LOG_ERROR(
-        "stablehlo.scatter: unsupported scatter pattern "
-        "(scatterDimsToOperandDims.size=%zu, insertedWindowDims.size=%zu)\n",
-        scatterDimsToOperandDims.size(), insertedWindowDims.size());
-    return false;
+    // ===== General point scatter path =====
+    // All scatter axes are in insertedWindowDims (point scatter).
+    // This handles simple 1D, multi-dim, and batched patterns uniformly.
+
+    // Determine if index_vector_dim is a real dimension in scatter_indices
+    bool hasIdxVecDim = indexVectorDim < scatterIndices.ndim();
+
+    // Compute index batch shape: scatter_indices shape with index_vector_dim removed
+    mlx::core::Shape idxBatchShape;
+    for (int d = 0; d < scatterIndices.ndim(); ++d) {
+        if (!hasIdxVecDim || d != indexVectorDim) {
+            idxBatchShape.push_back(scatterIndices.shape(d));
+        }
+    }
+
+    // Step 1: Extract per-axis index arrays from scatter_indices
+    std::vector<mlx::core::array> idxVec;
+    std::vector<int> axes;
+
+    for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
+        int axis = static_cast<int>(scatterDimsToOperandDims[i]);
+        axes.push_back(axis);
+
+        mlx::core::array axisIdx = scatterIndices;
+        if (hasIdxVecDim) {
+            mlx::core::Shape starts(scatterIndices.ndim(), 0);
+            mlx::core::Shape stops(scatterIndices.shape().begin(), scatterIndices.shape().end());
+            starts[indexVectorDim] = static_cast<int>(i);
+            stops[indexVectorDim] = static_cast<int>(i) + 1;
+            axisIdx = mlx::core::squeeze(mlx::core::slice(scatterIndices, starts, stops),
+                                         {indexVectorDim});
+        }
+
+        if (axisIdx.dtype() != mlx::core::int32) {
+            axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
+        }
+        idxVec.push_back(axisIdx);
+    }
+
+    // Step 2: Add iota indices for batching dims
+    for (size_t i = 0; i < inputBatchingDims.size(); ++i) {
+        int operandAxis = static_cast<int>(inputBatchingDims[i]);
+        int idxBatchDim = static_cast<int>(scatterIndicesBatchingDims[i]);
+        if (hasIdxVecDim && idxBatchDim > indexVectorDim) {
+            --idxBatchDim;
+        }
+
+        axes.push_back(operandAxis);
+
+        int batchSize = operand.shape(operandAxis);
+        mlx::core::Shape iotaShape(idxBatchShape.size(), 1);
+        iotaShape[idxBatchDim] = batchSize;
+        auto iota = mlx::core::reshape(mlx::core::arange(batchSize, mlx::core::int32), iotaShape);
+        iota = mlx::core::broadcast_to(iota, idxBatchShape);
+        idxVec.push_back(iota);
+    }
+
+    // Step 3: Reshape updates from StableHLO format to MLX format
+    // StableHLO updates dims split into:
+    //   - index dims: dims NOT in update_window_dims (from scatter_indices batch shape)
+    //   - window dims: dims IN update_window_dims (from non-inserted operand dims)
+    // MLX expects: [*idx_shape, *operand_shape] with size-1 at covered dims
+    std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
+    int updNdim = static_cast<int>(updates.ndim());
+
+    // Transpose: index dims first, window dims second
+    std::vector<int> transposeOrder;
+    for (int i = 0; i < updNdim; ++i) {
+        if (!windowDimSet.count(i))
+            transposeOrder.push_back(i);
+    }
+    int numIdxDims = static_cast<int>(transposeOrder.size());
+    for (int i = 0; i < updNdim; ++i) {
+        if (windowDimSet.count(i))
+            transposeOrder.push_back(i);
+    }
+
+    auto transposedUpdates = updates;
+    bool needsTranspose = false;
+    for (int i = 0; i < updNdim; ++i) {
+        if (transposeOrder[i] != i) {
+            needsTranspose = true;
+            break;
+        }
+    }
+    if (needsTranspose) {
+        transposedUpdates = mlx::core::transpose(updates, transposeOrder);
+    }
+    auto tShape = transposedUpdates.shape();
+
+    // Build final shape: [idx_dims..., operand_dim_0, operand_dim_1, ...]
+    // Covered dims (inserted + batching + scatter) get size 1, others get window size
+    std::set<int> coveredDims;
+    for (auto d : insertedWindowDims)
+        coveredDims.insert(static_cast<int>(d));
+    for (auto d : inputBatchingDims)
+        coveredDims.insert(static_cast<int>(d));
+    for (auto d : scatterDimsToOperandDims)
+        coveredDims.insert(static_cast<int>(d));
+
+    mlx::core::Shape newShape;
+    for (int i = 0; i < numIdxDims; ++i) {
+        newShape.push_back(tShape[i]);
+    }
+    int windowIdx = 0;
+    for (int d = 0; d < operand.ndim(); ++d) {
+        if (coveredDims.count(d)) {
+            newShape.push_back(1);
+        } else {
+            newShape.push_back(tShape[numIdxDims + windowIdx++]);
+        }
+    }
+    auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
+
+    // Step 4: Apply scatter
+    auto result = ApplyScatter(scatterType, operand, idxVec, reshapedUpdates, axes);
+
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
 }
 
 // Handler for stablehlo.fft
