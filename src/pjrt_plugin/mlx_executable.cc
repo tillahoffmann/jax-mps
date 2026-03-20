@@ -3472,6 +3472,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 
     auto& body = scatterOp.getUpdateComputation();
     auto scatterType = DetectScatterType(body);
+    if (scatterType == ScatterType::Unknown) {
+        MPS_LOG_ERROR("stablehlo.scatter: unsupported update computation\n");
+        return false;
+    }
 
     // Determine which operand dims have window extent > 1 (scatter axes NOT in insertedWindowDims).
     // These require special handling: either index expansion or slice_update.
