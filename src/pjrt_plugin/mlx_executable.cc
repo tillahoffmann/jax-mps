@@ -267,6 +267,26 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     }
     size_t expectedSize = numElements * elemSize;
 
+    // MLIR stores i1 (boolean) data as bit-packed: 1 bit per element.
+    // MLX expects 1 byte per bool, so we must unpack before creating the array.
+    if (mlxDtype == mlx::core::bool_) {
+        size_t expectedBitPackedSize = (numElements + 7) / 8;
+        if (rawData.size() < expectedBitPackedSize) {
+            MPS_LOG_ERROR(
+                "Boolean constant data size mismatch: got %zu bytes, expected %zu (bit-packed for "
+                "%zu elements)\n",
+                rawData.size(), expectedBitPackedSize, numElements);
+            return std::nullopt;
+        }
+        std::vector<uint8_t> unpacked(numElements);
+        const uint8_t* bits = reinterpret_cast<const uint8_t*>(rawData.data());
+        for (size_t i = 0; i < numElements; ++i) {
+            unpacked[i] = (bits[i / 8] >> (i % 8)) & 1;
+        }
+        auto arr = mlx::core::array(unpacked.data(), shape, mlx::core::uint8);
+        return mlx::core::astype(arr, mlx::core::bool_);
+    }
+
     if (rawData.size() < expectedSize) {
         MPS_LOG_ERROR("Constant data size mismatch: got %zu bytes, expected %zu\n", rawData.size(),
                       expectedSize);

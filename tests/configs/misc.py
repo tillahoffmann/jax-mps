@@ -140,4 +140,12 @@ def make_misc_op_configs():
                 lambda key: complex_standard_normal(key, (2, 4, 4), complex=True),
                 name="irfft-c2r-2d-odd",
             ),
+            # Dense boolean constant: triangular mask embedded in HLO as
+            # non-splat i1 tensor. MLIR stores i1 data bit-packed but MLX
+            # expects one byte per element (issue #104).
+            OperationTestConfig(
+                lambda x: x[numpy.tril(numpy.ones((10, 10), dtype=bool))].sum(),
+                lambda key: random.normal(key, (10, 10)),
+                name="dense_bool_constant_tril_mask",
+            ),
         ]
