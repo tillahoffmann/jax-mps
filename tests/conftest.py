@@ -73,7 +73,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     }
 
     # Discover ops from the dispatch table in mlx_executable.cc
-    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)",\s*Handle')
+    dispatch_pattern = re.compile(r'\{"((?:stablehlo|chlo)\.[^"]+)",\s*(?:Handle|Make)')
     executable_file = pjrt_dir / "mlx_executable.cc"
     assert executable_file.is_file()
     with executable_file.open() as fp:
