@@ -3644,8 +3644,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         // Single-axis window scatter: expand start indices to per-element indices
         int scatterDim = static_cast<int>(scatterDimsToOperandDims[0]);
 
+        bool hasIdxVecDim = indexVectorDim < scatterIndices.ndim();
         auto indices = scatterIndices;
-        if (indexVectorDim < scatterIndices.ndim() && scatterIndices.shape(indexVectorDim) == 1) {
+        if (hasIdxVecDim && scatterIndices.shape(indexVectorDim) == 1) {
             indices = mlx::core::squeeze(scatterIndices, {indexVectorDim});
         }
         if (indices.dtype() != mlx::core::int32) {
@@ -3655,14 +3656,15 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             indices = mlx::core::reshape(indices, {1});
         }
 
-        // Find the window size along the scatter axis
-        // windowOperandDims (non-inserted, non-batching operand dims) map to updateWindowDims
-        std::vector<int> windowOperandDims;
-        for (int d = 0; d < operand.ndim(); ++d) {
-            if (!insertedSet.count(d) && !batchingSet.count(d)) {
-                windowOperandDims.push_back(d);
+        // Compute index batch shape for iota construction
+        mlx::core::Shape idxBatchShape;
+        for (int d = 0; d < scatterIndices.ndim(); ++d) {
+            if (!hasIdxVecDim || d != indexVectorDim) {
+                idxBatchShape.push_back(scatterIndices.shape(d));
             }
         }
+
+        // Find the window size along the scatter axis
         int winIdx = 0;
         for (int j = 0; j < static_cast<int>(windowOperandDims.size()); ++j) {
             if (windowOperandDims[j] == scatterDim) {
@@ -3688,6 +3690,45 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         for (auto s : expandedIndices.shape())
             totalIndices *= static_cast<int>(s);
         expandedIndices = mlx::core::reshape(expandedIndices, {totalIndices});
+
+        // Build axes and index arrays: scatter dim + batching dims
+        std::vector<mlx::core::array> idxVec = {expandedIndices};
+        std::vector<int> axes = {scatterDim};
+
+        for (size_t i = 0; i < inputBatchingDims.size(); ++i) {
+            int operandAxis = static_cast<int>(inputBatchingDims[i]);
+            int idxBatchDim = static_cast<int>(scatterIndicesBatchingDims[i]);
+            if (hasIdxVecDim && idxBatchDim > indexVectorDim) {
+                --idxBatchDim;
+            }
+
+            axes.push_back(operandAxis);
+
+            int batchSize = operand.shape(operandAxis);
+            // Expand iota to match expanded indices: broadcast over idx batch + window
+            mlx::core::Shape iotaShape(idxBatchShape.size(), 1);
+            iotaShape[idxBatchDim] = batchSize;
+            auto iota =
+                mlx::core::reshape(mlx::core::arange(batchSize, mlx::core::int32), iotaShape);
+            iota = mlx::core::broadcast_to(iota, idxBatchShape);
+            // Repeat each iota element windowSize times to match expanded scatter indices
+            mlx::core::Shape iotaExpShape = iota.shape();
+            iotaExpShape.push_back(1);
+            iota = mlx::core::reshape(iota, iotaExpShape);
+            mlx::core::Shape bcastShape = iota.shape();
+            bcastShape.back() = windowSize;
+            iota = mlx::core::broadcast_to(iota, bcastShape);
+            iota = mlx::core::reshape(iota, {totalIndices});
+            idxVec.push_back(iota);
+        }
+
+        // Covered dims: scatter axis + inserted + batching (all get size-1 in updates)
+        std::set<int> coveredDims;
+        coveredDims.insert(scatterDim);
+        for (auto d : insertedWindowDims)
+            coveredDims.insert(static_cast<int>(d));
+        for (auto d : inputBatchingDims)
+            coveredDims.insert(static_cast<int>(d));
 
         // Reshape updates: index dims first, scatter window dim, other window dims
         std::set<int> windowDimSet(updateWindowDims.begin(), updateWindowDims.end());
@@ -3718,16 +3759,18 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         }
         auto tShape = transposedUpdates.shape();
 
+        // tShape: [idx_dims..., scatterWindowSize, other_window_dims...]
         int numIdxDims = updNdim - static_cast<int>(updateWindowDims.size());
         int flatIdxSize = 1;
         for (int i = 0; i <= numIdxDims; ++i)
             flatIdxSize *= tShape[i];
 
+        // Build: [flatIdxSize, operand_dims_with_1_at_covered...]
         mlx::core::Shape newShape;
         newShape.push_back(flatIdxSize);
         int otherWindowIdx = numIdxDims + 1;
         for (int d = 0; d < operand.ndim(); ++d) {
-            if (d == scatterDim) {
+            if (coveredDims.count(d)) {
                 newShape.push_back(1);
             } else {
                 newShape.push_back(tShape[otherWindowIdx++]);
@@ -3735,8 +3778,7 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         }
         auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
-        auto result =
-            ApplyScatter(scatterType, operand, {expandedIndices}, reshapedUpdates, {scatterDim});
+        auto result = ApplyScatter(scatterType, operand, idxVec, reshapedUpdates, axes);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
