@@ -132,9 +132,21 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
                 result = mlx::core::prod(input_opt->get(), axes);
                 break;
             case ReduceType::And:
+                if (input_opt->get().dtype() != mlx::core::bool_) {
+                    MPS_LOG_ERROR(
+                        "stablehlo.reduce: bitwise And reduction not supported for non-bool "
+                        "types\n");
+                    return false;
+                }
                 result = mlx::core::all(input_opt->get(), axes);
                 break;
             case ReduceType::Or:
+                if (input_opt->get().dtype() != mlx::core::bool_) {
+                    MPS_LOG_ERROR(
+                        "stablehlo.reduce: bitwise Or reduction not supported for non-bool "
+                        "types\n");
+                    return false;
+                }
                 result = mlx::core::any(input_opt->get(), axes);
                 break;
             default:

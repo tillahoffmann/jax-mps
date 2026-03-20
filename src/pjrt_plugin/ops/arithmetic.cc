@@ -150,32 +150,65 @@ bool HandlePopcount(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
         val = mlx::core::astype(val, mlx::core::uint8);
     } else if (dtype == mlx::core::int16) {
         val = mlx::core::astype(val, mlx::core::uint16);
-    }
-    val = mlx::core::astype(val, mlx::core::uint32);
-
-    // Mask to original bit width to ensure upper bits are zero
-    if (bit_width < 32) {
-        uint32_t mask = (1U << bit_width) - 1;
-        val = mlx::core::bitwise_and(val, mlx::core::array(mask, mlx::core::uint32));
+    } else if (dtype == mlx::core::int64) {
+        val = mlx::core::astype(val, mlx::core::uint64);
     }
 
-    // Standard Hamming weight algorithm
-    auto m1 = mlx::core::array(0x55555555U, mlx::core::uint32);
-    auto m2 = mlx::core::array(0x33333333U, mlx::core::uint32);
-    auto m4 = mlx::core::array(0x0F0F0F0FU, mlx::core::uint32);
-    val = mlx::core::subtract(
-        val, mlx::core::bitwise_and(
-                 mlx::core::right_shift(val, mlx::core::array(1, mlx::core::uint32)), m1));
-    val = mlx::core::add(
-        mlx::core::bitwise_and(val, m2),
-        mlx::core::bitwise_and(mlx::core::right_shift(val, mlx::core::array(2, mlx::core::uint32)),
-                               m2));
-    val = mlx::core::bitwise_and(
-        mlx::core::add(val, mlx::core::right_shift(val, mlx::core::array(4, mlx::core::uint32))),
-        m4);
-    val = mlx::core::add(val, mlx::core::right_shift(val, mlx::core::array(8, mlx::core::uint32)));
-    val = mlx::core::add(val, mlx::core::right_shift(val, mlx::core::array(16, mlx::core::uint32)));
-    val = mlx::core::bitwise_and(val, mlx::core::array(0x3FU, mlx::core::uint32));
+    if (bit_width > 32) {
+        // 64-bit Hamming weight algorithm
+        val = mlx::core::astype(val, mlx::core::uint64);
+        auto m1 = mlx::core::array(static_cast<uint64_t>(0x5555555555555555ULL), mlx::core::uint64);
+        auto m2 = mlx::core::array(static_cast<uint64_t>(0x3333333333333333ULL), mlx::core::uint64);
+        auto m4 = mlx::core::array(static_cast<uint64_t>(0x0F0F0F0F0F0F0F0FULL), mlx::core::uint64);
+        val = mlx::core::subtract(
+            val, mlx::core::bitwise_and(
+                     mlx::core::right_shift(val, mlx::core::array(1, mlx::core::uint64)), m1));
+        val = mlx::core::add(
+            mlx::core::bitwise_and(val, m2),
+            mlx::core::bitwise_and(
+                mlx::core::right_shift(val, mlx::core::array(2, mlx::core::uint64)), m2));
+        val = mlx::core::bitwise_and(
+            mlx::core::add(val,
+                           mlx::core::right_shift(val, mlx::core::array(4, mlx::core::uint64))),
+            m4);
+        val = mlx::core::add(val,
+                             mlx::core::right_shift(val, mlx::core::array(8, mlx::core::uint64)));
+        val = mlx::core::add(val,
+                             mlx::core::right_shift(val, mlx::core::array(16, mlx::core::uint64)));
+        val = mlx::core::add(val,
+                             mlx::core::right_shift(val, mlx::core::array(32, mlx::core::uint64)));
+        val = mlx::core::bitwise_and(
+            val, mlx::core::array(static_cast<uint64_t>(0x7FU), mlx::core::uint64));
+    } else {
+        // 32-bit Hamming weight algorithm
+        val = mlx::core::astype(val, mlx::core::uint32);
+
+        // Mask to original bit width to ensure upper bits are zero
+        if (bit_width < 32) {
+            uint32_t mask = (1U << bit_width) - 1;
+            val = mlx::core::bitwise_and(val, mlx::core::array(mask, mlx::core::uint32));
+        }
+
+        auto m1 = mlx::core::array(0x55555555U, mlx::core::uint32);
+        auto m2 = mlx::core::array(0x33333333U, mlx::core::uint32);
+        auto m4 = mlx::core::array(0x0F0F0F0FU, mlx::core::uint32);
+        val = mlx::core::subtract(
+            val, mlx::core::bitwise_and(
+                     mlx::core::right_shift(val, mlx::core::array(1, mlx::core::uint32)), m1));
+        val = mlx::core::add(
+            mlx::core::bitwise_and(val, m2),
+            mlx::core::bitwise_and(
+                mlx::core::right_shift(val, mlx::core::array(2, mlx::core::uint32)), m2));
+        val = mlx::core::bitwise_and(
+            mlx::core::add(val,
+                           mlx::core::right_shift(val, mlx::core::array(4, mlx::core::uint32))),
+            m4);
+        val = mlx::core::add(val,
+                             mlx::core::right_shift(val, mlx::core::array(8, mlx::core::uint32)));
+        val = mlx::core::add(val,
+                             mlx::core::right_shift(val, mlx::core::array(16, mlx::core::uint32)));
+        val = mlx::core::bitwise_and(val, mlx::core::array(0x3FU, mlx::core::uint32));
+    }
     values.emplace(ToKey(op->getResult(0)), mlx::core::astype(val, dtype));
     return true;
 }

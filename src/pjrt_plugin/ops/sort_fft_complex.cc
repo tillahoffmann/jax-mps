@@ -68,8 +68,20 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
             return false;
         }
 
-        auto sortKeys = ascending ? keys_opt->get() : mlx::core::negative(keys_opt->get());
-        auto indices = mlx::core::argsort(sortKeys, dimension);
+        auto indices = mlx::core::argsort(keys_opt->get(), dimension);
+        if (!ascending) {
+            // Reverse indices along the sort dimension instead of negating keys,
+            // which would break for unsigned integer types.
+            auto shape = indices.shape();
+            int dimSize = shape[dimension];
+            mlx::core::Shape starts(indices.ndim(), 0);
+            mlx::core::Shape stops(shape.begin(), shape.end());
+            mlx::core::Shape steps(indices.ndim(), 1);
+            starts[dimension] = dimSize - 1;
+            stops[dimension] = -dimSize - 1;
+            steps[dimension] = -1;
+            indices = mlx::core::slice(indices, starts, stops, steps);
+        }
 
         for (size_t i = 0; i < numInputs; ++i) {
             auto input_opt = GetValue(values, sortOp.getInputs()[i]);
