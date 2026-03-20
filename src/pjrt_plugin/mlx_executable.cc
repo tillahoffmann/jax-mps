@@ -1001,6 +1001,14 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     }
 
     // Step 1: Extract per-axis index arrays from start_indices
+    // Validate: when there's no index vector dim, startIndexMap must be size 1
+    // (the entire start_indices tensor is the index for that single axis).
+    if (!hasIdxVecDim && startIndexMap.size() > 1) {
+        MPS_LOG_ERROR("stablehlo.gather: startIndexMap.size=%zu > 1 but no index_vector_dim\n",
+                      startIndexMap.size());
+        return false;
+    }
+
     std::vector<mlx::core::array> idxVec;
     std::vector<int> axes;
 
@@ -3414,9 +3422,12 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 
 // Handler for stablehlo.scatter
 // Helper: apply the appropriate scatter variant based on ScatterType.
-mlx::core::array ApplyScatter(ScatterType scatterType, const mlx::core::array& operand,
-                              const std::vector<mlx::core::array>& idxVec,
-                              const mlx::core::array& updates, const std::vector<int>& axes) {
+// Returns std::nullopt for unsupported scatter types (caller should return false).
+std::optional<mlx::core::array> ApplyScatter(ScatterType scatterType,
+                                             const mlx::core::array& operand,
+                                             const std::vector<mlx::core::array>& idxVec,
+                                             const mlx::core::array& updates,
+                                             const std::vector<int>& axes) {
     switch (scatterType) {
         case ScatterType::Update:
             return mlx::core::scatter(operand, idxVec, updates, axes);
@@ -3432,7 +3443,7 @@ mlx::core::array ApplyScatter(ScatterType scatterType, const mlx::core::array& o
             return mlx::core::scatter_max(operand, idxVec, updates, axes);
         default:
             MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
-            throw std::runtime_error("stablehlo.scatter: unsupported scatter update type");
+            return std::nullopt;
     }
 }
 
@@ -3515,8 +3526,16 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     // ===== Window scatter path: scatter axes with window extent > 1 =====
     // This handles dynamic_update_slice patterns where updates span a window.
     if (hasWindowScatter) {
-        // For multi-axis window scatter, use slice_update loop
+        // For multi-axis window scatter, use slice_update loop.
+        // Batching dims are not supported here (slice_update operates on the full
+        // operand); batched multi-axis window scatter would need per-batch slicing.
         if (scatterDimsToOperandDims.size() > 1) {
+            if (!inputBatchingDims.empty()) {
+                MPS_LOG_ERROR(
+                    "stablehlo.scatter: multi-axis window scatter with batching dims "
+                    "is not supported\n");
+                return false;
+            }
             bool hasIdxVecDim = indexVectorDim < scatterIndices.ndim();
 
             // Compute batch positions (all non-index-vector dims)
@@ -3787,7 +3806,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
         auto result = ApplyScatter(scatterType, operand, idxVec, reshapedUpdates, axes);
-        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        if (!result)
+            return false;
+        values.emplace(ToKey(op->getResult(0)), std::move(*result));
         return true;
     }
 
@@ -3908,8 +3929,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 
     // Step 4: Apply scatter
     auto result = ApplyScatter(scatterType, operand, idxVec, reshapedUpdates, axes);
+    if (!result)
+        return false;
 
-    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    values.emplace(ToKey(op->getResult(0)), std::move(*result));
     return true;
 }
 
