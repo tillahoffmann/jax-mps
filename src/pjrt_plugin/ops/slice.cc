@@ -221,7 +221,7 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
     auto edgePaddingHigh = padOp.getEdgePaddingHigh();
     auto interiorPadding = padOp.getInteriorPadding();
 
-    // Check for interior padding (not yet supported)
+    // Check for interior padding
     bool hasInterior = false;
     for (int64_t p : interiorPadding) {
         if (p != 0) {
