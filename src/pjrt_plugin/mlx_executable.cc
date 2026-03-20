@@ -3620,6 +3620,14 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     case ScatterType::Add: {
                         // updateVal has operand-rank shape (insertedWindowDims is always empty
                         // on this path), so indexing by operand axis is valid.
+                        // Defensive check: guard against unexpected dimension configs.
+                        if (!insertedWindowDims.empty() ||
+                            static_cast<int>(updateVal.ndim()) != operand.ndim()) {
+                            MPS_LOG_ERROR(
+                                "stablehlo.scatter: multi-dim window scatter Add requires "
+                                "empty insertedWindowDims and operand-rank updates\n");
+                            return false;
+                        }
                         mlx::core::Shape sliceSizes(operand.shape());
                         for (int axis : axes) {
                             sliceSizes[axis] = updateVal.shape(axis);
