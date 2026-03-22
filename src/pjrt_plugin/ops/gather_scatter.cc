@@ -78,10 +78,17 @@ struct IndexExtraction {
     bool hasIdxVecDim;
 };
 
-IndexExtraction ExtractPerAxisIndices(const mlx::core::array& startIndices,
-                                      llvm::ArrayRef<int64_t> indexMap, int indexVectorDim) {
+std::optional<IndexExtraction> ExtractPerAxisIndices(const mlx::core::array& startIndices,
+                                                     llvm::ArrayRef<int64_t> indexMap,
+                                                     int indexVectorDim, const char* opName) {
     IndexExtraction result;
     result.hasIdxVecDim = indexVectorDim < startIndices.ndim();
+
+    if (!result.hasIdxVecDim && indexMap.size() > 1) {
+        MPS_LOG_ERROR("%s: indexMap.size=%zu > 1 but no index_vector_dim\n", opName,
+                      indexMap.size());
+        return std::nullopt;
+    }
 
     for (int d = 0; d < startIndices.ndim(); ++d) {
         if (!result.hasIdxVecDim || d != indexVectorDim) {
@@ -162,10 +169,13 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     }
 
     // Step 1: Extract per-axis index arrays
-    auto extraction = ExtractPerAxisIndices(*startIndices, startIndexMap, indexVectorDim);
-    auto& idxVec = extraction.idxVec;
-    auto& axes = extraction.axes;
-    auto& idxBatchShape = extraction.idxBatchShape;
+    auto extraction_opt =
+        ExtractPerAxisIndices(*startIndices, startIndexMap, indexVectorDim, "stablehlo.gather");
+    if (!extraction_opt)
+        return false;
+    auto& idxVec = extraction_opt->idxVec;
+    auto& axes = extraction_opt->axes;
+    auto& idxBatchShape = extraction_opt->idxBatchShape;
 
     // Clamp gather indices to valid range
     for (size_t i = 0; i < idxVec.size(); ++i) {
@@ -177,7 +187,7 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
 
     // Step 2: Add iota indices for operand_batching_dims
     AddBatchingIotas(idxVec, axes, *operand, idxBatchShape, operandBatchingDims,
-                     startIndicesBatchingDims, extraction.hasIdxVecDim, indexVectorDim);
+                     startIndicesBatchingDims, extraction_opt->hasIdxVecDim, indexVectorDim);
 
     // Step 3: Call mlx::core::gather
     auto result = mlx::core::gather(*operand, idxVec, axes, sliceSizes);
@@ -552,11 +562,13 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     }
 
     // ===== General point scatter path =====
-    auto extraction =
-        ExtractPerAxisIndices(*scatterIndices, scatterDimsToOperandDims, indexVectorDim);
-    auto& idxVec = extraction.idxVec;
-    auto& axes = extraction.axes;
-    auto& idxBatchShape = extraction.idxBatchShape;
+    auto extraction_opt = ExtractPerAxisIndices(*scatterIndices, scatterDimsToOperandDims,
+                                                indexVectorDim, "stablehlo.scatter");
+    if (!extraction_opt)
+        return false;
+    auto& idxVec = extraction_opt->idxVec;
+    auto& axes = extraction_opt->axes;
+    auto& idxBatchShape = extraction_opt->idxBatchShape;
 
     // Add iota indices for batching dims
     AddBatchingIotas(idxVec, axes, *operand, idxBatchShape, inputBatchingDims,
