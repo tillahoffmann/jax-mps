@@ -15,16 +15,6 @@ namespace jax_mps {
 
 namespace {
 
-// Helper to check if a permutation is the identity (no transpose needed)
-bool IsIdentityPermutation(const std::vector<int>& perm) {
-    for (size_t i = 0; i < perm.size(); ++i) {
-        if (perm[i] != static_cast<int>(i)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // Use einsum for dot_general by default (single fused op vs transpose+reshape+matmul+reshape).
 bool UseEinsumForDotGeneral() {
     static bool use_einsum = std::getenv("MPS_NO_EINSUM") == nullptr;
@@ -98,21 +88,15 @@ std::string BuildEinsumSubscript(int lhsRank, int rhsRank, llvm::ArrayRef<int64_
 // Handler for stablehlo.dot_general
 bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
-    auto dotOp = mlir::dyn_cast<mlir::stablehlo::DotGeneralOp>(op);
-    if (!dotOp) {
-        MPS_LOG_ERROR("stablehlo.dot_general: failed to cast\n");
+    auto dotOp = CastOp<mlir::stablehlo::DotGeneralOp>(op, "stablehlo.dot_general");
+    if (!dotOp)
         return false;
-    }
 
-    auto lhs_opt = GetValue(values, op->getOperand(0));
-    auto rhs_opt = GetValue(values, op->getOperand(1));
-    if (!lhs_opt || !rhs_opt) {
-        MPS_LOG_ERROR("stablehlo.dot_general: operand not found in value map\n");
+    auto* lhs = RequireValue(values, op->getOperand(0), "stablehlo.dot_general");
+    auto* rhs = RequireValue(values, op->getOperand(1), "stablehlo.dot_general");
+    if (!lhs || !rhs)
         return false;
-    }
 
-    auto& lhs = lhs_opt->get();
-    auto& rhs = rhs_opt->get();
     auto dimNumbers = dotOp.getDotDimensionNumbers();
 
     auto lhsContractDims = dimNumbers.getLhsContractingDimensions();
@@ -120,15 +104,15 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     auto lhsBatchDims = dimNumbers.getLhsBatchingDimensions();
     auto rhsBatchDims = dimNumbers.getRhsBatchingDimensions();
 
-    auto lhsRank = static_cast<int>(lhs.ndim());
-    auto rhsRank = static_cast<int>(rhs.ndim());
+    auto lhsRank = static_cast<int>(lhs->ndim());
+    auto rhsRank = static_cast<int>(rhs->ndim());
 
     // Try einsum path if enabled
     if (UseEinsumForDotGeneral()) {
         std::string subscript = BuildEinsumSubscript(lhsRank, rhsRank, lhsBatchDims, rhsBatchDims,
                                                      lhsContractDims, rhsContractDims);
         MPS_LOG_DEBUG("dot_general einsum: %s\n", subscript.c_str());
-        auto result = mlx::core::einsum(subscript, {lhs, rhs});
+        auto result = mlx::core::einsum(subscript, {*lhs, *rhs});
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
@@ -168,8 +152,8 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     for (int d : rhsFreeDims)
         rhsPerm.push_back(d);
 
-    auto lhsT = mlx::core::transpose(lhs, lhsPerm);
-    auto rhsT = mlx::core::transpose(rhs, rhsPerm);
+    auto lhsT = mlx::core::transpose(*lhs, lhsPerm);
+    auto rhsT = mlx::core::transpose(*rhs, rhsPerm);
 
     int numBatch = static_cast<int>(lhsBatchDims.size());
     int numLhsFree = static_cast<int>(lhsFreeDims.size());
@@ -237,21 +221,15 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
 // Handler for stablehlo.convolution
 bool HandleConvolution(mlir::Operation* op, ValueMap& values,
                        std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto convOp = mlir::dyn_cast<mlir::stablehlo::ConvolutionOp>(op);
-    if (!convOp) {
-        MPS_LOG_ERROR("stablehlo.convolution: failed to cast\n");
+    auto convOp = CastOp<mlir::stablehlo::ConvolutionOp>(op, "stablehlo.convolution");
+    if (!convOp)
         return false;
-    }
 
-    auto input_opt = GetValue(values, op->getOperand(0));
-    auto kernel_opt = GetValue(values, op->getOperand(1));
-    if (!input_opt || !kernel_opt) {
-        MPS_LOG_ERROR("stablehlo.convolution: operand not found in value map\n");
+    auto* input = RequireValue(values, op->getOperand(0), "stablehlo.convolution");
+    auto* kernel = RequireValue(values, op->getOperand(1), "stablehlo.convolution");
+    if (!input || !kernel)
         return false;
-    }
 
-    auto& input = input_opt->get();
-    auto& kernel = kernel_opt->get();
     auto dimNumbers = convOp.getDimensionNumbers();
 
     int64_t inputBatchDim = dimNumbers.getInputBatchDimension();
@@ -269,7 +247,7 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
     int numSpatialDims = static_cast<int>(inputSpatialDims.size());
 
     // Build input permutation to [N, spatial..., C_in] format
-    std::vector<int> inputPerm(input.ndim());
+    std::vector<int> inputPerm(input->ndim());
     inputPerm[0] = static_cast<int>(inputBatchDim);
     for (int i = 0; i < numSpatialDims; ++i) {
         inputPerm[1 + i] = static_cast<int>(inputSpatialDims[i]);
@@ -277,23 +255,22 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
     inputPerm[1 + numSpatialDims] = static_cast<int>(inputFeatureDim);
 
     // Build kernel permutation to [C_out, spatial..., C_in] format
-    std::vector<int> kernelPerm(kernel.ndim());
+    std::vector<int> kernelPerm(kernel->ndim());
     kernelPerm[0] = static_cast<int>(kernelOutputFeatureDim);
     for (int i = 0; i < numSpatialDims; ++i) {
         kernelPerm[1 + i] = static_cast<int>(kernelSpatialDims[i]);
     }
     kernelPerm[1 + numSpatialDims] = static_cast<int>(kernelInputFeatureDim);
 
-    auto inputT = IsIdentityPermutation(inputPerm) ? input : mlx::core::transpose(input, inputPerm);
+    auto inputT =
+        IsIdentityPermutation(inputPerm) ? *input : mlx::core::transpose(*input, inputPerm);
     auto kernelT =
-        IsIdentityPermutation(kernelPerm) ? kernel : mlx::core::transpose(kernel, kernelPerm);
+        IsIdentityPermutation(kernelPerm) ? *kernel : mlx::core::transpose(*kernel, kernelPerm);
 
     // Extract strides
     std::vector<int> strides;
     if (auto stridesAttr = convOp.getWindowStrides()) {
-        for (int64_t s : *stridesAttr) {
-            strides.push_back(static_cast<int>(s));
-        }
+        strides = ToIntVec(*stridesAttr);
     } else {
         strides.resize(numSpatialDims, 1);
     }
@@ -313,18 +290,14 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
     // Extract dilation
     std::vector<int> kernelDilation;
     if (auto dilationAttr = convOp.getRhsDilation()) {
-        for (int64_t d : *dilationAttr) {
-            kernelDilation.push_back(static_cast<int>(d));
-        }
+        kernelDilation = ToIntVec(*dilationAttr);
     } else {
         kernelDilation.resize(numSpatialDims, 1);
     }
 
     std::vector<int> inputDilation;
     if (auto dilationAttr = convOp.getLhsDilation()) {
-        for (int64_t d : *dilationAttr) {
-            inputDilation.push_back(static_cast<int>(d));
-        }
+        inputDilation = ToIntVec(*dilationAttr);
     } else {
         inputDilation.resize(numSpatialDims, 1);
     }
@@ -354,8 +327,8 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
             featureGroupCount == 1) {
             useWeightGradVJP = true;
 
-            auto& origAct = input;
-            auto& origGrad = kernel;
+            auto& origAct = *input;
+            auto& origGrad = *kernel;
 
             int Ci_true = origAct.shape(static_cast<int>(inputBatchDim));
             int Co_true = origGrad.shape(static_cast<int>(kernelOutputFeatureDim));
@@ -421,19 +394,16 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
 // Handler for stablehlo.cholesky
 bool HandleCholesky(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                     ExecContext& ctx) {
-    auto cholOp = mlir::dyn_cast<mlir::stablehlo::CholeskyOp>(op);
-    if (!cholOp) {
-        MPS_LOG_ERROR("stablehlo.cholesky: failed to cast\n");
+    auto cholOp = CastOp<mlir::stablehlo::CholeskyOp>(op, "stablehlo.cholesky");
+    if (!cholOp)
         return false;
-    }
-    auto input_opt = GetValue(values, cholOp.getA());
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.cholesky: operand not found in value map\n");
+
+    auto* a = RequireValue(values, cholOp.getA(), "stablehlo.cholesky");
+    if (!a)
         return false;
-    }
-    auto& a = input_opt->get();
+
     bool lower = cholOp.getLower();
-    auto result = mlx::core::linalg::cholesky(a, /*upper=*/!lower);
+    auto result = mlx::core::linalg::cholesky(*a, /*upper=*/!lower);
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }
@@ -441,27 +411,22 @@ bool HandleCholesky(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
 // Handler for stablehlo.triangular_solve
 bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
                            std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto triSolveOp = mlir::dyn_cast<mlir::stablehlo::TriangularSolveOp>(op);
-    if (!triSolveOp) {
-        MPS_LOG_ERROR("stablehlo.triangular_solve: failed to cast\n");
+    auto triSolveOp = CastOp<mlir::stablehlo::TriangularSolveOp>(op, "stablehlo.triangular_solve");
+    if (!triSolveOp)
         return false;
-    }
-    auto a_opt = GetValue(values, triSolveOp.getA());
-    auto b_opt = GetValue(values, triSolveOp.getB());
-    if (!a_opt || !b_opt) {
-        MPS_LOG_ERROR("stablehlo.triangular_solve: operand not found in value map\n");
+
+    auto* a_ptr = RequireValue(values, triSolveOp.getA(), "stablehlo.triangular_solve");
+    auto* b_ptr = RequireValue(values, triSolveOp.getB(), "stablehlo.triangular_solve");
+    if (!a_ptr || !b_ptr)
         return false;
-    }
-    auto& a = a_opt->get();
-    auto& b = b_opt->get();
 
     bool left_side = triSolveOp.getLeftSide();
     bool lower = triSolveOp.getLower();
     bool unit_diagonal = triSolveOp.getUnitDiagonal();
     auto transpose = triSolveOp.getTransposeA();
 
-    auto a_solve = a;
-    auto b_solve = b;
+    auto a_solve = *a_ptr;
+    auto b_solve = *b_ptr;
 
     if (unit_diagonal) {
         int n = a_solve.shape()[a_solve.ndim() - 1];
@@ -479,13 +444,19 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
     auto eps = mlx::core::array(1e-30F, a_solve.dtype());
     a_solve = a_solve + mlx::core::expand_dims(zero_mask, -1) * eye_mat * eps;
 
-    if (transpose == mlir::stablehlo::Transpose::TRANSPOSE ||
-        transpose == mlir::stablehlo::Transpose::ADJOINT) {
-        auto ndim = a_solve.ndim();
+    // Helper to swap last two dims
+    auto swapLast2 = [](const mlx::core::array& arr) {
+        auto ndim = arr.ndim();
         std::vector<int> perm(ndim);
         std::iota(perm.begin(), perm.end(), 0);
         std::swap(perm[ndim - 2], perm[ndim - 1]);
-        a_solve = mlx::core::transpose(a_solve, perm);
+        return std::make_pair(mlx::core::transpose(arr, perm), perm);
+    };
+
+    if (transpose == mlir::stablehlo::Transpose::TRANSPOSE ||
+        transpose == mlir::stablehlo::Transpose::ADJOINT) {
+        auto [transposed, _] = swapLast2(a_solve);
+        a_solve = transposed;
         lower = !lower;
     }
 
@@ -501,18 +472,12 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
 
     try {
         if (!left_side) {
-            auto ndim_a = a_solve.ndim();
-            std::vector<int> perm_a(ndim_a);
-            std::iota(perm_a.begin(), perm_a.end(), 0);
-            std::swap(perm_a[ndim_a - 2], perm_a[ndim_a - 1]);
-            a_solve = mlx::core::transpose(a_solve, perm_a);
+            auto [a_t, _] = swapLast2(a_solve);
+            a_solve = a_t;
             lower = !lower;
 
-            auto ndim_b = b_solve.ndim();
-            std::vector<int> perm_b(ndim_b);
-            std::iota(perm_b.begin(), perm_b.end(), 0);
-            std::swap(perm_b[ndim_b - 2], perm_b[ndim_b - 1]);
-            b_solve = mlx::core::transpose(b_solve, perm_b);
+            auto [b_t, perm_b] = swapLast2(b_solve);
+            b_solve = b_t;
 
             auto x_t = mlx::core::linalg::solve_triangular(a_solve, b_solve, /*upper=*/!lower,
                                                            mlx::core::Device::cpu);

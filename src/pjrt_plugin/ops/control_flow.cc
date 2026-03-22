@@ -15,12 +15,10 @@ namespace {
 bool CollectReturnValues(mlir::Operation* op, ValueMap& values,
                          std::vector<mlx::core::array>& outputs, const char* opName) {
     for (auto operand : op->getOperands()) {
-        auto val_opt = GetValue(values, operand);
-        if (!val_opt) {
-            MPS_LOG_ERROR("%s: operand not found in value map\n", opName);
+        auto* val = RequireValue(values, operand, opName);
+        if (!val)
             return false;
-        }
-        outputs.push_back(val_opt->get());
+        outputs.push_back(*val);
     }
     return true;
 }
@@ -40,11 +38,9 @@ bool HandleStablehloReturn(mlir::Operation* op, ValueMap& values,
 // Handler for stablehlo.while
 bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                  ExecContext& ctx) {
-    auto whileOp = mlir::dyn_cast<mlir::stablehlo::WhileOp>(op);
-    if (!whileOp) {
-        MPS_LOG_ERROR("stablehlo.while: failed to cast\n");
+    auto whileOp = CastOp<mlir::stablehlo::WhileOp>(op, "stablehlo.while");
+    if (!whileOp)
         return false;
-    }
 
     if (ctx.inside_compile) {
         throw CompileIncompatibleError("stablehlo.while requires eval()");
@@ -52,12 +48,10 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
 
     std::vector<mlx::core::array> loopVars;
     for (auto operand : op->getOperands()) {
-        auto val_opt = GetValue(values, operand);
-        if (!val_opt) {
-            MPS_LOG_ERROR("stablehlo.while: operand not found in value map\n");
+        auto* val = RequireValue(values, operand, "stablehlo.while");
+        if (!val)
             return false;
-        }
-        loopVars.push_back(val_opt->get());
+        loopVars.push_back(*val);
     }
 
     auto& condRegion = whileOp.getCond();
@@ -174,23 +168,19 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
 // Handler for stablehlo.case (implements lax.cond and lax.switch)
 bool HandleCase(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                 ExecContext& ctx) {
-    auto caseOp = mlir::dyn_cast<mlir::stablehlo::CaseOp>(op);
-    if (!caseOp) {
-        MPS_LOG_ERROR("stablehlo.case: failed to cast\n");
+    auto caseOp = CastOp<mlir::stablehlo::CaseOp>(op, "stablehlo.case");
+    if (!caseOp)
         return false;
-    }
 
-    auto index_opt = GetValue(values, caseOp.getIndex());
-    if (!index_opt) {
-        MPS_LOG_ERROR("stablehlo.case: index operand not found\n");
+    auto* index = RequireValue(values, caseOp.getIndex(), "stablehlo.case");
+    if (!index)
         return false;
-    }
 
     if (ctx.inside_compile) {
         throw CompileIncompatibleError("stablehlo.case requires eval()");
     }
-    mlx::core::eval(index_opt->get());
-    int branchIdx = index_opt->get().item<int>();
+    mlx::core::eval(*index);
+    int branchIdx = index->item<int>();
 
     int numBranches = static_cast<int>(caseOp.getBranches().size());
     if (branchIdx < 0 || branchIdx >= numBranches) {
@@ -215,11 +205,9 @@ bool HandleCase(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 // Handler for func.call
 bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                 ExecContext& ctx) {
-    auto callOp = mlir::dyn_cast<mlir::func::CallOp>(op);
-    if (!callOp) {
-        MPS_LOG_ERROR("func.call: failed to cast\n");
+    auto callOp = CastOp<mlir::func::CallOp>(op, "func.call");
+    if (!callOp)
         return false;
-    }
 
     auto calleeName = callOp.getCallee();
     auto calleeFunc = ctx.module.lookupSymbol<mlir::func::FuncOp>(calleeName);
@@ -230,12 +218,10 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 
     std::vector<mlx::core::array> callInputs;
     for (auto operand : op->getOperands()) {
-        auto val_opt = GetValue(values, operand);
-        if (!val_opt) {
-            MPS_LOG_ERROR("func.call: operand not found in value map\n");
+        auto* val = RequireValue(values, operand, "func.call");
+        if (!val)
             return false;
-        }
-        callInputs.push_back(val_opt->get());
+        callInputs.push_back(*val);
     }
 
     std::vector<mlx::core::array> callOutputs;
@@ -259,42 +245,24 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 // Handler for stablehlo.custom_call
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
-    auto customCallOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(op);
-    if (!customCallOp) {
-        MPS_LOG_ERROR("stablehlo.custom_call: failed to cast\n");
+    auto customCallOp = CastOp<mlir::stablehlo::CustomCallOp>(op, "stablehlo.custom_call");
+    if (!customCallOp)
         return false;
-    }
 
     auto callTargetName = customCallOp.getCallTargetName().str();
 
-    // Handle Sharding annotation - just pass input through
-    if (callTargetName == "Sharding") {
-        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
-            MPS_LOG_ERROR("stablehlo.custom_call Sharding: expected 1 input and 1 output\n");
-            return false;
-        }
-        auto input_opt = GetValue(values, op->getOperand(0));
-        if (!input_opt) {
-            MPS_LOG_ERROR("stablehlo.custom_call Sharding: operand not found\n");
-            return false;
-        }
-        values.emplace(ToKey(op->getResult(0)), input_opt->get());
-        return true;
-    }
-
-    // Handle SPMDFullToShardShape and SPMDShardToFullShape
-    if (callTargetName == "SPMDFullToShardShape" || callTargetName == "SPMDShardToFullShape") {
+    // Handle Sharding annotation and SPMD shape ops - just pass input through
+    if (callTargetName == "Sharding" || callTargetName == "SPMDFullToShardShape" ||
+        callTargetName == "SPMDShardToFullShape") {
         if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
             MPS_LOG_ERROR("stablehlo.custom_call %s: expected 1 input and 1 output\n",
                           callTargetName.c_str());
             return false;
         }
-        auto input_opt = GetValue(values, op->getOperand(0));
-        if (!input_opt) {
-            MPS_LOG_ERROR("stablehlo.custom_call %s: operand not found\n", callTargetName.c_str());
+        auto* input = RequireValue(values, op->getOperand(0), callTargetName.c_str());
+        if (!input)
             return false;
-        }
-        values.emplace(ToKey(op->getResult(0)), input_opt->get());
+        values.emplace(ToKey(op->getResult(0)), *input);
         return true;
     }
 
@@ -314,12 +282,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                           callTargetName.c_str());
             return false;
         }
-        auto input_opt = GetValue(values, op->getOperand(0));
-        if (!input_opt) {
-            MPS_LOG_ERROR("stablehlo.custom_call %s: operand not found\n", callTargetName.c_str());
+        auto* input = RequireValue(values, op->getOperand(0), callTargetName.c_str());
+        if (!input)
             return false;
-        }
-        values.emplace(ToKey(op->getResult(0)), unaryIt->second(input_opt->get(), {}));
+        values.emplace(ToKey(op->getResult(0)), unaryIt->second(*input, {}));
         return true;
     }
 
@@ -329,16 +295,14 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             MPS_LOG_ERROR("stablehlo.custom_call mhlo.topk: expected 1 input and 2 outputs\n");
             return false;
         }
-        auto input_opt = GetValue(values, op->getOperand(0));
-        if (!input_opt) {
-            MPS_LOG_ERROR("stablehlo.custom_call mhlo.topk: operand not found\n");
+        auto* input = RequireValue(values, op->getOperand(0), "mhlo.topk");
+        if (!input)
             return false;
-        }
 
         auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
         int k = static_cast<int>(resultType.getShape().back());
-        auto input = mlx::core::contiguous(input_opt->get());
-        auto [topValues, indices] = TopKImpl(input, k);
+        auto contiguous_input = mlx::core::contiguous(*input);
+        auto [topValues, indices] = TopKImpl(contiguous_input, k);
         values.emplace(ToKey(op->getResult(0)), std::move(topValues));
         values.emplace(ToKey(op->getResult(1)), std::move(indices));
         return true;
@@ -351,11 +315,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
 // Handler for stablehlo.composite
 bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                      ExecContext& ctx) {
-    auto compositeOp = mlir::dyn_cast<mlir::stablehlo::CompositeOp>(op);
-    if (!compositeOp) {
-        MPS_LOG_ERROR("stablehlo.composite: failed to cast\n");
+    auto compositeOp = CastOp<mlir::stablehlo::CompositeOp>(op, "stablehlo.composite");
+    if (!compositeOp)
         return false;
-    }
 
     auto compositeName = compositeOp.getName().str();
     auto decompositionName = compositeOp.getDecomposition().str();
@@ -366,12 +328,10 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     // Gather inputs
     std::vector<mlx::core::array> inputs;
     for (auto operand : op->getOperands()) {
-        auto val_opt = GetValue(values, operand);
-        if (!val_opt) {
-            MPS_LOG_ERROR("stablehlo.composite %s: operand not found\n", compositeName.c_str());
+        auto* val = RequireValue(values, operand, compositeName.c_str());
+        if (!val)
             return false;
-        }
-        inputs.push_back(val_opt->get());
+        inputs.push_back(*val);
     }
 
     // Try native MLX dispatch for known single-input CHLO composite ops.
@@ -443,12 +403,10 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
 bool HandleOptimizationBarrier(mlir::Operation* op, ValueMap& values,
                                std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
-        auto operand_opt = GetValue(values, op->getOperand(i));
-        if (!operand_opt) {
-            MPS_LOG_ERROR("stablehlo.optimization_barrier: operand %u not found\n", i);
+        auto* val = RequireValue(values, op->getOperand(i), "stablehlo.optimization_barrier");
+        if (!val)
             return false;
-        }
-        values.emplace(ToKey(op->getResult(i)), operand_opt->get());
+        values.emplace(ToKey(op->getResult(i)), *val);
     }
     return true;
 }

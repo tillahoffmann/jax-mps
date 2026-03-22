@@ -67,6 +67,75 @@ std::optional<mlx::core::array> CreateArrayWithTypedPtr(const void* data,
 
 std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr attr);
 
+// --- Convenience helpers ---
+
+// Like GetValue but logs an error and returns nullptr on failure.
+inline mlx::core::array* RequireValue(ValueMap& values, mlir::Value v, const char* opName) {
+    auto it = values.find(ToKey(v));
+    if (it == values.end()) {
+        MPS_LOG_ERROR("%s: operand not found in value map\n", opName);
+        return nullptr;
+    }
+    return &it->second;
+}
+
+// Cast mlir::Operation to a specific op type, logging on failure.
+template <typename OpT>
+OpT CastOp(mlir::Operation* op, const char* opName) {
+    auto result = mlir::dyn_cast<OpT>(op);
+    if (!result) {
+        MPS_LOG_ERROR("%s: failed to cast\n", opName);
+    }
+    return result;
+}
+
+// Convert a range of int64_t-like values to std::vector<int>.
+template <typename Range>
+std::vector<int> ToIntVec(const Range& dims) {
+    std::vector<int> result;
+    for (auto d : dims)
+        result.push_back(static_cast<int>(d));
+    return result;
+}
+
+// Convert a range to mlx::core::Shape (SmallVector<int32_t>).
+template <typename Range>
+mlx::core::Shape ToShape(const Range& dims) {
+    mlx::core::Shape result;
+    for (auto d : dims)
+        result.push_back(static_cast<int32_t>(d));
+    return result;
+}
+
+// Extract the result shape from op->getResult(0), logging on failure.
+inline std::optional<mlx::core::Shape> GetResultShape(mlir::Operation* op, const char* opName) {
+    auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType) {
+        MPS_LOG_ERROR("%s: result type is not RankedTensorType\n", opName);
+        return std::nullopt;
+    }
+    return GetShape(resultType);
+}
+
+// Extract the result dtype from op->getResult(0), logging on failure.
+inline std::optional<mlx::core::Dtype> GetResultDtype(mlir::Operation* op, const char* opName) {
+    auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType) {
+        MPS_LOG_ERROR("%s: result type is not RankedTensorType\n", opName);
+        return std::nullopt;
+    }
+    return MlirTypeToMlxDtype(resultType.getElementType());
+}
+
+// Check if a permutation is the identity (no transpose needed).
+inline bool IsIdentityPermutation(const std::vector<int>& perm) {
+    for (size_t i = 0; i < perm.size(); ++i) {
+        if (perm[i] != static_cast<int>(i))
+            return false;
+    }
+    return true;
+}
+
 // --- Factory functions (defined in mlx_executable.cc) ---
 
 OpHandler MakeUnaryHandler(const char* opName, UnaryMlxFn fn);

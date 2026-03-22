@@ -10,33 +10,25 @@ namespace {
 // Handler for stablehlo.clamp
 bool HandleClamp(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                  ExecContext& ctx) {
-    auto min_opt = GetValue(values, op->getOperand(0));
-    auto operand_opt = GetValue(values, op->getOperand(1));
-    auto max_opt = GetValue(values, op->getOperand(2));
-    if (!min_opt || !operand_opt || !max_opt) {
-        MPS_LOG_ERROR("stablehlo.clamp: operand not found in value map\n");
+    auto* min_val = RequireValue(values, op->getOperand(0), "stablehlo.clamp");
+    auto* operand = RequireValue(values, op->getOperand(1), "stablehlo.clamp");
+    auto* max_val = RequireValue(values, op->getOperand(2), "stablehlo.clamp");
+    if (!min_val || !operand || !max_val)
         return false;
-    }
-    // clamp(min, x, max) -> maximum(min, minimum(x, max))
-    auto clamped = mlx::core::clip(operand_opt->get(), min_opt->get(), max_opt->get());
-    values.emplace(ToKey(op->getResult(0)), clamped);
+    values.emplace(ToKey(op->getResult(0)), mlx::core::clip(*operand, *min_val, *max_val));
     return true;
 }
 
 // Handler for stablehlo.remainder
 bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                      ExecContext& ctx) {
-    auto lhs_opt = GetValue(values, op->getOperand(0));
-    auto rhs_opt = GetValue(values, op->getOperand(1));
-    if (!lhs_opt || !rhs_opt) {
-        MPS_LOG_ERROR("stablehlo.remainder: operand not found in value map\n");
+    auto* a = RequireValue(values, op->getOperand(0), "stablehlo.remainder");
+    auto* b = RequireValue(values, op->getOperand(1), "stablehlo.remainder");
+    if (!a || !b)
         return false;
-    }
-    // stablehlo.remainder is C-style fmod: a - trunc(a/b) * b
-    auto& a = lhs_opt->get();
-    auto& b = rhs_opt->get();
 
-    auto dtype = a.dtype();
+    // stablehlo.remainder is C-style fmod: a - trunc(a/b) * b
+    auto dtype = a->dtype();
     bool isUnsigned = (dtype == mlx::core::uint8 || dtype == mlx::core::uint16 ||
                        dtype == mlx::core::uint32 || dtype == mlx::core::uint64);
     bool isSigned = (dtype == mlx::core::int8 || dtype == mlx::core::int16 ||
@@ -45,22 +37,21 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     mlx::core::array result(0);
     if (isUnsigned) {
         // For unsigned integers, Python-style remainder == C-style remainder
-        result = mlx::core::remainder(a, b);
+        result = mlx::core::remainder(*a, *b);
     } else if (isSigned) {
         // For signed integers, Python remainder (rounds toward -inf) needs correction
         // to C-style remainder (truncates toward zero)
-        auto py_rem = mlx::core::remainder(a, b);
-        // Correction needed when a and b have different signs and py_rem != 0
-        auto zero = mlx::core::zeros_like(a);
-        auto diff_sign = mlx::core::not_equal(mlx::core::less(a, zero), mlx::core::less(b, zero));
+        auto py_rem = mlx::core::remainder(*a, *b);
+        auto zero = mlx::core::zeros_like(*a);
+        auto diff_sign = mlx::core::not_equal(mlx::core::less(*a, zero), mlx::core::less(*b, zero));
         auto needs_fix = mlx::core::logical_and(mlx::core::not_equal(py_rem, zero), diff_sign);
-        result = mlx::core::where(needs_fix, mlx::core::subtract(py_rem, b), py_rem);
+        result = mlx::core::where(needs_fix, mlx::core::subtract(py_rem, *b), py_rem);
     } else {
         // For float types, trunc(x) = sign(x) * floor(abs(x))
-        auto quotient = mlx::core::divide(a, b);
+        auto quotient = mlx::core::divide(*a, *b);
         auto truncated = mlx::core::multiply(mlx::core::sign(quotient),
                                              mlx::core::floor(mlx::core::abs(quotient)));
-        result = mlx::core::subtract(a, mlx::core::multiply(truncated, b));
+        result = mlx::core::subtract(*a, mlx::core::multiply(truncated, *b));
     }
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
@@ -69,16 +60,12 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
 // Handler for stablehlo.cbrt (cube root = sign(x) * |x|^(1/3))
 bool HandleCbrt(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                 ExecContext& ctx) {
-    auto input_opt = GetValue(values, op->getOperand(0));
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.cbrt: operand not found in value map\n");
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.cbrt");
+    if (!x)
         return false;
-    }
-    auto& x = input_opt->get();
-    // cbrt(x) = sign(x) * |x|^(1/3)
-    auto third = mlx::core::array(1.0F / 3.0F, x.dtype());
+    auto third = mlx::core::array(1.0F / 3.0F, x->dtype());
     auto result =
-        mlx::core::multiply(mlx::core::sign(x), mlx::core::power(mlx::core::abs(x), third));
+        mlx::core::multiply(mlx::core::sign(*x), mlx::core::power(mlx::core::abs(*x), third));
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }
@@ -86,18 +73,15 @@ bool HandleCbrt(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 // Handler for stablehlo.not (bitwise not)
 bool HandleNot(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                ExecContext& ctx) {
-    auto input_opt = GetValue(values, op->getOperand(0));
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.not: operand not found in value map\n");
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.not");
+    if (!x)
         return false;
-    }
-    auto& x = input_opt->get();
-    if (x.dtype() == mlx::core::bool_) {
-        values.emplace(ToKey(op->getResult(0)), mlx::core::logical_not(x));
+    if (x->dtype() == mlx::core::bool_) {
+        values.emplace(ToKey(op->getResult(0)), mlx::core::logical_not(*x));
     } else {
         // Bitwise NOT for integers: ~x = x XOR all-ones
-        auto all_ones = mlx::core::full(x.shape(), -1, x.dtype());
-        values.emplace(ToKey(op->getResult(0)), mlx::core::bitwise_xor(x, all_ones));
+        auto all_ones = mlx::core::full(x->shape(), -1, x->dtype());
+        values.emplace(ToKey(op->getResult(0)), mlx::core::bitwise_xor(*x, all_ones));
     }
     return true;
 }
@@ -105,26 +89,22 @@ bool HandleNot(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
 // Handler for stablehlo.shift_right_arithmetic
 bool HandleShiftRightArithmetic(mlir::Operation* op, ValueMap& values,
                                 std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto lhs_opt = GetValue(values, op->getOperand(0));
-    auto rhs_opt = GetValue(values, op->getOperand(1));
-    if (!lhs_opt || !rhs_opt) {
-        MPS_LOG_ERROR("stablehlo.shift_right_arithmetic: operand not found in value map\n");
+    auto* lhs = RequireValue(values, op->getOperand(0), "stablehlo.shift_right_arithmetic");
+    auto* rhs = RequireValue(values, op->getOperand(1), "stablehlo.shift_right_arithmetic");
+    if (!lhs || !rhs)
         return false;
-    }
-    auto& lhs = lhs_opt->get();
-    auto& rhs = rhs_opt->get();
     // StableHLO spec: shift < 0 or shift >= bit_width for arithmetic right shift:
-    // positive values → 0, negative values → -1 (sign bit propagation)
-    int bit_width = static_cast<int>(GetDtypeSize(lhs.dtype()) * 8);
+    // positive values -> 0, negative values -> -1 (sign bit propagation)
+    int bit_width = static_cast<int>(GetDtypeSize(lhs->dtype()) * 8);
     auto oob = mlx::core::logical_or(
-        mlx::core::less(rhs, mlx::core::array(0, rhs.dtype())),
-        mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype())));
+        mlx::core::less(*rhs, mlx::core::array(0, rhs->dtype())),
+        mlx::core::greater_equal(*rhs, mlx::core::array(bit_width, rhs->dtype())));
     auto shifted =
-        mlx::core::right_shift(lhs, mlx::core::maximum(rhs, mlx::core::array(0, rhs.dtype())));
+        mlx::core::right_shift(*lhs, mlx::core::maximum(*rhs, mlx::core::array(0, rhs->dtype())));
     // For arithmetic shift, oob result depends on sign: 0 for positive, -1 for negative
-    auto oob_val =
-        mlx::core::where(mlx::core::less(lhs, mlx::core::array(0, lhs.dtype())),
-                         mlx::core::full(lhs.shape(), -1, lhs.dtype()), mlx::core::zeros_like(lhs));
+    auto oob_val = mlx::core::where(mlx::core::less(*lhs, mlx::core::array(0, lhs->dtype())),
+                                    mlx::core::full(lhs->shape(), -1, lhs->dtype()),
+                                    mlx::core::zeros_like(*lhs));
     values.emplace(ToKey(op->getResult(0)), mlx::core::where(oob, oob_val, shifted));
     return true;
 }
@@ -132,20 +112,14 @@ bool HandleShiftRightArithmetic(mlir::Operation* op, ValueMap& values,
 // Handler for stablehlo.popcnt (population count)
 bool HandlePopcount(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                     ExecContext& ctx) {
-    auto input_opt = GetValue(values, op->getOperand(0));
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.popcnt: operand not found in value map\n");
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.popcnt");
+    if (!x)
         return false;
-    }
-    auto& x = input_opt->get();
-    // Implement popcount using bit manipulation for integer types
-    auto dtype = x.dtype();
-
-    // Determine bit width for masking after uint32 cast
+    auto dtype = x->dtype();
     size_t bit_width = GetDtypeSize(dtype) * 8;
 
     // For signed types, first cast to unsigned of same width to avoid sign extension
-    mlx::core::array val = x;
+    mlx::core::array val = *x;
     if (dtype == mlx::core::int8) {
         val = mlx::core::astype(val, mlx::core::uint8);
     } else if (dtype == mlx::core::int16) {
@@ -216,33 +190,26 @@ bool HandlePopcount(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
 // Handler for stablehlo.select
 bool HandleSelect(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                   ExecContext& ctx) {
-    auto cond_opt = GetValue(values, op->getOperand(0));
-    auto true_opt = GetValue(values, op->getOperand(1));
-    auto false_opt = GetValue(values, op->getOperand(2));
-    if (!cond_opt || !true_opt || !false_opt) {
-        MPS_LOG_ERROR("stablehlo.select: operand not found in value map\n");
+    auto* cond = RequireValue(values, op->getOperand(0), "stablehlo.select");
+    auto* true_val = RequireValue(values, op->getOperand(1), "stablehlo.select");
+    auto* false_val = RequireValue(values, op->getOperand(2), "stablehlo.select");
+    if (!cond || !true_val || !false_val)
         return false;
-    }
-    values.emplace(ToKey(op->getResult(0)),
-                   mlx::core::where(cond_opt->get(), true_opt->get(), false_opt->get()));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(*cond, *true_val, *false_val));
     return true;
 }
 
 // Handler for stablehlo.compare
 bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                    ExecContext& ctx) {
-    auto compareOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(op);
-    if (!compareOp) {
-        MPS_LOG_ERROR("stablehlo.compare: failed to cast\n");
+    auto compareOp = CastOp<mlir::stablehlo::CompareOp>(op, "stablehlo.compare");
+    if (!compareOp)
         return false;
-    }
 
-    auto lhs_opt = GetValue(values, op->getOperand(0));
-    auto rhs_opt = GetValue(values, op->getOperand(1));
-    if (!lhs_opt || !rhs_opt) {
-        MPS_LOG_ERROR("stablehlo.compare: operand not found in value map\n");
+    auto* lhs = RequireValue(values, op->getOperand(0), "stablehlo.compare");
+    auto* rhs = RequireValue(values, op->getOperand(1), "stablehlo.compare");
+    if (!lhs || !rhs)
         return false;
-    }
 
     auto direction = compareOp.getComparisonDirection();
     std::optional<mlx::core::array> result;
@@ -250,22 +217,22 @@ bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     using Dir = mlir::stablehlo::ComparisonDirection;
     switch (direction) {
         case Dir::EQ:
-            result = mlx::core::equal(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::equal(*lhs, *rhs);
             break;
         case Dir::NE:
-            result = mlx::core::not_equal(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::not_equal(*lhs, *rhs);
             break;
         case Dir::LT:
-            result = mlx::core::less(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::less(*lhs, *rhs);
             break;
         case Dir::LE:
-            result = mlx::core::less_equal(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::less_equal(*lhs, *rhs);
             break;
         case Dir::GT:
-            result = mlx::core::greater(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::greater(*lhs, *rhs);
             break;
         case Dir::GE:
-            result = mlx::core::greater_equal(lhs_opt->get(), rhs_opt->get());
+            result = mlx::core::greater_equal(*lhs, *rhs);
             break;
         default:
             MPS_LOG_ERROR("stablehlo.compare: unsupported comparison direction\n");

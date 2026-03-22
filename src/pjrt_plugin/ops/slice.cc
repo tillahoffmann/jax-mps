@@ -54,73 +54,50 @@ mlx::core::array ApplyEdgePadding(const mlx::core::array& input,
 // Handler for stablehlo.slice
 bool HandleSlice(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                  ExecContext& ctx) {
-    auto sliceOp = mlir::dyn_cast<mlir::stablehlo::SliceOp>(op);
-    if (!sliceOp) {
-        MPS_LOG_ERROR("stablehlo.slice: failed to cast\n");
+    auto sliceOp = CastOp<mlir::stablehlo::SliceOp>(op, "stablehlo.slice");
+    if (!sliceOp)
         return false;
-    }
 
-    auto input_opt = GetValue(values, op->getOperand(0));
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.slice: operand not found in value map\n");
+    auto* input = RequireValue(values, op->getOperand(0), "stablehlo.slice");
+    if (!input)
         return false;
-    }
 
-    auto& input = input_opt->get();
-    auto startIndices = sliceOp.getStartIndices();
-    auto limitIndices = sliceOp.getLimitIndices();
-    auto strides = sliceOp.getStrides();
+    auto starts = ToShape(sliceOp.getStartIndices());
+    auto stops = ToShape(sliceOp.getLimitIndices());
+    auto steps = ToShape(sliceOp.getStrides());
 
-    mlx::core::Shape starts;
-    mlx::core::Shape stops;
-    mlx::core::Shape steps;
-    for (size_t i = 0; i < startIndices.size(); ++i) {
-        starts.push_back(static_cast<int>(startIndices[i]));
-        stops.push_back(static_cast<int>(limitIndices[i]));
-        steps.push_back(static_cast<int>(strides[i]));
-    }
-
-    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(input, starts, stops, steps));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(*input, starts, stops, steps));
     return true;
 }
 
 // Handler for stablehlo.dynamic_slice
 bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
                         std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto dynamicSliceOp = mlir::dyn_cast<mlir::stablehlo::DynamicSliceOp>(op);
-    if (!dynamicSliceOp) {
-        MPS_LOG_ERROR("stablehlo.dynamic_slice: failed to cast\n");
+    auto dynamicSliceOp = CastOp<mlir::stablehlo::DynamicSliceOp>(op, "stablehlo.dynamic_slice");
+    if (!dynamicSliceOp)
         return false;
-    }
 
-    auto input_opt = GetValue(values, op->getOperand(0));
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.dynamic_slice: operand not found in value map\n");
+    auto* input = RequireValue(values, op->getOperand(0), "stablehlo.dynamic_slice");
+    if (!input)
         return false;
-    }
 
-    auto& input = input_opt->get();
     auto sliceSizes = dynamicSliceOp.getSliceSizes();
 
     // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
-    // For each dimension, compute indices as start + arange(size) and use take().
-    auto result = input;
+    auto result = *input;
     for (size_t i = 1; i < op->getNumOperands(); ++i) {
-        auto idx_opt = GetValue(values, op->getOperand(i));
-        if (!idx_opt) {
-            MPS_LOG_ERROR("stablehlo.dynamic_slice: start index operand not found\n");
+        auto* idx = RequireValue(values, op->getOperand(i), "stablehlo.dynamic_slice");
+        if (!idx)
             return false;
-        }
-        auto start_idx = mlx::core::astype(idx_opt->get(), mlx::core::int32);
+        auto start_idx = mlx::core::astype(*idx, mlx::core::int32);
         int size = static_cast<int>(sliceSizes[i - 1]);
         int axis = static_cast<int>(i - 1);
-        int dim_size = input.shape(axis);
+        int dim_size = input->shape(axis);
 
         // Clamp start index per StableHLO spec: max(0, min(start, dim_size - size))
         start_idx = mlx::core::maximum(
             mlx::core::array(0), mlx::core::minimum(start_idx, mlx::core::array(dim_size - size)));
 
-        // Create indices: clamped_start + [0, 1, 2, ..., size-1]
         auto offsets = mlx::core::arange(0, size, mlx::core::int32);
         auto indices = mlx::core::add(start_idx, offsets);
         result = mlx::core::take(result, indices, axis);
@@ -132,42 +109,34 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
 // Handler for stablehlo.dynamic_update_slice
 bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
                               std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto dusOp = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op);
-    if (!dusOp) {
-        MPS_LOG_ERROR("stablehlo.dynamic_update_slice: failed to cast\n");
+    auto dusOp =
+        CastOp<mlir::stablehlo::DynamicUpdateSliceOp>(op, "stablehlo.dynamic_update_slice");
+    if (!dusOp)
         return false;
-    }
 
-    auto operand_opt = GetValue(values, dusOp.getOperand());
-    auto update_opt = GetValue(values, dusOp.getUpdate());
-    if (!operand_opt || !update_opt) {
-        MPS_LOG_ERROR("stablehlo.dynamic_update_slice: operand not found in value map\n");
+    auto* operand = RequireValue(values, dusOp.getOperand(), "stablehlo.dynamic_update_slice");
+    auto* update = RequireValue(values, dusOp.getUpdate(), "stablehlo.dynamic_update_slice");
+    if (!operand || !update)
         return false;
-    }
-
-    auto& operand = operand_opt->get();
-    auto& update = update_opt->get();
 
     // Empty update is a no-op
-    if (update.size() == 0) {
-        values.emplace(ToKey(op->getResult(0)), operand);
+    if (update->size() == 0) {
+        values.emplace(ToKey(op->getResult(0)), *operand);
         return true;
     }
 
     // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
-    auto gathered = update;
+    auto gathered = *update;
     auto combined_mask = mlx::core::array(true);
-    for (int d = 0; d < static_cast<int>(operand.ndim()); ++d) {
-        auto idx_opt = GetValue(values, dusOp.getStartIndices()[d]);
-        if (!idx_opt) {
-            MPS_LOG_ERROR("stablehlo.dynamic_update_slice: start index not found\n");
+    for (int d = 0; d < static_cast<int>(operand->ndim()); ++d) {
+        auto* start_val =
+            RequireValue(values, dusOp.getStartIndices()[d], "stablehlo.dynamic_update_slice");
+        if (!start_val)
             return false;
-        }
-        auto start_idx =
-            mlx::core::astype(mlx::core::reshape(idx_opt->get(), {}), mlx::core::int32);
+        auto start_idx = mlx::core::astype(mlx::core::reshape(*start_val, {}), mlx::core::int32);
 
-        int op_size = operand.shape(d);
-        int up_size = update.shape(d);
+        int op_size = operand->shape(d);
+        int up_size = update->shape(d);
 
         // Clamp start index: max(0, min(start, op_size - up_size))
         start_idx =
@@ -184,7 +153,7 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
                                    mlx::core::less(relative, mlx::core::array(up_size)));
 
         // Reshape mask for broadcasting: [1, ..., op_size, ..., 1]
-        mlx::core::Shape shape(operand.ndim(), 1);
+        mlx::core::Shape shape(operand->ndim(), 1);
         shape[d] = op_size;
         mask_d = mlx::core::reshape(mask_d, shape);
         combined_mask = mlx::core::logical_and(combined_mask, mask_d);
@@ -195,28 +164,22 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
         gathered = mlx::core::take(gathered, clamped, d);
     }
 
-    values.emplace(ToKey(op->getResult(0)), mlx::core::where(combined_mask, gathered, operand));
+    values.emplace(ToKey(op->getResult(0)), mlx::core::where(combined_mask, gathered, *operand));
     return true;
 }
 
 // Handler for stablehlo.pad
 bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                ExecContext& ctx) {
-    auto padOp = mlir::dyn_cast<mlir::stablehlo::PadOp>(op);
-    if (!padOp) {
-        MPS_LOG_ERROR("stablehlo.pad: failed to cast\n");
+    auto padOp = CastOp<mlir::stablehlo::PadOp>(op, "stablehlo.pad");
+    if (!padOp)
         return false;
-    }
 
-    auto input_opt = GetValue(values, padOp.getOperand());
-    auto padValue_opt = GetValue(values, padOp.getPaddingValue());
-    if (!input_opt || !padValue_opt) {
-        MPS_LOG_ERROR("stablehlo.pad: operand not found in value map\n");
+    auto* input = RequireValue(values, padOp.getOperand(), "stablehlo.pad");
+    auto* padValue = RequireValue(values, padOp.getPaddingValue(), "stablehlo.pad");
+    if (!input || !padValue)
         return false;
-    }
 
-    auto& input = input_opt->get();
-    auto& padValue = padValue_opt->get();
     auto edgePaddingLow = padOp.getEdgePaddingLow();
     auto edgePaddingHigh = padOp.getEdgePaddingHigh();
     auto interiorPadding = padOp.getInteriorPadding();
@@ -233,7 +196,7 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
     if (hasInterior) {
         // Interior padding: insert `p` copies of padValue between each pair of
         // existing elements along each axis, then apply edge padding.
-        auto result = input;
+        auto result = *input;
         auto ndim = edgePaddingLow.size();
 
         for (size_t axis = 0; axis < ndim; ++axis) {
@@ -252,7 +215,7 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
             newShape[axis] = newAxisSize;
 
             // Create the dilated array filled with padValue.
-            auto dilated = mlx::core::full(newShape, padValue);
+            auto dilated = mlx::core::full(newShape, *padValue);
 
             // Build indices for the original elements: 0, p+1, 2*(p+1), ...
             std::vector<int32_t> idxVals(axisSize);
@@ -273,12 +236,12 @@ bool HandlePad(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
         }
 
         values.emplace(ToKey(op->getResult(0)),
-                       ApplyEdgePadding(result, edgePaddingLow, edgePaddingHigh, padValue));
+                       ApplyEdgePadding(result, edgePaddingLow, edgePaddingHigh, *padValue));
         return true;
     }
 
     values.emplace(ToKey(op->getResult(0)),
-                   ApplyEdgePadding(input, edgePaddingLow, edgePaddingHigh, padValue));
+                   ApplyEdgePadding(*input, edgePaddingLow, edgePaddingHigh, *padValue));
     return true;
 }
 

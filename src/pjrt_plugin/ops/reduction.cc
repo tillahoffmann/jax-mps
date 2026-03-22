@@ -1,5 +1,6 @@
 // Reduction op handlers (reduce, reduce_window, select_and_scatter).
 
+#include <algorithm>
 #include <limits>
 #include <tuple>
 
@@ -71,18 +72,11 @@ int DetectArgReducePattern(mlir::Region& body) {
 // Handler for stablehlo.reduce
 bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                   ExecContext& ctx) {
-    auto reduceOp = mlir::dyn_cast<mlir::stablehlo::ReduceOp>(op);
-    if (!reduceOp) {
-        MPS_LOG_ERROR("stablehlo.reduce: failed to cast\n");
+    auto reduceOp = CastOp<mlir::stablehlo::ReduceOp>(op, "stablehlo.reduce");
+    if (!reduceOp)
         return false;
-    }
 
-    auto dimensions = reduceOp.getDimensions();
-    std::vector<int> axes;
-    for (int64_t dim : dimensions) {
-        axes.push_back(static_cast<int>(dim));
-    }
-
+    auto axes = ToIntVec(reduceOp.getDimensions());
     auto& body = reduceOp.getBody();
     size_t numInputs = reduceOp.getInputs().size();
 
@@ -90,17 +84,15 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     if (numInputs == 2) {
         int argDir = DetectArgReducePattern(body);
         if (argDir != 0) {
-            auto input_opt = GetValue(values, reduceOp.getInputs()[0]);
-            if (!input_opt) {
-                MPS_LOG_ERROR("stablehlo.reduce: argmax/argmin input not found\n");
+            auto* input = RequireValue(values, reduceOp.getInputs()[0], "stablehlo.reduce");
+            if (!input)
                 return false;
-            }
 
             if (axes.size() == 1) {
-                auto& input = input_opt->get();
-                auto idx = (argDir > 0) ? mlx::core::argmax(input, axes[0], /*keepdims=*/false)
-                                        : mlx::core::argmin(input, axes[0], /*keepdims=*/false);
-                auto val = (argDir > 0) ? mlx::core::max(input, axes) : mlx::core::min(input, axes);
+                auto idx = (argDir > 0) ? mlx::core::argmax(*input, axes[0], /*keepdims=*/false)
+                                        : mlx::core::argmin(*input, axes[0], /*keepdims=*/false);
+                auto val =
+                    (argDir > 0) ? mlx::core::max(*input, axes) : mlx::core::min(*input, axes);
 
                 values.emplace(ToKey(op->getResult(0)), std::move(val));
                 values.emplace(ToKey(op->getResult(1)), mlx::core::astype(idx, mlx::core::int32));
@@ -112,43 +104,41 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     ReduceType reduceType = DetectReduceType(body);
 
     for (size_t i = 0; i < numInputs; ++i) {
-        auto input_opt = GetValue(values, reduceOp.getInputs()[i]);
-        if (!input_opt) {
-            MPS_LOG_ERROR("stablehlo.reduce: input %zu not found in value map\n", i);
+        auto* input = RequireValue(values, reduceOp.getInputs()[i], "stablehlo.reduce");
+        if (!input)
             return false;
-        }
 
         std::optional<mlx::core::array> result;
         switch (reduceType) {
             case ReduceType::Sum:
-                result = mlx::core::sum(input_opt->get(), axes);
+                result = mlx::core::sum(*input, axes);
                 break;
             case ReduceType::Max:
-                result = mlx::core::max(input_opt->get(), axes);
+                result = mlx::core::max(*input, axes);
                 break;
             case ReduceType::Min:
-                result = mlx::core::min(input_opt->get(), axes);
+                result = mlx::core::min(*input, axes);
                 break;
             case ReduceType::Prod:
-                result = mlx::core::prod(input_opt->get(), axes);
+                result = mlx::core::prod(*input, axes);
                 break;
             case ReduceType::And:
-                if (input_opt->get().dtype() != mlx::core::bool_) {
+                if (input->dtype() != mlx::core::bool_) {
                     MPS_LOG_ERROR(
                         "stablehlo.reduce: bitwise And reduction not supported for non-bool "
                         "types\n");
                     return false;
                 }
-                result = mlx::core::all(input_opt->get(), axes);
+                result = mlx::core::all(*input, axes);
                 break;
             case ReduceType::Or:
-                if (input_opt->get().dtype() != mlx::core::bool_) {
+                if (input->dtype() != mlx::core::bool_) {
                     MPS_LOG_ERROR(
                         "stablehlo.reduce: bitwise Or reduction not supported for non-bool "
                         "types\n");
                     return false;
                 }
-                result = mlx::core::any(input_opt->get(), axes);
+                result = mlx::core::any(*input, axes);
                 break;
             default:
                 MPS_LOG_ERROR("stablehlo.reduce: unsupported reduction type\n");
@@ -164,11 +154,9 @@ bool HandleReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
 // Handler for stablehlo.reduce_window (cumulative ops and pooling)
 bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
                         std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto rwOp = mlir::dyn_cast<mlir::stablehlo::ReduceWindowOp>(op);
-    if (!rwOp) {
-        MPS_LOG_ERROR("stablehlo.reduce_window: failed to cast\n");
+    auto rwOp = CastOp<mlir::stablehlo::ReduceWindowOp>(op, "stablehlo.reduce_window");
+    if (!rwOp)
         return false;
-    }
 
     if (rwOp.getInputs().size() != 1 || rwOp.getInitValues().size() != 1 ||
         rwOp->getNumResults() != 1) {
@@ -176,12 +164,9 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         return false;
     }
 
-    auto input_opt = GetValue(values, rwOp.getInputs()[0]);
-    if (!input_opt) {
-        MPS_LOG_ERROR("stablehlo.reduce_window: input not found\n");
+    auto* input = RequireValue(values, rwOp.getInputs()[0], "stablehlo.reduce_window");
+    if (!input)
         return false;
-    }
-    auto& input = input_opt->get();
 
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(rwOp.getInputs()[0].getType());
     if (!inputType) {
@@ -193,7 +178,7 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
 
     // Handle scalar (0-dimensional) inputs: reduce_window on a scalar is identity.
     if (rank == 0) {
-        values.emplace(ToKey(op->getResult(0)), input);
+        values.emplace(ToKey(op->getResult(0)), *input);
         return true;
     }
 
@@ -226,36 +211,15 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         }
     }
 
-    bool allStridesOne = !stridesOpt;
-    if (stridesOpt) {
-        allStridesOne = true;
-        for (auto s : *stridesOpt) {
-            if (s != 1) {
-                allStridesOne = false;
-                break;
-            }
-        }
-    }
-    bool allBaseDilOne = !baseDilOpt;
-    if (baseDilOpt) {
-        allBaseDilOne = true;
-        for (auto d : *baseDilOpt) {
-            if (d != 1) {
-                allBaseDilOne = false;
-                break;
-            }
-        }
-    }
-    bool allWinDilOne = !winDilOpt;
-    if (winDilOpt) {
-        allWinDilOne = true;
-        for (auto d : *winDilOpt) {
-            if (d != 1) {
-                allWinDilOne = false;
-                break;
-            }
-        }
-    }
+    auto allOnes = [](const auto& opt) {
+        if (!opt)
+            return true;
+        return std::all_of(opt->begin(), opt->end(), [](auto v) { return v == 1; });
+    };
+
+    bool allStridesOne = allOnes(stridesOpt);
+    bool allBaseDilOne = allOnes(baseDilOpt);
+    bool allWinDilOne = allOnes(winDilOpt);
 
     ReduceType reduceType = DetectReduceType(rwOp.getBody());
 
@@ -310,16 +274,16 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
             std::optional<mlx::core::array> result;
             switch (reduceType) {
                 case ReduceType::Sum:
-                    result = mlx::core::cumsum(input, axis, reverse, inclusive);
+                    result = mlx::core::cumsum(*input, axis, reverse, inclusive);
                     break;
                 case ReduceType::Prod:
-                    result = mlx::core::cumprod(input, axis, reverse, inclusive);
+                    result = mlx::core::cumprod(*input, axis, reverse, inclusive);
                     break;
                 case ReduceType::Max:
-                    result = mlx::core::cummax(input, axis, reverse, inclusive);
+                    result = mlx::core::cummax(*input, axis, reverse, inclusive);
                     break;
                 case ReduceType::Min:
-                    result = mlx::core::cummin(input, axis, reverse, inclusive);
+                    result = mlx::core::cummin(*input, axis, reverse, inclusive);
                     break;
                 default:
                     MPS_LOG_ERROR("stablehlo.reduce_window: unsupported cumulative reduce type\n");
@@ -344,7 +308,7 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     }
 
     // Pad input if needed.
-    mlx::core::array padded = input;
+    mlx::core::array padded = *input;
     bool needsPad = false;
     for (int64_t i = 0; i < rank; i++) {
         if (padLow[i] != 0 || padHigh[i] != 0) {
@@ -353,17 +317,15 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         }
     }
     if (needsPad) {
-        auto init_opt = GetValue(values, rwOp.getInitValues()[0]);
-        if (!init_opt) {
-            MPS_LOG_ERROR("stablehlo.reduce_window: init value not found\n");
+        auto* init = RequireValue(values, rwOp.getInitValues()[0], "stablehlo.reduce_window");
+        if (!init)
             return false;
-        }
 
         std::vector<std::pair<int, int>> padWidth(rank);
         for (int64_t i = 0; i < rank; i++) {
             padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
         }
-        padded = mlx::core::pad(input, padWidth, init_opt->get());
+        padded = mlx::core::pad(*input, padWidth, *init);
     }
 
     auto paddedShape = padded.shape();
@@ -415,23 +377,17 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
 // Handler for stablehlo.select_and_scatter (backward pass of max/min pooling)
 bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
                             std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
-    auto ssOp = mlir::dyn_cast<mlir::stablehlo::SelectAndScatterOp>(op);
-    if (!ssOp) {
-        MPS_LOG_ERROR("stablehlo.select_and_scatter: failed to cast\n");
+    auto ssOp = CastOp<mlir::stablehlo::SelectAndScatterOp>(op, "stablehlo.select_and_scatter");
+    if (!ssOp)
         return false;
-    }
 
-    auto operand_opt = GetValue(values, ssOp.getOperand());
-    auto source_opt = GetValue(values, ssOp.getSource());
-    auto init_opt = GetValue(values, ssOp.getInitValue());
-    if (!operand_opt || !source_opt || !init_opt) {
-        MPS_LOG_ERROR("stablehlo.select_and_scatter: operand not found\n");
+    auto* operand = RequireValue(values, ssOp.getOperand(), "stablehlo.select_and_scatter");
+    auto* source = RequireValue(values, ssOp.getSource(), "stablehlo.select_and_scatter");
+    auto* init = RequireValue(values, ssOp.getInitValue(), "stablehlo.select_and_scatter");
+    if (!operand || !source || !init)
         return false;
-    }
-    auto& operand = operand_opt->get();
-    auto& source = source_opt->get();
 
-    auto rank = static_cast<int64_t>(operand.ndim());
+    auto rank = static_cast<int64_t>(operand->ndim());
 
     auto windowDimsOpt = ssOp.getWindowDimensions();
     if (!windowDimsOpt) {
@@ -468,12 +424,8 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
         for (auto& bodyOp : body.front().getOperations()) {
             if (auto cmpOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(bodyOp)) {
                 auto dir = cmpOp.getComparisonDirection();
-                if (dir == mlir::stablehlo::ComparisonDirection::GE ||
-                    dir == mlir::stablehlo::ComparisonDirection::GT) {
-                    selectMax = true;
-                } else {
-                    selectMax = false;
-                }
+                selectMax = (dir == mlir::stablehlo::ComparisonDirection::GE ||
+                             dir == mlir::stablehlo::ComparisonDirection::GT);
                 found = true;
                 break;
             }
@@ -493,7 +445,7 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     }
 
     // Pad operand with -inf (max) or +inf (min) so padded elements are never selected.
-    mlx::core::array paddedOp = operand;
+    mlx::core::array paddedOp = *operand;
     bool needsPad = false;
     for (int64_t i = 0; i < rank; i++) {
         if (padLow[i] != 0 || padHigh[i] != 0) {
@@ -504,11 +456,11 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     if (needsPad) {
         float padScalar = selectMax ? -std::numeric_limits<float>::infinity()
                                     : std::numeric_limits<float>::infinity();
-        auto padVal = mlx::core::full({}, padScalar, operand.dtype());
+        auto padVal = mlx::core::full({}, padScalar, operand->dtype());
         std::vector<std::pair<int, int>> padWidth(rank, {0, 0});
         for (int64_t i = 0; i < rank; i++)
             padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
-        paddedOp = mlx::core::pad(operand, padWidth, padVal);
+        paddedOp = mlx::core::pad(*operand, padWidth, padVal);
     }
 
     int ndim = static_cast<int>(rank);
@@ -529,7 +481,7 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
             int64_t wd = windowDims[d];
             int64_t offset = remaining % wd;
             remaining /= wd;
-            int outSize = static_cast<int>(source.shape(d));
+            int outSize = static_cast<int>(source->shape(d));
             int str = static_cast<int>(strides[d]);
             si[d] = static_cast<int>(offset);
             ei[d] = static_cast<int>(offset) + outSize * str;
@@ -542,10 +494,10 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
 
     // Pass 1: Compute forward pool result
     auto fwdResult = selectMax
-                         ? mlx::core::full(source.shape(), -std::numeric_limits<float>::infinity(),
-                                           operand.dtype())
-                         : mlx::core::full(source.shape(), std::numeric_limits<float>::infinity(),
-                                           operand.dtype());
+                         ? mlx::core::full(source->shape(), -std::numeric_limits<float>::infinity(),
+                                           operand->dtype())
+                         : mlx::core::full(source->shape(), std::numeric_limits<float>::infinity(),
+                                           operand->dtype());
 
     for (int64_t wi = 0; wi < totalWinPositions; ++wi) {
         auto [si, ei, st] = makeSliceParams(wi);
@@ -555,9 +507,9 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     }
 
     // Pass 2: Scatter gradients using first-occurrence mask.
-    auto initVal = mlx::core::astype(init_opt->get(), operand.dtype());
+    auto initVal = mlx::core::astype(*init, operand->dtype());
     auto sasResult = mlx::core::broadcast_to(initVal, paddedOp.shape());
-    auto won = mlx::core::zeros(source.shape(), mlx::core::bool_);
+    auto won = mlx::core::zeros(source->shape(), mlx::core::bool_);
 
     for (int64_t wi = 0; wi < totalWinPositions; ++wi) {
         auto [slicerStart, slicerEnd, slicerStride] = makeSliceParams(wi);
@@ -565,8 +517,8 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
         auto isMatch = mlx::core::equal(inputSlice, fwdResult);
         auto isFirst = mlx::core::logical_and(isMatch, mlx::core::logical_not(won));
         won = mlx::core::logical_or(won, isFirst);
-        auto mask = mlx::core::astype(isFirst, operand.dtype());
-        auto gradContrib = mlx::core::multiply(source, mask);
+        auto mask = mlx::core::astype(isFirst, operand->dtype());
+        auto gradContrib = mlx::core::multiply(*source, mask);
         auto curSlice = mlx::core::slice(sasResult, slicerStart, slicerEnd, slicerStride);
         sasResult = mlx::core::slice_update(sasResult, mlx::core::add(curSlice, gradContrib),
                                             slicerStart, slicerEnd, slicerStride);
@@ -578,7 +530,7 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
         std::vector<int> sliceEnd(ndim);
         for (int d = 0; d < ndim; ++d) {
             sliceStart[d] = static_cast<int>(padLow[d]);
-            sliceEnd[d] = sliceStart[d] + static_cast<int>(operand.shape(d));
+            sliceEnd[d] = sliceStart[d] + static_cast<int>(operand->shape(d));
         }
         sasResult =
             mlx::core::slice(sasResult, mlx::core::Shape(sliceStart.begin(), sliceStart.end()),
