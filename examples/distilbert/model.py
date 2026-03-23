@@ -23,16 +23,14 @@ class DistilBertAttention(nnx.Module):
         h = config.hidden_size
         self.num_heads = config.num_heads
         self.head_dim = h // config.num_heads
-        self.q_lin = nnx.Linear(h, h, rngs=rngs)
-        self.k_lin = nnx.Linear(h, h, rngs=rngs)
-        self.v_lin = nnx.Linear(h, h, rngs=rngs)
+        # Fused QKV projection: one matmul instead of three.
+        self.qkv_lin = nnx.Linear(h, 3 * h, rngs=rngs)
         self.out_lin = nnx.Linear(h, h, rngs=rngs)
 
     def __call__(self, x, mask):
         B, T, _ = x.shape
-        q = self.q_lin(x).reshape(B, T, self.num_heads, self.head_dim)
-        k = self.k_lin(x).reshape(B, T, self.num_heads, self.head_dim)
-        v = self.v_lin(x).reshape(B, T, self.num_heads, self.head_dim)
+        qkv = self.qkv_lin(x).reshape(B, T, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
         # (B, T, N, H) layout for jax.nn.dot_product_attention.
         out = jax.nn.dot_product_attention(q, k, v, mask=mask)
         return self.out_lin(out.reshape(B, T, -1))

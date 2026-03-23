@@ -55,23 +55,18 @@ def load_model(model_id: str) -> tuple[DistilBert, Tokenizer]:
 
     for i, layer in enumerate(model.layers):
         lp = f"{p}.transformer.layer.{i}"
-        layer.attention.q_lin.kernel.set_value(
-            jnp.array(tensors[f"{lp}.attention.q_lin.weight"]).T
+        # Pack Q, K, V weights into fused QKV projection.
+        q_w = jnp.array(tensors[f"{lp}.attention.q_lin.weight"]).T
+        k_w = jnp.array(tensors[f"{lp}.attention.k_lin.weight"]).T
+        v_w = jnp.array(tensors[f"{lp}.attention.v_lin.weight"]).T
+        layer.attention.qkv_lin.kernel.set_value(
+            jnp.concatenate([q_w, k_w, v_w], axis=-1)
         )
-        layer.attention.q_lin.bias.set_value(
-            jnp.array(tensors[f"{lp}.attention.q_lin.bias"])
-        )
-        layer.attention.k_lin.kernel.set_value(
-            jnp.array(tensors[f"{lp}.attention.k_lin.weight"]).T
-        )
-        layer.attention.k_lin.bias.set_value(
-            jnp.array(tensors[f"{lp}.attention.k_lin.bias"])
-        )
-        layer.attention.v_lin.kernel.set_value(
-            jnp.array(tensors[f"{lp}.attention.v_lin.weight"]).T
-        )
-        layer.attention.v_lin.bias.set_value(
-            jnp.array(tensors[f"{lp}.attention.v_lin.bias"])
+        q_b = jnp.array(tensors[f"{lp}.attention.q_lin.bias"])
+        k_b = jnp.array(tensors[f"{lp}.attention.k_lin.bias"])
+        v_b = jnp.array(tensors[f"{lp}.attention.v_lin.bias"])
+        layer.attention.qkv_lin.bias.set_value(
+            jnp.concatenate([q_b, k_b, v_b], axis=-1)
         )
         layer.attention.out_lin.kernel.set_value(
             jnp.array(tensors[f"{lp}.attention.out_lin.weight"]).T
@@ -100,7 +95,29 @@ def load_model(model_id: str) -> tuple[DistilBert, Tokenizer]:
     return model, tokenizer
 
 
-def encode(model, tokenizer, sentences, batch_size=32):
+def make_forward_fn(model, dtype=jnp.float32):
+    """Create a JIT-compiled forward function from the model."""
+    if dtype != jnp.float32:
+        # Cast all parameters to the target dtype.
+        _, state = nnx.split(model)
+        for leaf in jax.tree.leaves(state):
+            if hasattr(leaf, "value") and jnp.issubdtype(
+                leaf.value.dtype, jnp.floating
+            ):
+                leaf.value = leaf.value.astype(dtype)
+
+    graphdef, state = nnx.split(model)
+
+    @jax.jit
+    def forward(state, input_ids, attention_mask):
+        model = nnx.merge(graphdef, state)
+        hidden = model(input_ids, attention_mask)
+        return hidden[:, 0, :]  # [CLS] is always position 0
+
+    return forward, state
+
+
+def encode(forward_fn, state, tokenizer, sentences):
     """Encode sentences into [CLS] embeddings."""
     encoded = tokenizer.encode_batch(sentences)
     all_ids = [e.ids for e in encoded]
@@ -111,9 +128,7 @@ def encode(model, tokenizer, sentences, batch_size=32):
     input_ids = jnp.array([ids + [0] * (max_len - len(ids)) for ids in all_ids])
     attention_mask = jnp.array([m + [0] * (max_len - len(m)) for m in all_masks])
 
-    # Run model and extract [CLS] token embeddings.
-    hidden = model(input_ids, attention_mask)
-    return hidden[:, 0, :]  # [CLS] is always position 0
+    return forward_fn(state, input_ids, attention_mask)
 
 
 def cosine_similarity(a, b):
@@ -123,6 +138,11 @@ def cosine_similarity(a, b):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="distilbert-base-uncased")
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "float16", "bfloat16"],
+    )
     parser.add_argument(
         "sentences",
         nargs="*",
@@ -134,14 +154,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    print(f"JAX devices: {jax.devices()}")
-    model, tokenizer = load_model(args.model)
+    dtype = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}[
+        args.dtype
+    ]
 
-    # Warmup.
-    encode(model, tokenizer, ["warmup"])
+    print(f"JAX devices: {jax.devices()}")
+    print(f"Dtype: {args.dtype}")
+    model, tokenizer = load_model(args.model)
+    forward_fn, state = make_forward_fn(model, dtype=dtype)
+
+    # Warmup: triggers JIT compilation.
+    encode(forward_fn, state, tokenizer, ["warmup"])
 
     t0 = perf_counter()
-    embeddings = encode(model, tokenizer, args.sentences)
+    embeddings = encode(forward_fn, state, tokenizer, args.sentences)
     elapsed = perf_counter() - t0
 
     print(f"\nEncoded {len(args.sentences)} sentences in {elapsed:.3f}s")

@@ -19,21 +19,24 @@ from jax._src.interpreters import mlir
 # ---------------------------------------------------------------------------
 # Scaled Dot-Product Attention (mps.sdpa)
 # ---------------------------------------------------------------------------
+# Two primitives: mps.sdpa (with boolean mask operand) and mps.sdpa_causal.
+# Unmasked attention is just the masked primitive with an all-True mask.
 
 _sdpa_p = core.Primitive("mps.sdpa")
 _sdpa_p.multiple_results = False
 
 
-def _sdpa_abstract(q, k, v, *, scale):
+def _sdpa_abstract(q, k, v, mask, *, scale):
     return core.ShapedArray(q.shape, q.dtype)
 
 
 _sdpa_p.def_abstract_eval(_sdpa_abstract)
 
 
-def _sdpa_impl(q, k, v, *, scale):
+def _sdpa_impl(q, k, v, mask, *, scale):
     """Pure JAX fallback for non-MPS platforms."""
     attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) * scale
+    attn = jnp.where(mask, attn, jnp.finfo(attn.dtype).min)
     attn = jax.nn.softmax(attn, axis=-1)
     return jnp.matmul(attn, v)
 
@@ -41,20 +44,22 @@ def _sdpa_impl(q, k, v, *, scale):
 _sdpa_p.def_impl(_sdpa_impl)
 
 
-def _sdpa_lowering(ctx, q, k, v, *, scale):
+def _sdpa_lowering(ctx, q, k, v, mask, *, scale):
     result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.sdpa",
         result_types=[result_type],
-        operands=[q, k, v],
+        operands=[q, k, v, mask],
         backend_config=f'{{"scale": {scale}}}',
     ).results
 
 
-# Causal variant.
+# Causal variant — uses MLX's mask_mode="causal" string, not an array.
 _sdpa_causal_p = core.Primitive("mps.sdpa_causal")
 _sdpa_causal_p.multiple_results = False
-_sdpa_causal_p.def_abstract_eval(_sdpa_abstract)
+_sdpa_causal_p.def_abstract_eval(
+    lambda q, k, v, *, scale: core.ShapedArray(q.shape, q.dtype)
+)
 
 
 def _sdpa_causal_impl(q, k, v, *, scale):
@@ -80,7 +85,7 @@ def _sdpa_causal_lowering(ctx, q, k, v, *, scale):
     ).results
 
 
-def sdpa(q, k, v, *, scale=None, is_causal=False):
+def sdpa(q, k, v, *, scale=None, is_causal=False, mask=None):
     """Scaled dot-product attention using fused MLX kernel on MPS.
 
     Args:
@@ -89,6 +94,8 @@ def sdpa(q, k, v, *, scale=None, is_causal=False):
         v: Values, shape (B, N_kv, S, H).
         scale: Attention scale factor. Defaults to 1/sqrt(H).
         is_causal: Whether to apply causal (lower-triangular) masking.
+        mask: Optional boolean mask, shape broadcastable to (B, N, T, S).
+            True means attend, False means ignore.
 
     Returns:
         Output of shape (B, N, T, H).
@@ -98,21 +105,23 @@ def sdpa(q, k, v, *, scale=None, is_causal=False):
     scale = float(scale)
     if is_causal:
         return _sdpa_causal_with_grad(q, k, v, scale)
-    return _sdpa_with_grad(q, k, v, scale)
+    if mask is None:
+        mask = jnp.bool_(True)
+    return _sdpa_with_grad(q, k, v, mask, scale)
 
 
 _sdpa_bwd_p = core.Primitive("mps.sdpa_bwd")
 _sdpa_bwd_p.multiple_results = True
 _sdpa_bwd_p.def_abstract_eval(
-    lambda q, k, v, g, *, scale: (
+    lambda q, k, v, mask, g, *, scale: (
         core.ShapedArray(q.shape, q.dtype),
         core.ShapedArray(k.shape, k.dtype),
         core.ShapedArray(v.shape, v.dtype),
     )
 )
 _sdpa_bwd_p.def_impl(
-    lambda q, k, v, g, *, scale: jax.vjp(
-        lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v
+    lambda q, k, v, mask, g, *, scale: jax.vjp(
+        lambda q, k, v: _sdpa_impl(q, k, v, mask, scale=scale), q, k, v
     )[1](g)
 )
 
@@ -132,12 +141,12 @@ _sdpa_causal_bwd_p.def_impl(
 )
 
 
-def _sdpa_bwd_lowering(ctx, q, k, v, g, *, scale):
+def _sdpa_bwd_lowering(ctx, q, k, v, mask, g, *, scale):
     avals = ctx.avals_out
     return mlir.custom_call(
         call_target_name="mps.sdpa_bwd",
         result_types=[mlir.aval_to_ir_type(a) for a in avals],
-        operands=[q, k, v, g],
+        operands=[q, k, v, mask, g],
         backend_config=f'{{"scale": {scale}}}',
     ).results
 
@@ -152,20 +161,21 @@ def _sdpa_causal_bwd_lowering(ctx, q, k, v, g, *, scale):
     ).results
 
 
-def _sdpa_with_grad(q, k, v, scale):
+def _sdpa_with_grad(q, k, v, mask, scale):
     @jax.custom_vjp
-    def fwd(q, k, v):
-        return _sdpa_p.bind(q, k, v, scale=scale)
+    def fwd(q, k, v, mask):
+        return _sdpa_p.bind(q, k, v, mask, scale=scale)
 
-    def fwd_rule(q, k, v):
-        return fwd(q, k, v), (q, k, v)
+    def fwd_rule(q, k, v, mask):
+        return fwd(q, k, v, mask), (q, k, v, mask)
 
     def bwd_rule(res, g):
-        q, k, v = res
-        return _sdpa_bwd_p.bind(q, k, v, g, scale=scale)
+        q, k, v, mask = res
+        dq, dk, dv = _sdpa_bwd_p.bind(q, k, v, mask, g, scale=scale)
+        return dq, dk, dv, jnp.zeros_like(mask)
 
     fwd.defvjp(fwd_rule, bwd_rule)
-    return fwd(q, k, v)
+    return fwd(q, k, v, mask)
 
 
 def _sdpa_causal_with_grad(q, k, v, scale):
@@ -264,6 +274,87 @@ def rms_norm(x, weight, *, eps=1e-6):
 
 
 # ---------------------------------------------------------------------------
+# Layer Normalization (mps.layer_norm)
+# ---------------------------------------------------------------------------
+
+_layer_norm_p = core.Primitive("mps.layer_norm")
+_layer_norm_p.multiple_results = False
+
+
+def _layer_norm_abstract(x, weight, bias, *, eps):
+    return core.ShapedArray(x.shape, x.dtype)
+
+
+_layer_norm_p.def_abstract_eval(_layer_norm_abstract)
+
+
+def _layer_norm_impl(x, weight, bias, *, eps):
+    """Pure JAX fallback."""
+    mean = jnp.mean(x, axis=-1, keepdims=True)
+    variance = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+    x = (x - mean) * jax.lax.rsqrt(variance + eps)
+    return x * weight + bias
+
+
+_layer_norm_p.def_impl(_layer_norm_impl)
+
+
+def _layer_norm_lowering(ctx, x, weight, bias, *, eps):
+    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    return mlir.custom_call(
+        call_target_name="mps.layer_norm",
+        result_types=[result_type],
+        operands=[x, weight, bias],
+        backend_config=f'{{"eps": {eps}}}',
+    ).results
+
+
+_layer_norm_bwd_p = core.Primitive("mps.layer_norm_bwd")
+_layer_norm_bwd_p.multiple_results = True
+_layer_norm_bwd_p.def_abstract_eval(
+    lambda x, w, b, g, *, eps: (
+        core.ShapedArray(x.shape, x.dtype),
+        core.ShapedArray(w.shape, w.dtype),
+        core.ShapedArray(b.shape, b.dtype),
+    )
+)
+_layer_norm_bwd_p.def_impl(
+    lambda x, w, b, g, *, eps: jax.vjp(
+        lambda x, w, b: _layer_norm_impl(x, w, b, eps=eps), x, w, b
+    )[1](g)
+)
+
+
+def _layer_norm_bwd_lowering(ctx, x, w, b, g, *, eps):
+    avals = ctx.avals_out
+    return mlir.custom_call(
+        call_target_name="mps.layer_norm_bwd",
+        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        operands=[x, w, b, g],
+        backend_config=f'{{"eps": {eps}}}',
+    ).results
+
+
+def layer_norm(x, weight, bias, *, eps=1e-5):
+    """Layer normalization using fused MLX kernel on MPS."""
+    eps = float(eps)
+
+    @jax.custom_vjp
+    def fwd(x, weight, bias):
+        return _layer_norm_p.bind(x, weight, bias, eps=eps)
+
+    def fwd_rule(x, weight, bias):
+        return fwd(x, weight, bias), (x, weight, bias)
+
+    def bwd_rule(res, g):
+        x, weight, bias = res
+        return _layer_norm_bwd_p.bind(x, weight, bias, g, eps=eps)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(x, weight, bias)
+
+
+# ---------------------------------------------------------------------------
 # Rotary Position Embeddings (mps.rope)
 # ---------------------------------------------------------------------------
 
@@ -271,14 +362,14 @@ _rope_p = core.Primitive("mps.rope")
 _rope_p.multiple_results = False
 
 
-def _rope_abstract(x, *, dims, traditional, base, rope_scale, offset):
+def _rope_abstract(x, offset, *, dims, traditional, base, rope_scale):
     return core.ShapedArray(x.shape, x.dtype)
 
 
 _rope_p.def_abstract_eval(_rope_abstract)
 
 
-def _rope_impl(x, *, dims, traditional, base, rope_scale, offset):
+def _rope_impl(x, offset, *, dims, traditional, base, rope_scale):
     """Pure JAX fallback for RoPE."""
     if traditional:
         raise NotImplementedError(
@@ -303,16 +394,16 @@ def _rope_impl(x, *, dims, traditional, base, rope_scale, offset):
 _rope_p.def_impl(_rope_impl)
 
 
-def _rope_lowering(ctx, x, *, dims, traditional, base, rope_scale, offset):
+def _rope_lowering(ctx, x, offset, *, dims, traditional, base, rope_scale):
     result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
     traditional_str = "true" if traditional else "false"
     return mlir.custom_call(
         call_target_name="mps.rope",
         result_types=[result_type],
-        operands=[x],
+        operands=[x, offset],
         backend_config=(
             f'{{"dims": {dims}, "traditional": {traditional_str}, '
-            f'"base": {base}, "rope_scale": {rope_scale}, "offset": {offset}}}'
+            f'"base": {base}, "rope_scale": {rope_scale}}}'
         ),
     ).results
 
@@ -320,35 +411,35 @@ def _rope_lowering(ctx, x, *, dims, traditional, base, rope_scale, offset):
 _rope_bwd_p = core.Primitive("mps.rope_bwd")
 _rope_bwd_p.multiple_results = False
 _rope_bwd_p.def_abstract_eval(
-    lambda x, g, *, dims, traditional, base, rope_scale, offset: core.ShapedArray(
+    lambda x, offset, g, *, dims, traditional, base, rope_scale: core.ShapedArray(
         x.shape, x.dtype
     )
 )
 _rope_bwd_p.def_impl(
-    lambda x, g, *, dims, traditional, base, rope_scale, offset: jax.vjp(
+    lambda x, offset, g, *, dims, traditional, base, rope_scale: jax.vjp(
         lambda x: _rope_impl(
             x,
+            offset,
             dims=dims,
             traditional=traditional,
             base=base,
             rope_scale=rope_scale,
-            offset=offset,
         ),
         x,
     )[1](g)[0]
 )
 
 
-def _rope_bwd_lowering(ctx, x, g, *, dims, traditional, base, rope_scale, offset):
+def _rope_bwd_lowering(ctx, x, offset, g, *, dims, traditional, base, rope_scale):
     result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
     traditional_str = "true" if traditional else "false"
     return mlir.custom_call(
         call_target_name="mps.rope_bwd",
         result_types=[result_type],
-        operands=[x, g],
+        operands=[x, offset, g],
         backend_config=(
             f'{{"dims": {dims}, "traditional": {traditional_str}, '
-            f'"base": {base}, "rope_scale": {rope_scale}, "offset": {offset}}}'
+            f'"base": {base}, "rope_scale": {rope_scale}}}'
         ),
     ).results
 
@@ -361,28 +452,27 @@ def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
     traditional = bool(traditional)
     base = float(base)
     rope_scale = float(scale)
-    offset = int(offset)
+    offset_arr = jnp.int32(offset)
     params = dict(
         dims=dims,
         traditional=traditional,
         base=base,
         rope_scale=rope_scale,
-        offset=offset,
     )
 
     @jax.custom_vjp
-    def fwd(x):
-        return _rope_p.bind(x, **params)
+    def fwd(x, offset_arr):
+        return _rope_p.bind(x, offset_arr, **params)
 
-    def fwd_rule(x):
-        return fwd(x), (x,)
+    def fwd_rule(x, offset_arr):
+        return fwd(x, offset_arr), (x, offset_arr)
 
     def bwd_rule(res, g):
-        (x,) = res
-        return (_rope_bwd_p.bind(x, g, **params),)
+        x, offset_arr = res
+        return (_rope_bwd_p.bind(x, offset_arr, g, **params), jnp.int32(0))
 
     fwd.defvjp(fwd_rule, bwd_rule)
-    return fwd(x)
+    return fwd(x, offset_arr)
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +560,7 @@ def register_fused_ops():
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
     mlir.register_lowering(_sdpa_causal_p, _sdpa_causal_lowering, platform="mps")
     mlir.register_lowering(_rms_norm_p, _rms_norm_lowering, platform="mps")
+    mlir.register_lowering(_layer_norm_p, _layer_norm_lowering, platform="mps")
     mlir.register_lowering(_rope_p, _rope_lowering, platform="mps")
     mlir.register_lowering(_gelu_p, _gelu_lowering, platform="mps")
 
@@ -479,6 +570,7 @@ def register_fused_ops():
         _sdpa_causal_bwd_p, _sdpa_causal_bwd_lowering, platform="mps"
     )
     mlir.register_lowering(_rms_norm_bwd_p, _rms_norm_bwd_lowering, platform="mps")
+    mlir.register_lowering(_layer_norm_bwd_p, _layer_norm_bwd_lowering, platform="mps")
     mlir.register_lowering(_rope_bwd_p, _rope_bwd_lowering, platform="mps")
     mlir.register_lowering(_gelu_bwd_p, _gelu_bwd_lowering, platform="mps")
 
@@ -486,7 +578,7 @@ def register_fused_ops():
     mlir.register_lowering(
         _sdpa_p,
         mlir.lower_fun(
-            lambda q, k, v, scale=1.0: _sdpa_impl(q, k, v, scale=scale),
+            lambda q, k, v, mask, scale=1.0: _sdpa_impl(q, k, v, mask, scale=scale),
             multiple_results=False,
         ),
     )
@@ -504,16 +596,23 @@ def register_fused_ops():
         ),
     )
     mlir.register_lowering(
+        _layer_norm_p,
+        mlir.lower_fun(
+            lambda x, w, b, eps=1e-5: _layer_norm_impl(x, w, b, eps=eps),
+            multiple_results=False,
+        ),
+    )
+    mlir.register_lowering(
         _rope_p,
         mlir.lower_fun(
-            lambda x, dims=0, traditional=False, base=10000.0, rope_scale=1.0, offset=0: (
+            lambda x, offset, dims=0, traditional=False, base=10000.0, rope_scale=1.0: (
                 _rope_impl(
                     x,
+                    offset,
                     dims=dims,
                     traditional=traditional,
                     base=base,
                     rope_scale=rope_scale,
-                    offset=offset,
                 )
             ),
             multiple_results=False,
@@ -528,8 +627,8 @@ def register_fused_ops():
     mlir.register_lowering(
         _sdpa_bwd_p,
         mlir.lower_fun(
-            lambda q, k, v, g, scale=1.0: jax.vjp(
-                lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v
+            lambda q, k, v, mask, g, scale=1.0: jax.vjp(
+                lambda q, k, v: _sdpa_impl(q, k, v, mask, scale=scale), q, k, v
             )[1](g),
             multiple_results=True,
         ),
@@ -553,17 +652,26 @@ def register_fused_ops():
         ),
     )
     mlir.register_lowering(
+        _layer_norm_bwd_p,
+        mlir.lower_fun(
+            lambda x, w, b, g, eps=1e-5: jax.vjp(
+                lambda x, w, b: _layer_norm_impl(x, w, b, eps=eps), x, w, b
+            )[1](g),
+            multiple_results=True,
+        ),
+    )
+    mlir.register_lowering(
         _rope_bwd_p,
         mlir.lower_fun(
-            lambda x, g, dims=0, traditional=False, base=10000.0, rope_scale=1.0, offset=0: (
+            lambda x, offset, g, dims=0, traditional=False, base=10000.0, rope_scale=1.0: (
                 jax.vjp(
                     lambda x: _rope_impl(
                         x,
+                        offset,
                         dims=dims,
                         traditional=traditional,
                         base=base,
                         rope_scale=rope_scale,
-                        offset=offset,
                     ),
                     x,
                 )[1](g)[0]
@@ -657,10 +765,10 @@ def patch_jax_functions():
             implementation=None,
             return_residual=False,
         ):
-            # Only intercept simple cases; fall back for masks, bias, implementation, etc.
+            # Fall back for features we can't fuse: bias, seq lengths, etc.
+            # We CAN handle boolean masks via the fused masked SDPA path.
             if (
                 bias is not None
-                or mask is not None
                 or query_seq_lengths is not None
                 or key_value_seq_lengths is not None
                 or local_window_size is not None
@@ -693,6 +801,7 @@ def patch_jax_functions():
                     query,
                     key,
                     value,
+                    mask=mask,
                     scale=scale,
                     is_causal=is_causal,
                 )
@@ -712,6 +821,7 @@ def patch_jax_functions():
                     query,
                     key,
                     value,
+                    mask=mask,
                     scale=scale,
                     is_causal=is_causal,
                 )
@@ -729,7 +839,22 @@ def patch_jax_functions():
                 k = jnp.repeat(k, N // K, axis=1)
                 v = jnp.repeat(v, N // K, axis=1)
 
-            out = sdpa(q, k, v, scale=float(scale), is_causal=is_causal)
+            # Prepare mask for fused SDPA: broadcast to (B, N, T, S).
+            fused_mask = None
+            if mask is not None:
+                m = jnp.asarray(mask)
+                if squeeze:
+                    m = m[None]
+                # Input mask is (B, 1, 1, S) or (B, T, N, S) in BTNH layout.
+                # Transpose to (B, N, T, S) for our SDPA primitive.
+                if m.ndim == 4:
+                    m = m.transpose(0, 2, 1, 3)
+                # Broadcast to full shape so MLX gets a concrete mask array.
+                fused_mask = jnp.broadcast_to(m, (B, N, T, S))
+
+            out = sdpa(
+                q, k, v, scale=float(scale), is_causal=is_causal, mask=fused_mask
+            )
 
             # Back to (B, T, N, H).
             out = out.transpose(0, 2, 1, 3)
@@ -741,3 +866,29 @@ def patch_jax_functions():
         _patched_dot_product_attention.__doc__ = original_sdpa.__doc__
         nn_functions.dot_product_attention = _patched_dot_product_attention
         jnn.dot_product_attention = _patched_dot_product_attention
+
+    # --- Flax LayerNorm ---
+    try:
+        from flax import nnx as _nnx
+
+        _original_ln_call = _nnx.LayerNorm.__call__
+        if not getattr(_original_ln_call, "_mps_patched", False):
+
+            def _patched_layer_norm_call(self, x, *, mask=None):
+                ra = self.reduction_axes
+                fa = self.feature_axes
+                if (
+                    mask is None
+                    and self.use_bias
+                    and (ra == -1 or ra == (-1,))
+                    and (fa == -1 or fa == (-1,))
+                ):
+                    return layer_norm(
+                        x, self.scale.value, self.bias.value, eps=self.epsilon
+                    )
+                return _original_ln_call(self, x, mask=mask)
+
+            _patched_layer_norm_call._mps_patched = True
+            _nnx.LayerNorm.__call__ = _patched_layer_norm_call  # type: ignore[assignment]
+    except ImportError:
+        pass
