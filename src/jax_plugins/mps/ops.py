@@ -172,7 +172,7 @@ def _sdpa_with_grad(q, k, v, mask, scale):
     def bwd_rule(res, g):
         q, k, v, mask = res
         dq, dk, dv = _sdpa_bwd_p.bind(q, k, v, mask, g, scale=scale)
-        return dq, dk, dv, jnp.zeros_like(mask)
+        return dq, dk, dv, None
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(q, k, v, mask)
@@ -469,7 +469,7 @@ def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
 
     def bwd_rule(res, g):
         x, offset_arr = res
-        return (_rope_bwd_p.bind(x, offset_arr, g, **params), jnp.int32(0))
+        return (_rope_bwd_p.bind(x, offset_arr, g, **params), None)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(x, offset_arr)
