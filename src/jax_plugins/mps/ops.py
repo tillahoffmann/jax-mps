@@ -3,8 +3,9 @@
 These primitives emit stablehlo.custom_call ops that the MPS backend
 intercepts and dispatches to mlx::core::fast:: fused Metal kernels.
 
-The forward pass uses fused kernels; the backward pass falls through to
-JAX's standard autodiff on the decomposed implementation.
+On MPS, both forward and backward passes run as fused MLX kernels (the
+backward uses mlx::core::vjp). On non-MPS platforms, fallback lowerings
+decompose to standard JAX ops.
 """
 
 # pyright: reportArgumentType=false, reportOptionalCall=false
@@ -355,6 +356,8 @@ def _rope_bwd_lowering(ctx, x, g, *, dims, traditional, base, rope_scale, offset
 def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
     """Rotary position embeddings using fused MLX kernel on MPS."""
     dims = int(dims)
+    if dims <= 0 or dims % 2 != 0:
+        raise ValueError(f"dims must be a positive even integer, got {dims}")
     traditional = bool(traditional)
     base = float(base)
     rope_scale = float(scale)

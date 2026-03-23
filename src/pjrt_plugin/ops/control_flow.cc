@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -412,7 +413,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     // Handle mps.rope — fused rotary position embeddings via mlx::core::fast.
     // Inputs: x (..., T, D) where T is sequence length, D >= dims
     // backend_config: {"dims": <int>, "traditional": <bool>, "base": <float>,
-    //                  "scale": <float>, "offset": <int>}
+    //                  "rope_scale": <float>, "offset": <int>}
     if (callTargetName == "mps.rope") {
         if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
             MPS_LOG_ERROR("mps.rope: expected 1 input and 1 output\n");
