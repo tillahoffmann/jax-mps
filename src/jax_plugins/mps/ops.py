@@ -100,6 +100,57 @@ def sdpa(q, k, v, *, scale=None, is_causal=False):
     return _sdpa_with_grad(q, k, v, scale)
 
 
+_sdpa_bwd_p = core.Primitive("mps.sdpa_bwd")
+_sdpa_bwd_p.multiple_results = True
+_sdpa_bwd_p.def_abstract_eval(
+    lambda q, k, v, g, *, scale: (
+        core.ShapedArray(q.shape, q.dtype),
+        core.ShapedArray(k.shape, k.dtype),
+        core.ShapedArray(v.shape, v.dtype),
+    )
+)
+_sdpa_bwd_p.def_impl(
+    lambda q, k, v, g, *, scale: jax.vjp(
+        lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v
+    )[1](g)
+)
+
+_sdpa_causal_bwd_p = core.Primitive("mps.sdpa_causal_bwd")
+_sdpa_causal_bwd_p.multiple_results = True
+_sdpa_causal_bwd_p.def_abstract_eval(
+    lambda q, k, v, g, *, scale: (
+        core.ShapedArray(q.shape, q.dtype),
+        core.ShapedArray(k.shape, k.dtype),
+        core.ShapedArray(v.shape, v.dtype),
+    )
+)
+_sdpa_causal_bwd_p.def_impl(
+    lambda q, k, v, g, *, scale: jax.vjp(
+        lambda q, k, v: _sdpa_causal_impl(q, k, v, scale=scale), q, k, v
+    )[1](g)
+)
+
+
+def _sdpa_bwd_lowering(ctx, q, k, v, g, *, scale):
+    avals = ctx.avals_out
+    return mlir.custom_call(
+        call_target_name="mps.sdpa_bwd",
+        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        operands=[q, k, v, g],
+        backend_config=f'{{"scale": {scale}}}',
+    ).results
+
+
+def _sdpa_causal_bwd_lowering(ctx, q, k, v, g, *, scale):
+    avals = ctx.avals_out
+    return mlir.custom_call(
+        call_target_name="mps.sdpa_causal_bwd",
+        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        operands=[q, k, v, g],
+        backend_config=f'{{"scale": {scale}}}',
+    ).results
+
+
 def _sdpa_with_grad(q, k, v, scale):
     @jax.custom_vjp
     def fwd(q, k, v):
@@ -110,7 +161,7 @@ def _sdpa_with_grad(q, k, v, scale):
 
     def bwd_rule(res, g):
         q, k, v = res
-        return jax.vjp(lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v)[1](g)
+        return _sdpa_bwd_p.bind(q, k, v, g, scale=scale)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(q, k, v)
@@ -126,9 +177,7 @@ def _sdpa_causal_with_grad(q, k, v, scale):
 
     def bwd_rule(res, g):
         q, k, v = res
-        return jax.vjp(
-            lambda q, k, v: _sdpa_causal_impl(q, k, v, scale=scale), q, k, v
-        )[1](g)
+        return _sdpa_causal_bwd_p.bind(q, k, v, g, scale=scale)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(q, k, v)
@@ -169,11 +218,33 @@ def _rms_norm_lowering(ctx, x, weight, *, eps):
     ).results
 
 
-def rms_norm(x, weight, *, eps=1e-6):
-    """RMS normalization using fused MLX kernel on MPS.
+_rms_norm_bwd_p = core.Primitive("mps.rms_norm_bwd")
+_rms_norm_bwd_p.multiple_results = True
+_rms_norm_bwd_p.def_abstract_eval(
+    lambda x, w, g, *, eps: (
+        core.ShapedArray(x.shape, x.dtype),
+        core.ShapedArray(w.shape, w.dtype),
+    )
+)
+_rms_norm_bwd_p.def_impl(
+    lambda x, w, g, *, eps: jax.vjp(lambda x, w: _rms_norm_impl(x, w, eps=eps), x, w)[
+        1
+    ](g)
+)
 
-    Computes: x / sqrt(mean(x^2) + eps) * weight
-    """
+
+def _rms_norm_bwd_lowering(ctx, x, w, g, *, eps):
+    avals = ctx.avals_out
+    return mlir.custom_call(
+        call_target_name="mps.rms_norm_bwd",
+        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        operands=[x, w, g],
+        backend_config=f'{{"eps": {eps}}}',
+    ).results
+
+
+def rms_norm(x, weight, *, eps=1e-6):
+    """RMS normalization using fused MLX kernel on MPS."""
     eps = float(eps)
 
     @jax.custom_vjp
@@ -185,7 +256,7 @@ def rms_norm(x, weight, *, eps=1e-6):
 
     def bwd_rule(res, g):
         x, weight = res
-        return jax.vjp(lambda x, w: _rms_norm_impl(x, w, eps=eps), x, weight)[1](g)
+        return _rms_norm_bwd_p.bind(x, weight, g, eps=eps)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(x, weight)
@@ -245,6 +316,42 @@ def _rope_lowering(ctx, x, *, dims, traditional, base, rope_scale, offset):
     ).results
 
 
+_rope_bwd_p = core.Primitive("mps.rope_bwd")
+_rope_bwd_p.multiple_results = False
+_rope_bwd_p.def_abstract_eval(
+    lambda x, g, *, dims, traditional, base, rope_scale, offset: core.ShapedArray(
+        x.shape, x.dtype
+    )
+)
+_rope_bwd_p.def_impl(
+    lambda x, g, *, dims, traditional, base, rope_scale, offset: jax.vjp(
+        lambda x: _rope_impl(
+            x,
+            dims=dims,
+            traditional=traditional,
+            base=base,
+            rope_scale=rope_scale,
+            offset=offset,
+        ),
+        x,
+    )[1](g)[0]
+)
+
+
+def _rope_bwd_lowering(ctx, x, g, *, dims, traditional, base, rope_scale, offset):
+    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    traditional_str = "true" if traditional else "false"
+    return mlir.custom_call(
+        call_target_name="mps.rope_bwd",
+        result_types=[result_type],
+        operands=[x, g],
+        backend_config=(
+            f'{{"dims": {dims}, "traditional": {traditional_str}, '
+            f'"base": {base}, "rope_scale": {rope_scale}, "offset": {offset}}}'
+        ),
+    ).results
+
+
 def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
     """Rotary position embeddings using fused MLX kernel on MPS."""
     dims = int(dims)
@@ -252,34 +359,24 @@ def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
     base = float(base)
     rope_scale = float(scale)
     offset = int(offset)
+    params = dict(
+        dims=dims,
+        traditional=traditional,
+        base=base,
+        rope_scale=rope_scale,
+        offset=offset,
+    )
 
     @jax.custom_vjp
     def fwd(x):
-        return _rope_p.bind(
-            x,
-            dims=dims,
-            traditional=traditional,
-            base=base,
-            rope_scale=rope_scale,
-            offset=offset,
-        )
+        return _rope_p.bind(x, **params)
 
     def fwd_rule(x):
         return fwd(x), (x,)
 
     def bwd_rule(res, g):
         (x,) = res
-        return jax.vjp(
-            lambda x: _rope_impl(
-                x,
-                dims=dims,
-                traditional=traditional,
-                base=base,
-                rope_scale=rope_scale,
-                offset=offset,
-            ),
-            x,
-        )[1](g)
+        return (_rope_bwd_p.bind(x, g, **params),)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(x)
@@ -326,6 +423,22 @@ def _gelu_lowering(ctx, x):
     ).results
 
 
+_gelu_bwd_p = core.Primitive("mps.gelu_bwd")
+_gelu_bwd_p.multiple_results = False
+_gelu_bwd_p.def_abstract_eval(lambda x, g: core.ShapedArray(x.shape, x.dtype))
+_gelu_bwd_p.def_impl(lambda x, g: jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1](g)[0])
+
+
+def _gelu_bwd_lowering(ctx, x, g):
+    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    return mlir.custom_call(
+        call_target_name="mps.gelu_bwd",
+        result_types=[result_type],
+        operands=[x, g],
+        backend_config="",
+    ).results
+
+
 def gelu(x):
     """Approximate GELU using fused MLX kernel on MPS."""
 
@@ -338,7 +451,7 @@ def gelu(x):
 
     def bwd_rule(res, g):
         (x,) = res
-        return jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1](g)
+        return (_gelu_bwd_p.bind(x, g),)
 
     fwd.defvjp(fwd_rule, bwd_rule)
     return fwd(x)
@@ -356,6 +469,15 @@ def register_fused_ops():
     mlir.register_lowering(_rms_norm_p, _rms_norm_lowering, platform="mps")
     mlir.register_lowering(_rope_p, _rope_lowering, platform="mps")
     mlir.register_lowering(_gelu_p, _gelu_lowering, platform="mps")
+
+    # Backward lowerings for MPS.
+    mlir.register_lowering(_sdpa_bwd_p, _sdpa_bwd_lowering, platform="mps")
+    mlir.register_lowering(
+        _sdpa_causal_bwd_p, _sdpa_causal_bwd_lowering, platform="mps"
+    )
+    mlir.register_lowering(_rms_norm_bwd_p, _rms_norm_bwd_lowering, platform="mps")
+    mlir.register_lowering(_rope_bwd_p, _rope_bwd_lowering, platform="mps")
+    mlir.register_lowering(_gelu_bwd_p, _gelu_bwd_lowering, platform="mps")
 
     # Fallback lowerings for non-MPS platforms (CPU, GPU).
     mlir.register_lowering(
@@ -397,6 +519,61 @@ def register_fused_ops():
     mlir.register_lowering(
         _gelu_p,
         mlir.lower_fun(lambda x: _gelu_impl_dispatch(x), multiple_results=False),
+    )
+
+    # Backward fallback lowerings for non-MPS platforms.
+    mlir.register_lowering(
+        _sdpa_bwd_p,
+        mlir.lower_fun(
+            lambda q, k, v, g, scale=1.0: jax.vjp(
+                lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v
+            )[1](g),
+            multiple_results=True,
+        ),
+    )
+    mlir.register_lowering(
+        _sdpa_causal_bwd_p,
+        mlir.lower_fun(
+            lambda q, k, v, g, scale=1.0: jax.vjp(
+                lambda q, k, v: _sdpa_causal_impl(q, k, v, scale=scale), q, k, v
+            )[1](g),
+            multiple_results=True,
+        ),
+    )
+    mlir.register_lowering(
+        _rms_norm_bwd_p,
+        mlir.lower_fun(
+            lambda x, w, g, eps=1e-6: jax.vjp(
+                lambda x, w: _rms_norm_impl(x, w, eps=eps), x, w
+            )[1](g),
+            multiple_results=True,
+        ),
+    )
+    mlir.register_lowering(
+        _rope_bwd_p,
+        mlir.lower_fun(
+            lambda x, g, dims=0, traditional=False, base=10000.0, rope_scale=1.0, offset=0: (
+                jax.vjp(
+                    lambda x: _rope_impl(
+                        x,
+                        dims=dims,
+                        traditional=traditional,
+                        base=base,
+                        rope_scale=rope_scale,
+                        offset=offset,
+                    ),
+                    x,
+                )[1](g)[0]
+            ),
+            multiple_results=False,
+        ),
+    )
+    mlir.register_lowering(
+        _gelu_bwd_p,
+        mlir.lower_fun(
+            lambda x, g: jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1](g)[0],
+            multiple_results=False,
+        ),
     )
 
 

@@ -3,6 +3,7 @@
 
 #include <mlx/compile.h>
 #include <mlx/fast.h>
+#include <mlx/transforms.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -483,6 +484,204 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 *x, mlx::core::add(mlx::core::array(1.0F), mlx::core::tanh(inner, {}), {}), {}),
             {});
         values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.sdpa_bwd — backward for SDPA via mlx::core::vjp.
+    // Inputs: q, k, v, grad_out; backend_config: {"scale": <float>}
+    // Outputs: dq, dk, dv
+    if (callTargetName == "mps.sdpa_bwd") {
+        if (op->getNumOperands() != 4 || op->getNumResults() != 3) {
+            MPS_LOG_ERROR("mps.sdpa_bwd: expected 4 inputs and 3 outputs\n");
+            return false;
+        }
+        auto* q = RequireValue(values, op->getOperand(0), "mps.sdpa_bwd");
+        auto* k = RequireValue(values, op->getOperand(1), "mps.sdpa_bwd");
+        auto* v = RequireValue(values, op->getOperand(2), "mps.sdpa_bwd");
+        auto* g = RequireValue(values, op->getOperand(3), "mps.sdpa_bwd");
+        if (!q || !k || !v || !g)
+            return false;
+
+        float scale = 1.0F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"scale\":");
+                if (pos != std::string::npos) {
+                    scale = std::stof(cfg.substr(pos + 8));
+                }
+            }
+        }
+
+        auto vjp_fn = [scale](const std::vector<mlx::core::array>& primals) {
+            return std::vector<mlx::core::array>{mlx::core::fast::scaled_dot_product_attention(
+                primals[0], primals[1], primals[2], scale)};
+        };
+        auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*q, *k, *v}, {*g});
+        values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
+        values.emplace(ToKey(op->getResult(1)), std::move(grads[1]));
+        values.emplace(ToKey(op->getResult(2)), std::move(grads[2]));
+        return true;
+    }
+
+    // Handle mps.sdpa_causal_bwd — backward for causal SDPA via mlx::core::vjp.
+    if (callTargetName == "mps.sdpa_causal_bwd") {
+        if (op->getNumOperands() != 4 || op->getNumResults() != 3) {
+            MPS_LOG_ERROR("mps.sdpa_causal_bwd: expected 4 inputs and 3 outputs\n");
+            return false;
+        }
+        auto* q = RequireValue(values, op->getOperand(0), "mps.sdpa_causal_bwd");
+        auto* k = RequireValue(values, op->getOperand(1), "mps.sdpa_causal_bwd");
+        auto* v = RequireValue(values, op->getOperand(2), "mps.sdpa_causal_bwd");
+        auto* g = RequireValue(values, op->getOperand(3), "mps.sdpa_causal_bwd");
+        if (!q || !k || !v || !g)
+            return false;
+
+        float scale = 1.0F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"scale\":");
+                if (pos != std::string::npos) {
+                    scale = std::stof(cfg.substr(pos + 8));
+                }
+            }
+        }
+
+        auto vjp_fn = [scale](const std::vector<mlx::core::array>& primals) {
+            return std::vector<mlx::core::array>{mlx::core::fast::scaled_dot_product_attention(
+                primals[0], primals[1], primals[2], scale, "causal")};
+        };
+        auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*q, *k, *v}, {*g});
+        values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
+        values.emplace(ToKey(op->getResult(1)), std::move(grads[1]));
+        values.emplace(ToKey(op->getResult(2)), std::move(grads[2]));
+        return true;
+    }
+
+    // Handle mps.rms_norm_bwd — backward for RMS norm via mlx::core::vjp.
+    // Inputs: x, weight, grad_out; backend_config: {"eps": <float>}
+    // Outputs: dx, dweight
+    if (callTargetName == "mps.rms_norm_bwd") {
+        if (op->getNumOperands() != 3 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("mps.rms_norm_bwd: expected 3 inputs and 2 outputs\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.rms_norm_bwd");
+        auto* w = RequireValue(values, op->getOperand(1), "mps.rms_norm_bwd");
+        auto* g = RequireValue(values, op->getOperand(2), "mps.rms_norm_bwd");
+        if (!x || !w || !g)
+            return false;
+
+        float eps = 1e-6F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"eps\":");
+                if (pos != std::string::npos) {
+                    eps = std::stof(cfg.substr(pos + 6));
+                }
+            }
+        }
+
+        auto vjp_fn = [eps](const std::vector<mlx::core::array>& primals) {
+            return std::vector<mlx::core::array>{
+                mlx::core::fast::rms_norm(primals[0], primals[1], eps)};
+        };
+        auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*x, *w}, {*g});
+        values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
+        values.emplace(ToKey(op->getResult(1)), std::move(grads[1]));
+        return true;
+    }
+
+    // Handle mps.rope_bwd — backward for RoPE via mlx::core::vjp.
+    // Inputs: x, grad_out; backend_config same as mps.rope
+    // Outputs: dx
+    if (callTargetName == "mps.rope_bwd") {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.rope_bwd: expected 2 inputs and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.rope_bwd");
+        auto* g = RequireValue(values, op->getOperand(1), "mps.rope_bwd");
+        if (!x || !g)
+            return false;
+
+        int dims = 0;
+        bool traditional = false;
+        float base = 10000.0F;
+        float rope_scale = 1.0F;
+        int offset = 0;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto findFloat = [&](const char* key) -> std::optional<float> {
+                    auto pos = cfg.find(key);
+                    if (pos != std::string::npos)
+                        return std::stof(cfg.substr(pos + std::strlen(key)));
+                    return std::nullopt;
+                };
+                auto findInt = [&](const char* key) -> std::optional<int> {
+                    auto pos = cfg.find(key);
+                    if (pos != std::string::npos)
+                        return std::stoi(cfg.substr(pos + std::strlen(key)));
+                    return std::nullopt;
+                };
+                if (auto v = findInt("\"dims\":"))
+                    dims = *v;
+                if (auto v = findFloat("\"base\":"))
+                    base = *v;
+                if (auto v = findFloat("\"rope_scale\":"))
+                    rope_scale = *v;
+                if (auto v = findInt("\"offset\":"))
+                    offset = *v;
+                if (cfg.find("\"traditional\": true") != std::string::npos ||
+                    cfg.find("\"traditional\":true") != std::string::npos)
+                    traditional = true;
+            }
+        }
+
+        auto vjp_fn = [dims, traditional, base, rope_scale,
+                       offset](const std::vector<mlx::core::array>& primals) {
+            return std::vector<mlx::core::array>{
+                mlx::core::fast::rope(primals[0], dims, traditional, base, rope_scale, offset)};
+        };
+        auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*x}, {*g});
+        values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
+        return true;
+    }
+
+    // Handle mps.gelu_bwd — backward for GELU via mlx::core::vjp.
+    // Inputs: x, grad_out; Outputs: dx
+    if (callTargetName == "mps.gelu_bwd") {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.gelu_bwd: expected 2 inputs and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.gelu_bwd");
+        auto* g = RequireValue(values, op->getOperand(1), "mps.gelu_bwd");
+        if (!x || !g)
+            return false;
+
+        auto vjp_fn = [](const std::vector<mlx::core::array>& primals) {
+            const auto& x = primals[0];
+            auto x3 = mlx::core::multiply(mlx::core::multiply(x, x, {}), x, {});
+            auto inner = mlx::core::multiply(
+                mlx::core::array(0.7978845608F),
+                mlx::core::add(x, mlx::core::multiply(mlx::core::array(0.044715F), x3, {}), {}),
+                {});
+            return std::vector<mlx::core::array>{mlx::core::multiply(
+                mlx::core::array(0.5F),
+                mlx::core::multiply(
+                    x, mlx::core::add(mlx::core::array(1.0F), mlx::core::tanh(inner, {}), {}), {}),
+                {})};
+        };
+        auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*x}, {*g});
+        values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
         return true;
     }
 
