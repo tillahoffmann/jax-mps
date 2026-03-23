@@ -214,20 +214,16 @@ bool HandleComplex(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 // Handler for chlo.top_k
 bool HandleChloTopK(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                     ExecContext& ctx) {
-    auto topKOp = mlir::dyn_cast<mlir::chlo::TopKOp>(op);
-    if (!topKOp) {
-        MPS_LOG_ERROR("chlo.top_k: failed to cast\n");
+    auto topKOp = CastOp<mlir::chlo::TopKOp>(op, "chlo.top_k");
+    if (!topKOp)
         return false;
-    }
 
-    auto input_opt = GetValue(values, topKOp.getOperand());
-    if (!input_opt) {
-        MPS_LOG_ERROR("chlo.top_k: operand not found\n");
+    auto* input_ptr = RequireValue(values, topKOp.getOperand(), "chlo.top_k");
+    if (!input_ptr)
         return false;
-    }
 
     int k = static_cast<int>(topKOp.getK());
-    auto input = mlx::core::contiguous(input_opt->get());
+    auto input = mlx::core::contiguous(*input_ptr);
     auto [topValues, indices] = TopKImplFn(input, k);
     values.emplace(ToKey(op->getResult(0)), std::move(topValues));
     values.emplace(ToKey(op->getResult(1)), std::move(indices));
