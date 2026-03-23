@@ -18,6 +18,13 @@ namespace jax_mps {
 
 namespace {
 
+// Convert a boolean mask to an additive attention mask (true -> 0, false -> -1e9)
+// cast to the given dtype so MLX's SDPA type check passes with float16.
+mlx::core::array BoolMaskToAdditive(const mlx::core::array& mask, mlx::core::Dtype dtype) {
+    return mlx::core::astype(
+        mlx::core::where(mask, mlx::core::array(0.0F), mlx::core::array(-1e9F)), dtype);
+}
+
 // Common helper for return-like operations (func.return, stablehlo.return)
 bool CollectReturnValues(mlir::Operation* op, ValueMap& values,
                          std::vector<mlx::core::array>& outputs, const char* opName) {
@@ -343,11 +350,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
         }
 
-        // Convert boolean mask to additive mask: true -> 0, false -> -inf.
-        // Cast to query dtype so MLX's SDPA type check passes.
-        auto additive_mask = mlx::core::astype(
-            mlx::core::where(*mask, mlx::core::array(0.0F), mlx::core::array(-1e9F)),
-            queries->dtype());
+        auto additive_mask = BoolMaskToAdditive(*mask, queries->dtype());
         auto result = mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale,
                                                                     "", additive_mask);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
@@ -591,8 +594,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
         }
 
-        auto additive_mask = mlx::core::astype(
-            mlx::core::where(*mask, mlx::core::array(0.0F), mlx::core::array(-1e9F)), q->dtype());
+        auto additive_mask = BoolMaskToAdditive(*mask, q->dtype());
         auto vjp_fn = [scale, &additive_mask](const std::vector<mlx::core::array>& primals) {
             return std::vector<mlx::core::array>{mlx::core::fast::scaled_dot_product_attention(
                 primals[0], primals[1], primals[2], scale, "", additive_mask)};
