@@ -5,6 +5,7 @@
 #include <mlx/fast.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"

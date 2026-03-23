@@ -13,6 +13,7 @@ from .configs import (
     make_conv_op_configs,
     make_conversion_op_configs,
     make_flax_op_configs,
+    make_fused_op_configs,
     make_linalg_op_configs,
     make_matmul_op_configs,
     make_misc_op_configs,
@@ -60,6 +61,7 @@ OPERATION_TEST_CONFIGS = [
     *make_slice_op_configs(),
     *make_sort_op_configs(),
     *make_unary_op_configs(),
+    *make_fused_op_configs(),
 ]
 
 

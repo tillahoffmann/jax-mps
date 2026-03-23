@@ -156,7 +156,8 @@ def initialize() -> None:
 
     register_fused_ops()
 
-    # Monkey-patch standard JAX functions to route through fused MPS kernels.
+    # Monkey-patch jax.nn.gelu and jax.nn.dot_product_attention to route
+    # through fused MPS kernels. Backward pass falls through to JAX autodiff.
     from jax_plugins.mps.ops import patch_jax_functions
 
     patch_jax_functions()

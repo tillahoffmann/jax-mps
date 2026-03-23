@@ -3,8 +3,8 @@
 These primitives emit stablehlo.custom_call ops that the MPS backend
 intercepts and dispatches to mlx::core::fast:: fused Metal kernels.
 
-Note: These ops are forward-only (no gradient rules are defined).
-They are suitable for inference but will raise errors under jax.grad.
+The forward pass uses fused kernels; the backward pass falls through to
+JAX's standard autodiff on the decomposed implementation.
 """
 
 # pyright: reportArgumentType=false, reportOptionalCall=false
@@ -60,7 +60,7 @@ def _sdpa_causal_impl(q, k, v, *, scale):
     """Pure JAX fallback with causal mask."""
     T, S = q.shape[-2], k.shape[-2]
     attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) * scale
-    mask = jnp.triu(jnp.full((T, S), -2.3819763e38), k=1)
+    mask = jnp.triu(jnp.full((T, S), jnp.finfo(attn.dtype).min), k=1)
     attn = attn + mask
     attn = jax.nn.softmax(attn, axis=-1)
     return jnp.matmul(attn, v)
@@ -94,9 +94,44 @@ def sdpa(q, k, v, *, scale=None, is_causal=False):
     """
     if scale is None:
         scale = q.shape[-1] ** -0.5
+    scale = float(scale)
     if is_causal:
-        return _sdpa_causal_p.bind(q, k, v, scale=float(scale))
-    return _sdpa_p.bind(q, k, v, scale=float(scale))
+        return _sdpa_causal_with_grad(q, k, v, scale)
+    return _sdpa_with_grad(q, k, v, scale)
+
+
+def _sdpa_with_grad(q, k, v, scale):
+    @jax.custom_vjp
+    def fwd(q, k, v):
+        return _sdpa_p.bind(q, k, v, scale=scale)
+
+    def fwd_rule(q, k, v):
+        return fwd(q, k, v), (q, k, v)
+
+    def bwd_rule(res, g):
+        q, k, v = res
+        return jax.vjp(lambda q, k, v: _sdpa_impl(q, k, v, scale=scale), q, k, v)[1](g)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(q, k, v)
+
+
+def _sdpa_causal_with_grad(q, k, v, scale):
+    @jax.custom_vjp
+    def fwd(q, k, v):
+        return _sdpa_causal_p.bind(q, k, v, scale=scale)
+
+    def fwd_rule(q, k, v):
+        return fwd(q, k, v), (q, k, v)
+
+    def bwd_rule(res, g):
+        q, k, v = res
+        return jax.vjp(
+            lambda q, k, v: _sdpa_causal_impl(q, k, v, scale=scale), q, k, v
+        )[1](g)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(q, k, v)
 
 
 # ---------------------------------------------------------------------------
@@ -138,16 +173,22 @@ def rms_norm(x, weight, *, eps=1e-6):
     """RMS normalization using fused MLX kernel on MPS.
 
     Computes: x / sqrt(mean(x^2) + eps) * weight
-
-    Args:
-        x: Input array.
-        weight: Scale weights (same size as last axis of x).
-        eps: Epsilon for numerical stability.
-
-    Returns:
-        Normalized array with same shape as x.
     """
-    return _rms_norm_p.bind(x, weight, eps=float(eps))
+    eps = float(eps)
+
+    @jax.custom_vjp
+    def fwd(x, weight):
+        return _rms_norm_p.bind(x, weight, eps=eps)
+
+    def fwd_rule(x, weight):
+        return fwd(x, weight), (x, weight)
+
+    def bwd_rule(res, g):
+        x, weight = res
+        return jax.vjp(lambda x, w: _rms_norm_impl(x, w, eps=eps), x, weight)[1](g)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(x, weight)
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +208,10 @@ _rope_p.def_abstract_eval(_rope_abstract)
 
 def _rope_impl(x, *, dims, traditional, base, rope_scale, offset):
     """Pure JAX fallback for RoPE."""
-    # Only supports non-traditional (half-split) RoPE.
+    if traditional:
+        raise NotImplementedError(
+            "mps.rope fallback only supports non-traditional (half-split) RoPE."
+        )
     half_dim = dims // 2
     freqs = 1.0 / (base ** (jnp.arange(0, dims, 2, dtype=jnp.float32) / dims))
     positions = (jnp.arange(x.shape[-2], dtype=jnp.float32) + offset) * rope_scale
@@ -202,27 +246,43 @@ def _rope_lowering(ctx, x, *, dims, traditional, base, rope_scale, offset):
 
 
 def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
-    """Rotary position embeddings using fused MLX kernel on MPS.
+    """Rotary position embeddings using fused MLX kernel on MPS."""
+    dims = int(dims)
+    traditional = bool(traditional)
+    base = float(base)
+    rope_scale = float(scale)
+    offset = int(offset)
 
-    Args:
-        x: Input array of shape (..., T, D) where D >= dims.
-        dims: Number of dimensions to apply RoPE to.
-        base: Base frequency for position encoding.
-        scale: Position scaling factor.
-        offset: Position offset (for KV-cache decode steps).
-        traditional: If True, use traditional (consecutive pair) rotation.
+    @jax.custom_vjp
+    def fwd(x):
+        return _rope_p.bind(
+            x,
+            dims=dims,
+            traditional=traditional,
+            base=base,
+            rope_scale=rope_scale,
+            offset=offset,
+        )
 
-    Returns:
-        Array with rotary embeddings applied.
-    """
-    return _rope_p.bind(
-        x,
-        dims=int(dims),
-        traditional=bool(traditional),
-        base=float(base),
-        rope_scale=float(scale),
-        offset=int(offset),
-    )
+    def fwd_rule(x):
+        return fwd(x), (x,)
+
+    def bwd_rule(res, g):
+        (x,) = res
+        return jax.vjp(
+            lambda x: _rope_impl(
+                x,
+                dims=dims,
+                traditional=traditional,
+                base=base,
+                rope_scale=rope_scale,
+                offset=offset,
+            ),
+            x,
+        )[1](g)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(x)
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +327,21 @@ def _gelu_lowering(ctx, x):
 
 
 def gelu(x):
-    """Approximate GELU using fused MLX kernel on MPS.
+    """Approximate GELU using fused MLX kernel on MPS."""
 
-    Computes: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    """
-    return _gelu_p.bind(x)
+    @jax.custom_vjp
+    def fwd(x):
+        return _gelu_p.bind(x)
+
+    def fwd_rule(x):
+        return fwd(x), (x,)
+
+    def bwd_rule(res, g):
+        (x,) = res
+        return jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1](g)
+
+    fwd.defvjp(fwd_rule, bwd_rule)
+    return fwd(x)
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +441,7 @@ def patch_jax_functions():
 
         def _patched_gelu(x, approximate=True):
             if approximate:
-                return _gelu_p.bind(x)
+                return gelu(x)
             return _gelu_original(x, approximate=False)
 
         _patched_gelu._mps_patched = True
@@ -407,7 +477,7 @@ def patch_jax_functions():
             implementation=None,
             return_residual=False,
         ):
-            # Only intercept simple cases; fall back for masks, bias, etc.
+            # Only intercept simple cases; fall back for masks, bias, implementation, etc.
             if (
                 bias is not None
                 or mask is not None
@@ -415,6 +485,7 @@ def patch_jax_functions():
                 or key_value_seq_lengths is not None
                 or local_window_size is not None
                 or return_residual
+                or implementation is not None
             ):
                 return _sdpa_original(
                     query,
@@ -435,6 +506,17 @@ def patch_jax_functions():
             q = jnp.asarray(query)
             k = jnp.asarray(key)
             v = jnp.asarray(value)
+
+            # Only handle 3D/4D inputs; fall back for other ranks.
+            if q.ndim not in (3, 4):
+                return _sdpa_original(
+                    query,
+                    key,
+                    value,
+                    scale=scale,
+                    is_causal=is_causal,
+                )
+
             squeeze = q.ndim == 3
             if squeeze:
                 q = q[None]
@@ -443,6 +525,16 @@ def patch_jax_functions():
 
             B, T, N, H = q.shape
             _, S, K, _ = k.shape
+
+            # Fall back if GQA head counts aren't divisible.
+            if K < N and N % K != 0:
+                return _sdpa_original(
+                    query,
+                    key,
+                    value,
+                    scale=scale,
+                    is_causal=is_causal,
+                )
 
             if scale is None:
                 scale = H**-0.5
