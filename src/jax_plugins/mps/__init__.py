@@ -150,3 +150,13 @@ def initialize() -> None:
         if "ALREADY_EXISTS" in str(e) and "mps" in str(e).lower():
             return
         raise MPSPluginError(f"Failed to register MPS plugin with JAX: {e}") from e
+
+    # Register fused op lowerings (SDPA, RMSNorm, RoPE, GELU).
+    from jax_plugins.mps.ops import register_fused_ops
+
+    register_fused_ops()
+
+    # Monkey-patch standard JAX functions to route through fused MPS kernels.
+    from jax_plugins.mps.ops import patch_jax_functions
+
+    patch_jax_functions()

@@ -2,6 +2,10 @@
 // optimization_barrier).
 
 #include <mlx/compile.h>
+#include <mlx/fast.h>
+
+#include <cstdlib>
+#include <string>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "pjrt_plugin/ops/handler_utils.h"
@@ -305,6 +309,179 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto [topValues, indices] = TopKImpl(contiguous_input, k);
         values.emplace(ToKey(op->getResult(0)), std::move(topValues));
         values.emplace(ToKey(op->getResult(1)), std::move(indices));
+        return true;
+    }
+
+    // Handle mps.sdpa — fused scaled dot-product attention via mlx::core::fast.
+    // Inputs: queries (B, N, T, H), keys (B, N_kv, S, H), values (B, N_kv, S, H)
+    // backend_config: {"scale": <float>}
+    if (callTargetName == "mps.sdpa") {
+        if (op->getNumOperands() != 3 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.sdpa: expected 3 inputs and 1 output\n");
+            return false;
+        }
+        auto* queries = RequireValue(values, op->getOperand(0), "mps.sdpa");
+        auto* keys = RequireValue(values, op->getOperand(1), "mps.sdpa");
+        auto* vals = RequireValue(values, op->getOperand(2), "mps.sdpa");
+        if (!queries || !keys || !vals)
+            return false;
+
+        // Parse scale from backend_config string: {"scale": <float>}
+        float scale = 1.0F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"scale\":");
+                if (pos != std::string::npos) {
+                    scale = std::stof(cfg.substr(pos + 8));
+                }
+            }
+        }
+
+        auto result = mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.sdpa_causal — fused SDPA with causal masking.
+    if (callTargetName == "mps.sdpa_causal") {
+        if (op->getNumOperands() != 3 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.sdpa_causal: expected 3 inputs and 1 output\n");
+            return false;
+        }
+        auto* queries = RequireValue(values, op->getOperand(0), "mps.sdpa_causal");
+        auto* keys = RequireValue(values, op->getOperand(1), "mps.sdpa_causal");
+        auto* vals = RequireValue(values, op->getOperand(2), "mps.sdpa_causal");
+        if (!queries || !keys || !vals)
+            return false;
+
+        float scale = 1.0F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"scale\":");
+                if (pos != std::string::npos) {
+                    scale = std::stof(cfg.substr(pos + 8));
+                }
+            }
+        }
+
+        auto result =
+            mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale, "causal");
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.rms_norm — fused RMS normalization via mlx::core::fast.
+    // Inputs: x, weight
+    // backend_config: {"eps": <float>}
+    if (callTargetName == "mps.rms_norm") {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.rms_norm: expected 2 inputs and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.rms_norm");
+        auto* weight = RequireValue(values, op->getOperand(1), "mps.rms_norm");
+        if (!x || !weight)
+            return false;
+
+        float eps = 1e-6F;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto pos = cfg.find("\"eps\":");
+                if (pos != std::string::npos) {
+                    eps = std::stof(cfg.substr(pos + 6));
+                }
+            }
+        }
+
+        // MLX rms_norm applies: x / sqrt(mean(x^2) + eps) * weight
+        // Gemma's RMSNorm uses (1 + weight), so we pass (1 + weight) here.
+        // The Python side is responsible for passing the correct weight.
+        auto result = mlx::core::fast::rms_norm(*x, *weight, eps);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.rope — fused rotary position embeddings via mlx::core::fast.
+    // Inputs: x (..., T, D) where T is sequence length, D >= dims
+    // backend_config: {"dims": <int>, "traditional": <bool>, "base": <float>,
+    //                  "scale": <float>, "offset": <int>}
+    if (callTargetName == "mps.rope") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.rope: expected 1 input and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.rope");
+        if (!x)
+            return false;
+
+        int dims = 0;
+        bool traditional = false;
+        float base = 10000.0F;
+        float rope_scale = 1.0F;
+        int offset = 0;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                auto findFloat = [&](const char* key) -> std::optional<float> {
+                    auto pos = cfg.find(key);
+                    if (pos != std::string::npos)
+                        return std::stof(cfg.substr(pos + std::strlen(key)));
+                    return std::nullopt;
+                };
+                auto findInt = [&](const char* key) -> std::optional<int> {
+                    auto pos = cfg.find(key);
+                    if (pos != std::string::npos)
+                        return std::stoi(cfg.substr(pos + std::strlen(key)));
+                    return std::nullopt;
+                };
+                if (auto v = findInt("\"dims\":"))
+                    dims = *v;
+                if (auto v = findFloat("\"base\":"))
+                    base = *v;
+                if (auto v = findFloat("\"rope_scale\":"))
+                    rope_scale = *v;
+                if (auto v = findInt("\"offset\":"))
+                    offset = *v;
+                if (cfg.find("\"traditional\": true") != std::string::npos ||
+                    cfg.find("\"traditional\":true") != std::string::npos)
+                    traditional = true;
+            }
+        }
+
+        auto result = mlx::core::fast::rope(*x, dims, traditional, base, rope_scale, offset);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.gelu — approximate GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    // MLX's compiler will fuse these element-wise ops into a single Metal kernel.
+    if (callTargetName == "mps.gelu") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.gelu: expected 1 input and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.gelu");
+        if (!x)
+            return false;
+
+        // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        auto x3 = mlx::core::multiply(mlx::core::multiply(*x, *x, {}), *x, {});
+        auto inner = mlx::core::multiply(
+            mlx::core::array(0.7978845608F),
+            mlx::core::add(*x, mlx::core::multiply(mlx::core::array(0.044715F), x3, {}), {}), {});
+        auto result = mlx::core::multiply(
+            mlx::core::array(0.5F),
+            mlx::core::multiply(
+                *x, mlx::core::add(mlx::core::array(1.0F), mlx::core::tanh(inner, {}), {}), {}),
+            {});
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
 
