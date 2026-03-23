@@ -294,7 +294,7 @@ def _rope_impl(x, *, dims, traditional, base, rope_scale, offset):
     sin = jnp.concatenate([sin_half, sin_half], axis=-1)
     x1, x2 = x[..., :half_dim], x[..., half_dim:dims]
     rotated = jnp.concatenate([-x2, x1], axis=-1)
-    result = x[..., :dims] * cos + rotated * sin
+    result = (x[..., :dims] * cos + rotated * sin).astype(x.dtype)
     if dims < x.shape[-1]:
         result = jnp.concatenate([result, x[..., dims:]], axis=-1)
     return result

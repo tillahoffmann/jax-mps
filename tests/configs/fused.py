@@ -56,7 +56,7 @@ def make_fused_op_configs():
             name="sdpa_causal",
         )
 
-        # GELU via jax.nn.gelu (tests monkey-patching when JAX_MPS_FUSED_OPS=1)
+        # GELU via jax.nn.gelu (tests plugin monkey-patching)
         yield OperationTestConfig(
             lambda x: jax.nn.gelu(x, approximate=True),
             lambda key: random.normal(key, (4, 8)),
