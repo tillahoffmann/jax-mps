@@ -66,5 +66,6 @@ dev = [
     "ruff>=0.14.13",
     "safetensors",
     "sentencepiece",
+    "tokenizers>=0.22.2",
     "tqdm>=4.67.1",
 ]
