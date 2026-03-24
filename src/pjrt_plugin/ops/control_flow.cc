@@ -138,10 +138,9 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
             return false;
         }
 
-        loopVars.push_back(condResults[0]);
-        mlx::core::eval(loopVars);
-        auto condVal = std::move(loopVars.back());
-        loopVars.pop_back();
+        // Only eval the condition — keep loop vars lazy until needed.
+        mlx::core::eval(condResults[0]);
+        auto condVal = condResults[0];
 
         if (condVal.size() != 1) {
             MPS_LOG_ERROR("stablehlo.while: condition must be a scalar, got size %zu\n",

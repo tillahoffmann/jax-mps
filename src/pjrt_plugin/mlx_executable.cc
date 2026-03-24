@@ -524,6 +524,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     }
 
     std::vector<mlx::core::array> inputArrays;
+    inputArrays.reserve(inputs.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (!inputs[i]) {
             MPS_LOG_ERROR("Null input buffer at index %zu\n", i);

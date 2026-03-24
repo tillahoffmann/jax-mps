@@ -42,12 +42,9 @@ PJRT_Error* MPS_Executable_NumPartitions(PJRT_Executable_NumPartitions_Args* arg
 }
 
 PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
-    std::scoped_lock lock(GetPjrtGlobalMutex());
-    MPS_LOG_DEBUG(" PJRT_Executable_NumOutputs called\n");
     args->num_outputs = args->executable && args->executable->executable
                             ? args->executable->executable->num_outputs()
                             : 1;
-    MPS_LOG_DEBUG(" PJRT_Executable_NumOutputs: %zu\n", args->num_outputs);
     return nullptr;
 }
 
@@ -64,58 +61,37 @@ PJRT_Error* MPS_Executable_GetCostAnalysis(PJRT_Executable_GetCostAnalysis_Args*
 }
 
 PJRT_Error* MPS_Executable_OutputMemoryKinds(PJRT_Executable_OutputMemoryKinds_Args* args) {
-    std::scoped_lock lock(GetPjrtGlobalMutex());
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputMemoryKinds called\n");
-
     if (!args->executable) {
         return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
-
-    // Initialize dynamic storage if needed
     args->executable->initOutputMetadata();
-
     size_t num_outputs = args->executable->output_memory_kinds.size();
     args->num_outputs = num_outputs;
     args->memory_kinds = args->executable->output_memory_kinds.data();
     args->memory_kind_sizes = args->executable->output_memory_kind_sizes.data();
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputMemoryKinds: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
 PJRT_Error* MPS_Executable_OutputElementTypes(PJRT_Executable_OutputElementTypes_Args* args) {
-    std::scoped_lock lock(GetPjrtGlobalMutex());
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputElementTypes called\n");
-
     if (!args->executable) {
         return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
-
-    // Initialize dynamic storage if needed
     args->executable->initOutputMetadata();
-
     size_t num_outputs = args->executable->output_types.size();
     args->output_types = args->executable->output_types.data();
     args->num_output_types = num_outputs;
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputElementTypes: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
 PJRT_Error* MPS_Executable_OutputDimensions(PJRT_Executable_OutputDimensions_Args* args) {
-    std::scoped_lock lock(GetPjrtGlobalMutex());
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputDimensions called\n");
-
     if (!args->executable) {
         return MakeError("Null executable", PJRT_Error_Code_INVALID_ARGUMENT);
     }
-
-    // Initialize dynamic storage if needed
     args->executable->initOutputMetadata();
-
     size_t num_outputs = args->executable->output_dim_sizes.size();
     args->num_outputs = num_outputs;
     args->dims = args->executable->output_dims.data();
     args->dim_sizes = args->executable->output_dim_sizes.data();
-    MPS_LOG_DEBUG(" PJRT_Executable_OutputDimensions: %zu outputs\n", num_outputs);
     return nullptr;
 }
 
@@ -217,14 +193,12 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     }
 
     // Gather input buffers
-    std::vector<jax_mps::MlxBuffer*> inputs;
     size_t num_args = args->num_args;
-    MPS_LOG_DEBUG("Execute: num_args=%zu\n", num_args);
+    std::vector<jax_mps::MlxBuffer*> inputs;
+    inputs.reserve(num_args);
+    PJRT_Buffer* const* arg_buffers = args->argument_lists[0];
 
     for (size_t i = 0; i < num_args; ++i) {
-        // Each argument list has args->num_args buffers
-        // For single device, we just use the first device's arguments
-        PJRT_Buffer* const* arg_buffers = args->argument_lists[0];
         if (arg_buffers[i] && arg_buffers[i]->buffer) {
             inputs.push_back(arg_buffers[i]->buffer.get());
         } else {
