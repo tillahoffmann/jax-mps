@@ -141,6 +141,11 @@ class Gemma3Attention(nnx.Module):
             else:
                 k = jnp.concatenate([kv_cache[0], k], axis=2)
                 v = jnp.concatenate([kv_cache[1], v], axis=2)
+                if self.is_sliding:
+                    S = k.shape[2]
+                    if S > self.sliding_window:
+                        k = k[:, :, S - self.sliding_window :, :]
+                        v = v[:, :, S - self.sliding_window :, :]
                 new_kv = (k, v)
         else:
             new_kv = (k, v)
@@ -198,8 +203,9 @@ def _clip_residual(x, y):
     Gemma 3's large norm weights (up to ~300x) amplify hidden states beyond
     float16 range, causing inf. Computing the addition in float32 and clipping
     to float16 max prevents inf propagation. The resulting values (up to 65504)
-    still cause x^2 overflow in RMSNorm, but MLX's fast::rms_norm handles this
-    by computing variance in float32 internally.
+    can still cause x^2 overflow in RMSNorm. On Apple Silicon with the MPS
+    fused ``rms_norm`` op, variance is computed in float32 internally, which
+    handles this. On other backends (e.g., CPU), use float32 or bfloat16.
     """
     if x.dtype != jnp.float16:
         return x + y

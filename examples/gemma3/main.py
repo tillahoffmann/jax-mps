@@ -218,6 +218,12 @@ if __name__ == "__main__":
         args.dtype
     ]
 
+    # Gemma 3's RMSNorm overflows in float16 on CPU (pure-JAX fallback
+    # computes x^2 in the input dtype). Promote to float32 automatically.
+    if args.dtype == "float16" and all(d.platform == "cpu" for d in jax.devices()):
+        print("Warning: float16 on CPU overflows for Gemma 3; promoting to float32.")
+        dtype = jnp.float32
+
     print(f"JAX devices: {jax.devices()}")
     print(f"Dtype: {args.dtype}")
     model, tokenizer = load_model(args.model, dtype=dtype)
