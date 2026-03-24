@@ -225,7 +225,7 @@ if __name__ == "__main__":
         dtype = jnp.float32
 
     print(f"JAX devices: {jax.devices()}")
-    print(f"Dtype: {args.dtype}")
+    print(f"Dtype: {dtype}")
     model, tokenizer = load_model(args.model, dtype=dtype)
     print(f"Prompt: {args.prompt}")
     generate(model, tokenizer, args.prompt, args.max_tokens)

@@ -137,7 +137,9 @@ class Gemma3Attention(nnx.Module):
                         cache_index + T - self.sliding_window
                     )
                     valid = valid & in_window
-                mask = valid[:, None, None, :]  # (B, 1, 1, S)
+                # Note: for long sequences, slicing k/v to the window size
+                # would reduce compute. Kept simple for this example.
+                mask = valid[:, None, None, :]  # (1, 1, 1, S) — broadcasts over B
             else:
                 k = jnp.concatenate([kv_cache[0], k], axis=2)
                 v = jnp.concatenate([kv_cache[1], v], axis=2)
