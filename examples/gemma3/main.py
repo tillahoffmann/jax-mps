@@ -145,18 +145,36 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
     graphdef, state = nnx.split(model)
     config = model.config
 
+    input_ids = jnp.array([[tokenizer.bos_id()] + tokenizer.Encode(prompt)])
+    max_seq_len = input_ids.shape[1] + max_new_tokens
+
+    # Determine cache size per layer: sliding layers use a rotating cache
+    # of sliding_window size, global layers use the full max_seq_len.
+    cache_sizes = []
+    for i in range(config.num_hidden_layers):
+        is_sliding = (i + 1) % config.sliding_window_pattern != 0
+        if is_sliding and config.sliding_window < max_seq_len:
+            cache_sizes.append(config.sliding_window)
+        else:
+            cache_sizes.append(max_seq_len)
+
     @jax.jit
     def prefill(state, input_ids):
         m = nnx.merge(graphdef, state)
         logits, kv_pairs = m(input_ids)
         # Copy prefill KV into static cache (matching dtype).
         static_cache = []
-        for k, v in kv_pairs:
+        for i, (k, v) in enumerate(kv_pairs):
+            cs = cache_sizes[i]
             k_pad = jnp.zeros(
-                (1, config.num_key_value_heads, max_seq_len, config.head_dim),
+                (1, config.num_key_value_heads, cs, config.head_dim),
                 dtype=k.dtype,
             )
             v_pad = jnp.zeros_like(k_pad)
+            # For rotating caches, only copy the last sliding_window positions.
+            if cs < max_seq_len and k.shape[2] > cs:
+                k = k[:, :, -cs:, :]
+                v = v[:, :, -cs:, :]
             k_pad = jax.lax.dynamic_update_slice(k_pad, k, (0, 0, 0, 0))
             v_pad = jax.lax.dynamic_update_slice(v_pad, v, (0, 0, 0, 0))
             static_cache.append((k_pad, v_pad))
@@ -172,8 +190,6 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
         next_token = jnp.argmax(logits[0, -1, :], keepdims=True)
         return next_token, kv_cache
 
-    input_ids = jnp.array([[tokenizer.bos_id()] + tokenizer.Encode(prompt)])
-    max_seq_len = input_ids.shape[1] + max_new_tokens
     token, kv_cache = prefill(state, input_ids)
     pos = input_ids.shape[1]
 

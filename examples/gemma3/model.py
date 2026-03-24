@@ -118,28 +118,35 @@ class Gemma3Attention(nnx.Module):
         mask = None
         if kv_cache is not None:
             if cache_index is not None:
-                # Static cache: write new KV at cache_index, use full buffer.
-                k_cache = jax.lax.dynamic_update_slice(
-                    kv_cache[0], k, (0, 0, cache_index, 0)
-                )
-                v_cache = jax.lax.dynamic_update_slice(
-                    kv_cache[1], v, (0, 0, cache_index, 0)
-                )
-                k = k_cache
-                v = v_cache
-                new_kv = (k_cache, v_cache)
-                # Mask: attend only to valid positions.
-                S = k.shape[2]
-                valid = jnp.arange(S)[None, :] < (cache_index + T)
-                if self.is_sliding:
-                    # Sliding window: also mask positions too far back.
-                    in_window = jnp.arange(S)[None, :] >= (
-                        cache_index + T - self.sliding_window
+                S = kv_cache[0].shape[2]
+                if self.is_sliding and S == self.sliding_window:
+                    # Rotating cache: write at cache_index % window_size.
+                    write_idx = cache_index % self.sliding_window
+                    k_cache = jax.lax.dynamic_update_slice(
+                        kv_cache[0], k, (0, 0, write_idx, 0)
                     )
-                    valid = valid & in_window
-                # Note: for long sequences, slicing k/v to the window size
-                # would reduce compute. Kept simple for this example.
-                mask = valid[:, None, None, :]  # (1, 1, 1, S) — broadcasts over B
+                    v_cache = jax.lax.dynamic_update_slice(
+                        kv_cache[1], v, (0, 0, write_idx, 0)
+                    )
+                    new_kv = (k_cache, v_cache)
+                    k = k_cache
+                    v = v_cache
+                    # Mask out unfilled slots in early steps.
+                    valid_len = jnp.minimum(cache_index + T, self.sliding_window)
+                    mask = (jnp.arange(S)[None, :] < valid_len)[:, None, None, :]
+                else:
+                    # Full cache: write at cache_index.
+                    k_cache = jax.lax.dynamic_update_slice(
+                        kv_cache[0], k, (0, 0, cache_index, 0)
+                    )
+                    v_cache = jax.lax.dynamic_update_slice(
+                        kv_cache[1], v, (0, 0, cache_index, 0)
+                    )
+                    new_kv = (k_cache, v_cache)
+                    k = k_cache
+                    v = v_cache
+                    valid_len = cache_index + T
+                    mask = (jnp.arange(S)[None, :] < valid_len)[:, None, None, :]
             else:
                 k = jnp.concatenate([kv_cache[0], k], axis=2)
                 v = jnp.concatenate([kv_cache[1], v], axis=2)
