@@ -39,7 +39,7 @@ def load_model(
     for prefix in ["language_model.model.", ""]:
         q_key = prefix + "layers.0.self_attn.q_proj.weight"
         k_key = prefix + "layers.0.self_attn.k_proj.weight"
-        if q_key in tensors:
+        if q_key in tensors and k_key in tensors:
             inferred_n_heads = tensors[q_key].shape[0] // head_dim
             inferred_n_kv_heads = tensors[k_key].shape[0] // head_dim
             break

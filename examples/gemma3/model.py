@@ -145,6 +145,13 @@ class Gemma3Attention(nnx.Module):
         else:
             new_kv = (k, v)
 
+        # Sliding window causal mask for prefill (no cache).
+        if mask is None and kv_cache is None and self.is_sliding and T > 1:
+            row = jnp.arange(T)[:, None]
+            col = jnp.arange(T)[None, :]
+            mask = (row >= col) & (row - col < self.sliding_window)
+            mask = mask[None, :, None, :]  # (1, T, 1, T) — BTNH layout
+
         # Back to (B, T, N, H) for jax.nn.dot_product_attention.
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
@@ -188,8 +195,11 @@ class Gemma3MLP(nnx.Module):
 def _clip_residual(x, y):
     """Add residual with float16 overflow protection.
 
-    Gemma 3's large norm weights cause hidden states to exceed sqrt(float16_max),
-    which makes x^2 overflow in RMSNorm. Clipping the residual sum prevents this.
+    Gemma 3's large norm weights (up to ~300x) amplify hidden states beyond
+    float16 range, causing inf. Computing the addition in float32 and clipping
+    to float16 max prevents inf propagation. The resulting values (up to 65504)
+    still cause x^2 overflow in RMSNorm, but MLX's fast::rms_norm handles this
+    by computing variance in float32 internally.
     """
     if x.dtype != jnp.float16:
         return x + y
