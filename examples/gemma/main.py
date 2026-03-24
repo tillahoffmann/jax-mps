@@ -119,16 +119,16 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
 
     t0 = perf_counter()
     for _ in range(max_new_tokens):
-        # Dispatch next decode before blocking on current token.
-        next_token, next_kv_cache = decode_step(state, token[None], kv_cache, pos)
-        # Block on current token.
+        # Block on current token to check for EOS.
         tok_id = int(token[0])
         if tok_id == eos_id:
             break
         generated_ids.append(tok_id)
-        token = next_token
-        kv_cache = next_kv_cache
+        # Dispatch next decode step.
+        token, kv_cache = decode_step(state, token[None], kv_cache, pos)
         pos += 1
+    # Sync to include any in-flight computation in the timing.
+    _ = token.block_until_ready()
     elapsed = perf_counter() - t0
 
     tokens_generated = len(generated_ids)
