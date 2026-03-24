@@ -84,13 +84,14 @@ PJRT_Error* MPS_Buffer_Memory(PJRT_Buffer_Memory_Args* args) {
     return nullptr;
 }
 
+// Mutating operations and their paired readers — keep mutex.
+
 PJRT_Error* MPS_Buffer_IsDeleted(PJRT_Buffer_IsDeleted_Args* args) {
+    std::scoped_lock lock(GetPjrtGlobalMutex());
     args->is_deleted =
         args->buffer && args->buffer->buffer ? args->buffer->buffer->IsDeleted() : true;
     return nullptr;
 }
-
-// Mutating operations — keep mutex.
 
 PJRT_Error* MPS_Buffer_Delete(PJRT_Buffer_Delete_Args* args) {
     std::scoped_lock lock(GetPjrtGlobalMutex());

@@ -4,6 +4,7 @@
 #include <xla/pjrt/c/pjrt_c_api.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -65,24 +66,23 @@ struct PJRT_Executable {
     // and should not be deleted directly by PJRT_Executable_Destroy
     bool owned_by_loaded = false;
 
-    // Dynamic storage for output metadata (lazily initialized)
+    // Dynamic storage for output metadata (lazily initialized, thread-safe)
     mutable std::vector<const char*> output_memory_kinds;
     mutable std::vector<size_t> output_memory_kind_sizes;
     mutable std::vector<PJRT_Buffer_Type> output_types;
     mutable std::vector<int64_t> output_dims;
     mutable std::vector<size_t> output_dim_sizes;
-    mutable bool output_metadata_initialized = false;
+    mutable std::once_flag output_metadata_flag;
 
     void initOutputMetadata() const {
-        if (output_metadata_initialized)
-            return;
-        size_t num_outputs = executable ? executable->num_outputs() : 1;
-        output_memory_kinds.resize(num_outputs, "device");
-        output_memory_kind_sizes.resize(num_outputs, 6);  // strlen("device")
-        output_types.resize(num_outputs, PJRT_Buffer_Type_F32);
-        output_dims.resize(num_outputs * 8, 0);  // up to 8 dims per output
-        output_dim_sizes.resize(num_outputs, 0);
-        output_metadata_initialized = true;
+        std::call_once(output_metadata_flag, [this] {
+            size_t num_outputs = executable ? executable->num_outputs() : 1;
+            output_memory_kinds.resize(num_outputs, "device");
+            output_memory_kind_sizes.resize(num_outputs, 6);  // strlen("device")
+            output_types.resize(num_outputs, PJRT_Buffer_Type_F32);
+            output_dims.resize(num_outputs * 8, 0);  // up to 8 dims per output
+            output_dim_sizes.resize(num_outputs, 0);
+        });
     }
 };
 
