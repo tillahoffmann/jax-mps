@@ -164,6 +164,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
         logits, kv_pairs = m(input_ids)
         # Copy prefill KV into static cache (matching dtype).
         static_cache = []
+        prompt_len = input_ids.shape[1]
         for i, (k, v) in enumerate(kv_pairs):
             cs = cache_sizes[i]
             k_pad = jnp.zeros(
@@ -171,12 +172,15 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
                 dtype=k.dtype,
             )
             v_pad = jnp.zeros_like(k_pad)
-            # For rotating caches, only copy the last sliding_window positions.
-            if cs < max_seq_len and k.shape[2] > cs:
-                k = k[:, :, -cs:, :]
-                v = v[:, :, -cs:, :]
-            k_pad = jax.lax.dynamic_update_slice(k_pad, k, (0, 0, 0, 0))
-            v_pad = jax.lax.dynamic_update_slice(v_pad, v, (0, 0, 0, 0))
+            if cs < prompt_len:
+                # Rotating cache: position t maps to index t % cs.
+                # Take the last cs positions and roll so that position P-cs
+                # lands at index (P-cs) % cs = P % cs.
+                k_pad = jnp.roll(k[:, :, -cs:, :], shift=prompt_len % cs, axis=2)
+                v_pad = jnp.roll(v[:, :, -cs:, :], shift=prompt_len % cs, axis=2)
+            else:
+                k_pad = jax.lax.dynamic_update_slice(k_pad, k, (0, 0, 0, 0))
+                v_pad = jax.lax.dynamic_update_slice(v_pad, v, (0, 0, 0, 0))
             static_cache.append((k_pad, v_pad))
         next_token = jnp.argmax(logits[0, -1, :], keepdims=True)
         return next_token, static_cache
