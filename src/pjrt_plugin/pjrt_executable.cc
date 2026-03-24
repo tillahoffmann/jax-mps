@@ -41,6 +41,9 @@ PJRT_Error* MPS_Executable_NumPartitions(PJRT_Executable_NumPartitions_Args* arg
     return nullptr;
 }
 
+// Read-only accessors — no internal mutex; callers must ensure the executable
+// is not being destroyed concurrently with these calls.
+
 PJRT_Error* MPS_Executable_NumOutputs(PJRT_Executable_NumOutputs_Args* args) {
     args->num_outputs = args->executable && args->executable->executable
                             ? args->executable->executable->num_outputs()

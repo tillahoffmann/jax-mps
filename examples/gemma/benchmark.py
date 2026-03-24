@@ -24,9 +24,15 @@ def get_model_path():
 
 def benchmark_mlx_lm(model_path: Path):
     """Run mlx-lm generation and return timing info."""
-    import mlx.core as mx
-    import sentencepiece as spm
-    from mlx_lm.models.gemma import Model, ModelArgs
+    try:
+        import mlx.core as mx
+        import sentencepiece as spm
+        from mlx_lm.models.gemma import Model, ModelArgs
+    except ImportError as e:
+        raise SystemExit(
+            "mlx-lm benchmark requires 'mlx', 'mlx_lm', and 'sentencepiece' "
+            f"packages on Apple Silicon/macOS. Unable to import: {e}"
+        )
 
     print("=== mlx-lm (native MLX) ===")
 
@@ -114,7 +120,11 @@ def benchmark_jax_mps(model_path: Path, dtype_str="float32"):
     import jax
     import jax.numpy as jnp
 
-    assert any(d.platform == "mps" for d in jax.devices()), "No MPS device found"
+    devices = jax.devices()
+    if not any(d.platform == "mps" for d in devices):
+        raise RuntimeError(
+            f"benchmark_jax_mps requires an MPS device, but found: {devices}"
+        )
 
     from main import generate as jax_generate
     from main import load_model

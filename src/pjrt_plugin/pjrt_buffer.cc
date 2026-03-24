@@ -16,7 +16,8 @@ PJRT_Error* MPS_Buffer_Destroy(PJRT_Buffer_Destroy_Args* args) {
     return nullptr;
 }
 
-// Read-only accessors — no mutex needed (single device, immutable after creation).
+// Read-only accessors — no internal mutex; callers must ensure the buffer is not
+// being deleted/destroyed concurrently with these calls.
 
 PJRT_Error* MPS_Buffer_ElementType(PJRT_Buffer_ElementType_Args* args) {
     args->type = args->buffer && args->buffer->buffer
