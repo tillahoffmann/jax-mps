@@ -1,6 +1,6 @@
 # jax-mps
 
-[![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/) ![JAX tests](https://img.shields.io/badge/JAX_tests-89.2%25_passing-yellow)[^1]
+[![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/) ![JAX tests](https://img.shields.io/badge/JAX_tests-89.8%25_passing-yellow)[^1]
 
 A JAX backend for Apple Silicon using [MLX](https://github.com/ml-explore/mlx), enabling GPU-accelerated JAX computations on Mac.
 
