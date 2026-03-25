@@ -904,6 +904,15 @@ bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
     for (auto d : stateShape)
         stateSize *= d;
 
+    // Validate RNG state layout: expected uint64[2] or uint32[4].
+    if (!((stateDtype == mlx::core::uint64 && stateSize == 2) ||
+          (stateDtype == mlx::core::uint32 && stateSize == 4))) {
+        MPS_LOG_ERROR(
+            "stablehlo.rng_bit_generator: unsupported state layout (expected uint64[2] or "
+            "uint32[4])\n");
+        return false;
+    }
+
     // Derive MLX random key (uint32[2]) from the state.
     // State is uint64[2] (from JAX lowering) or uint32[4].
     // View as uint32 and take the first 2 elements as key.

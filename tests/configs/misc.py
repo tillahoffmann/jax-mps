@@ -156,4 +156,14 @@ def make_misc_op_configs():
                 lambda key: random.normal(key, (16,)),
                 name="reduce_precision",
             ),
+            # reduce_precision with edge values (NaN, inf, zero, subnormals)
+            OperationTestConfig(
+                lambda x: lax.reduce_precision(x, exponent_bits=3, mantissa_bits=5),
+                numpy.asarray(
+                    [0.0, -0.0, jnp.inf, -jnp.inf, jnp.nan, 1e-38, -1e-38, 1.0, -1.0],
+                    dtype=numpy.float32,
+                ),
+                differentiable_argnums=(),
+                name="reduce_precision-edge",
+            ),
         ]

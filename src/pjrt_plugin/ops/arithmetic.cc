@@ -277,8 +277,8 @@ bool HandleCountLeadingZeros(mlir::Operation* op, ValueMap& values,
         val = mlx::core::bitwise_and(val, mlx::core::array(mask, workDtype));
     }
 
-    // Binary search CLZ: propagate the highest set bit downward, then popcount the inverse
-    // Smear the highest bit to the right: val |= val >> 1; val |= val >> 2; ...
+    // CLZ via bit-smearing: propagate the highest set bit rightward, then CLZ = bit_width -
+    // popcount Smear the highest bit to the right: val |= val >> 1; val |= val >> 2; ...
     for (size_t shift = 1; shift < bit_width; shift <<= 1) {
         val = mlx::core::bitwise_or(
             val,

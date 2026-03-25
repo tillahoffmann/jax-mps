@@ -320,6 +320,13 @@ def test_rng_bit_generator() -> None:
         assert new_state.shape == state.shape
         assert not jnp.array_equal(new_state, state)
 
+        # Verify state matches CPU (counter increment must be identical)
+        with jax.default_device(jax.devices("cpu")[0]):
+            cpu_state, _ = lax.rng_bit_generator(state, (8,))
+        assert jnp.array_equal(new_state, cpu_state), (
+            f"State mismatch: MPS={new_state}, CPU={cpu_state}"
+        )
+
         # Determinism: same input state and shape => same output and next-state.
         new_state2, output2 = lax.rng_bit_generator(state, (8,))
         assert jnp.array_equal(output2, output)
