@@ -212,3 +212,10 @@ def make_matmul_op_configs():
             differentiable_argnums=(),
             name="dot_bool",
         )
+        yield OperationTestConfig(
+            jnp.matmul,
+            numpy.array([[1, 2], [3, 4]], dtype=numpy.uint32),
+            numpy.array([[5, 6], [7, 8]], dtype=numpy.uint32),
+            differentiable_argnums=(),
+            name="matmul_uint32",
+        )

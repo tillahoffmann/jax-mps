@@ -107,14 +107,14 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     auto lhsRank = static_cast<int>(lhs->ndim());
     auto rhsRank = static_cast<int>(rhs->ndim());
 
-    // MLX matmul/einsum only supports floating-point types. For integer/bool inputs,
-    // cast to float32, compute, and cast back to the expected output type.
+    // MLX matmul/einsum only supports inexact types (float/complex). For integer/bool
+    // inputs, cast to float32, compute, and cast back to the expected output type.
     auto resultDtype = GetResultDtype(op, "stablehlo.dot_general");
     if (!resultDtype)
         return false;
-    bool needsIntCast = !mlx::core::issubdtype(lhs->dtype(), mlx::core::inexact);
-    mlx::core::array lhsVal = needsIntCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
-    mlx::core::array rhsVal = needsIntCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
+    bool needsCast = !mlx::core::issubdtype(lhs->dtype(), mlx::core::inexact);
+    mlx::core::array lhsVal = needsCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
+    mlx::core::array rhsVal = needsCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
 
     // Try einsum path if enabled
     if (UseEinsumForDotGeneral()) {
@@ -122,7 +122,7 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                                                      lhsContractDims, rhsContractDims);
         MPS_LOG_DEBUG("dot_general einsum: %s\n", subscript.c_str());
         auto result = mlx::core::einsum(subscript, {lhsVal, rhsVal});
-        if (needsIntCast)
+        if (needsCast)
             result = mlx::core::astype(result, *resultDtype);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
@@ -225,7 +225,7 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         finalShape.push_back(s);
 
     auto result = mlx::core::reshape(result3d, finalShape);
-    if (needsIntCast)
+    if (needsCast)
         result = mlx::core::astype(result, *resultDtype);
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
