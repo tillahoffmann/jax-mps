@@ -63,8 +63,12 @@ std::optional<mlx::core::array> CreateArrayWithTypedPtr(const void* data,
                                                         const mlx::core::Shape& shape,
                                                         mlx::core::Dtype dtype) {
     switch (dtype) {
-        case mlx::core::bool_:
-            return mlx::core::array(reinterpret_cast<const bool*>(data), shape, dtype);
+        case mlx::core::bool_: {
+            // MLIR i1 splat data may store true as 0xFF (-1). Normalize to 0/1
+            // so downstream ops (cumsum, etc.) see correct integer values.
+            bool val = *reinterpret_cast<const uint8_t*>(data) != 0;
+            return mlx::core::array(&val, shape, dtype);
+        }
         case mlx::core::int8:
             return mlx::core::array(reinterpret_cast<const int8_t*>(data), shape, dtype);
         case mlx::core::int16:

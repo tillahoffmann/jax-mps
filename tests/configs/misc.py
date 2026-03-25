@@ -166,4 +166,14 @@ def make_misc_op_configs():
                 differentiable_argnums=(),
                 name="reduce_precision-edge",
             ),
+            # Bool splat constant: ones(bool) used in scatter should have True=1 not 0xFF.
+            # This pattern is used by jnp.unique to construct the uniqueness mask.
+            OperationTestConfig(
+                lambda x: jnp.cumsum(
+                    jnp.ones(3, dtype=jnp.bool_).at[1:].set(x[1:] != x[:-1])
+                ),
+                numpy.array([1, 2, 3], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="bool_splat_scatter_cumsum",
+            ),
         ]
