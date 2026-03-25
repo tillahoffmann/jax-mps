@@ -103,6 +103,11 @@ def make_unary_op_configs():
         OperationTestConfig(jnp.ceil, lambda key: random.normal(key, (16,))),
         OperationTestConfig(jnp.floor, lambda key: random.normal(key, (16,))),
         OperationTestConfig(jnp.round, lambda key: random.normal(key, (16,))),
+        OperationTestConfig(
+            lambda x: lax.round(x, lax.RoundingMethod.AWAY_FROM_ZERO),
+            lambda key: random.normal(key, (16,)),
+            name="round-afz",
+        ),
     ]
 
     # Ops that don't trivially generalize across real/complex.
@@ -203,5 +208,40 @@ def make_unary_op_configs():
                 dtype=numpy.int32,
             ),
             differentiable_argnums=(),
+        ),
+        # Count leading zeros (CLZ)
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 2, 4, 127, 128, 255], dtype=numpy.uint8),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, -1, -2, 64, 127, -128], dtype=numpy.int8),
+            differentiable_argnums=(),
+            name="clz-int8",
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 0x00FF, 0x0F0F, 0x8000, 0xFFFF], dtype=numpy.uint16),
+            differentiable_argnums=(),
+            name="clz-uint16",
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray(
+                [0, 1, 3, 7, 255, 256, 0x80000000, 0xFFFFFFFF], dtype=numpy.uint32
+            ),
+            differentiable_argnums=(),
+            name="clz-uint32",
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray(
+                [0, 1, -1, -2, -2147483648, 2147483647],
+                dtype=numpy.int32,
+            ),
+            differentiable_argnums=(),
+            name="clz-int32",
         ),
     ]

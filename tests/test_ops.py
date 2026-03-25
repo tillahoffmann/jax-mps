@@ -296,3 +296,26 @@ def test_unsupported_op_error_message(jit: bool) -> None:
             assert "CONTRIBUTING.md" in message
         else:
             pytest.skip("clz is now supported; test needs a new unregistered op")
+
+
+def test_rng_bit_generator() -> None:
+    """Test that stablehlo.rng_bit_generator produces valid output and correct state."""
+    OperationTestConfig.EXERCISED_STABLEHLO_OPS.add("stablehlo.rng_bit_generator")
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    import jax.numpy as jnp
+    from jax import lax
+
+    device = jax.devices("mps")[0]
+    with jax.default_device(device):
+        state = jnp.array([0, 0, 0, 42], dtype=jnp.uint32)
+        new_state, output = lax.rng_bit_generator(state, (8,))
+
+        # Output should have the correct shape and dtype
+        assert output.shape == (8,)
+        assert output.dtype == jnp.uint32
+
+        # State should be updated (counter incremented)
+        assert new_state.shape == state.shape
+        assert not jnp.array_equal(new_state, state)

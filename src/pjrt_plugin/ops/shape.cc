@@ -215,11 +215,18 @@ bool HandleBitcastConvert(mlir::Operation* op, ValueMap& values,
         return false;
 
     auto targetDtype = GetResultDtype(op, "stablehlo.bitcast_convert");
-    if (!targetDtype)
+    auto targetShape = GetResultShape(op, "stablehlo.bitcast_convert");
+    if (!targetDtype || !targetShape)
         return false;
 
-    // MLX view function reinterprets the underlying data as a different type
-    values.emplace(ToKey(op->getResult(0)), mlx::core::view(*input, *targetDtype));
+    // MLX view reinterprets data as a different type (adjusts last dim).
+    // StableHLO bitcast_convert can also change rank (e.g., 2x2xi32 -> 2xi64),
+    // so reshape to the expected output shape afterward.
+    auto result = mlx::core::view(*input, *targetDtype);
+    if (result.shape() != *targetShape) {
+        result = mlx::core::reshape(result, *targetShape);
+    }
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }
 

@@ -3,6 +3,7 @@
 
 #include <mlx/compile.h>
 #include <mlx/fast.h>
+#include <mlx/random.h>
 #include <mlx/transforms.h>
 
 #include <cstdlib>
@@ -866,6 +867,84 @@ bool HandleOptimizationBarrier(mlir::Operation* op, ValueMap& values,
     return true;
 }
 
+// Handler for stablehlo.rng_bit_generator
+bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
+                           std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto rngOp = CastOp<mlir::stablehlo::RngBitGeneratorOp>(op, "stablehlo.rng_bit_generator");
+    if (!rngOp)
+        return false;
+
+    auto* state = RequireValue(values, op->getOperand(0), "stablehlo.rng_bit_generator");
+    if (!state)
+        return false;
+
+    // Get shapes/dtypes from MLIR types (available at graph construction time)
+    auto stateType = mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+    auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    if (!stateType || !outputType) {
+        MPS_LOG_ERROR("stablehlo.rng_bit_generator: operand/result type is not RankedTensorType\n");
+        return false;
+    }
+    auto outputShape = GetShape(outputType);
+    auto outputDtype = MlirTypeToMlxDtype(outputType.getElementType());
+    auto stateDtype = MlirTypeToMlxDtype(stateType.getElementType());
+    auto stateShape = GetShape(stateType);
+    int stateSize = 1;
+    for (auto d : stateShape)
+        stateSize *= d;
+
+    // Derive MLX random key (uint32[2]) from the state.
+    // State is uint64[2] (from JAX lowering) or uint32[4].
+    // View as uint32 and take the first 2 elements as key.
+    auto state_as_u32 = mlx::core::view(mlx::core::flatten(*state), mlx::core::uint32);
+    auto key = mlx::core::slice(state_as_u32, {0}, {2});
+
+    // Generate random bits
+    size_t target_bytes = GetDtypeSize(outputDtype);
+    mlx::core::array random_output(0);
+    if (target_bytes <= 4) {
+        random_output = mlx::core::random::bits(outputShape, 4, key);
+        random_output = mlx::core::astype(random_output, outputDtype);
+    } else {
+        // For uint64 output: generate 2x uint32 per element and reinterpret
+        auto expandedShape = outputShape;
+        expandedShape.push_back(2);
+        auto bits32 = mlx::core::random::bits(expandedShape, 4, key);
+        random_output = mlx::core::view(bits32, outputDtype);
+        random_output = mlx::core::reshape(random_output, outputShape);
+    }
+
+    // Compute counter increment: ThreeFry4x32 produces 16 bytes per eval.
+    size_t total_elements = 1;
+    for (auto d : outputShape)
+        total_elements *= static_cast<size_t>(d);
+    size_t total_bytes = total_elements * target_bytes;
+    uint64_t counter_incr = (total_bytes + 15) / 16;
+
+    // Update state counter.
+    // For uint64[2] = [key, counter]: increment element 1.
+    // For uint32[4] = [key_lo, key_hi, counter_lo, counter_hi]: increment element 2.
+    mlx::core::array output_state(0);
+    if (stateDtype == mlx::core::uint64) {
+        auto key_part = mlx::core::slice(*state, {0}, {1});
+        auto counter = mlx::core::add(mlx::core::slice(*state, {1}, {2}),
+                                      mlx::core::array(counter_incr, mlx::core::uint64));
+        output_state = mlx::core::concatenate({key_part, counter}, 0);
+    } else {
+        auto key_part = mlx::core::slice(*state, {0}, {2});
+        auto counter_lo = mlx::core::add(
+            mlx::core::slice(*state, {2}, {3}),
+            mlx::core::array(static_cast<uint32_t>(counter_incr), mlx::core::uint32));
+        auto counter_hi = mlx::core::slice(*state, {3}, {4});
+        output_state = mlx::core::concatenate({key_part, counter_lo, counter_hi}, 0);
+    }
+
+    // Result 0: output_state, Result 1: random output
+    values.emplace(ToKey(op->getResult(0)), std::move(output_state));
+    values.emplace(ToKey(op->getResult(1)), std::move(random_output));
+    return true;
+}
+
 }  // namespace
 
 void RegisterControlFlowHandlers(std::unordered_map<std::string, OpHandler>& handlers) {
@@ -877,6 +956,7 @@ void RegisterControlFlowHandlers(std::unordered_map<std::string, OpHandler>& han
     handlers.insert({"stablehlo.optimization_barrier", HandleOptimizationBarrier});
     handlers.insert({"stablehlo.while", HandleWhile});
     handlers.insert({"stablehlo.case", HandleCase});
+    handlers.insert({"stablehlo.rng_bit_generator", HandleRngBitGenerator});
 }
 
 }  // namespace jax_mps

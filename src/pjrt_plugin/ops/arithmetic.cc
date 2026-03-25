@@ -243,6 +243,176 @@ bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     return true;
 }
 
+// Handler for stablehlo.round_nearest_afz (round half away from zero)
+bool HandleRoundNearestAfz(mlir::Operation* op, ValueMap& values,
+                           std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.round_nearest_afz");
+    if (!x)
+        return false;
+    // round_nearest_afz: sign(x) * floor(abs(x) + 0.5)
+    auto half = mlx::core::array(0.5F, x->dtype());
+    auto result = mlx::core::multiply(mlx::core::sign(*x),
+                                      mlx::core::floor(mlx::core::add(mlx::core::abs(*x), half)));
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
+// Handler for stablehlo.count_leading_zeros
+bool HandleCountLeadingZeros(mlir::Operation* op, ValueMap& values,
+                             std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.count_leading_zeros");
+    if (!x)
+        return false;
+    auto dtype = x->dtype();
+    size_t bit_width = GetDtypeSize(dtype) * 8;
+
+    // Work in unsigned to avoid sign extension issues
+    mlx::core::array val = *x;
+    auto workDtype = bit_width > 32 ? mlx::core::uint64 : mlx::core::uint32;
+    val = mlx::core::astype(val, workDtype);
+
+    // Mask to original bit width for sub-32-bit types
+    if (bit_width < 32) {
+        uint32_t mask = (1U << bit_width) - 1;
+        val = mlx::core::bitwise_and(val, mlx::core::array(mask, workDtype));
+    }
+
+    // Binary search CLZ: propagate the highest set bit downward, then popcount the inverse
+    // Smear the highest bit to the right: val |= val >> 1; val |= val >> 2; ...
+    for (size_t shift = 1; shift < bit_width; shift <<= 1) {
+        val = mlx::core::bitwise_or(
+            val,
+            mlx::core::right_shift(val, mlx::core::array(static_cast<uint32_t>(shift), workDtype)));
+    }
+
+    // CLZ = bit_width - popcount(val) after smearing
+    // Inline popcount using Hamming weight
+    if (bit_width > 32) {
+        auto m1 = mlx::core::array(static_cast<uint64_t>(0x5555555555555555ULL), mlx::core::uint64);
+        auto m2 = mlx::core::array(static_cast<uint64_t>(0x3333333333333333ULL), mlx::core::uint64);
+        auto m4 = mlx::core::array(static_cast<uint64_t>(0x0F0F0F0F0F0F0F0FULL), mlx::core::uint64);
+        auto one = mlx::core::array(static_cast<uint64_t>(1), mlx::core::uint64);
+        auto two = mlx::core::array(static_cast<uint64_t>(2), mlx::core::uint64);
+        auto four = mlx::core::array(static_cast<uint64_t>(4), mlx::core::uint64);
+        auto eight = mlx::core::array(static_cast<uint64_t>(8), mlx::core::uint64);
+        auto sixteen = mlx::core::array(static_cast<uint64_t>(16), mlx::core::uint64);
+        auto thirtytwo = mlx::core::array(static_cast<uint64_t>(32), mlx::core::uint64);
+        val =
+            mlx::core::subtract(val, mlx::core::bitwise_and(mlx::core::right_shift(val, one), m1));
+        val = mlx::core::add(mlx::core::bitwise_and(val, m2),
+                             mlx::core::bitwise_and(mlx::core::right_shift(val, two), m2));
+        val = mlx::core::bitwise_and(mlx::core::add(val, mlx::core::right_shift(val, four)), m4);
+        val = mlx::core::add(val, mlx::core::right_shift(val, eight));
+        val = mlx::core::add(val, mlx::core::right_shift(val, sixteen));
+        val = mlx::core::add(val, mlx::core::right_shift(val, thirtytwo));
+        val = mlx::core::bitwise_and(
+            val, mlx::core::array(static_cast<uint64_t>(0x7FU), mlx::core::uint64));
+    } else {
+        auto m1 = mlx::core::array(0x55555555U, mlx::core::uint32);
+        auto m2 = mlx::core::array(0x33333333U, mlx::core::uint32);
+        auto m4 = mlx::core::array(0x0F0F0F0FU, mlx::core::uint32);
+        auto one = mlx::core::array(1U, mlx::core::uint32);
+        auto two = mlx::core::array(2U, mlx::core::uint32);
+        auto four = mlx::core::array(4U, mlx::core::uint32);
+        auto eight = mlx::core::array(8U, mlx::core::uint32);
+        auto sixteen = mlx::core::array(16U, mlx::core::uint32);
+        val =
+            mlx::core::subtract(val, mlx::core::bitwise_and(mlx::core::right_shift(val, one), m1));
+        val = mlx::core::add(mlx::core::bitwise_and(val, m2),
+                             mlx::core::bitwise_and(mlx::core::right_shift(val, two), m2));
+        val = mlx::core::bitwise_and(mlx::core::add(val, mlx::core::right_shift(val, four)), m4);
+        val = mlx::core::add(val, mlx::core::right_shift(val, eight));
+        val = mlx::core::add(val, mlx::core::right_shift(val, sixteen));
+        val = mlx::core::bitwise_and(val, mlx::core::array(0x3FU, mlx::core::uint32));
+    }
+
+    // CLZ = bit_width - popcount
+    auto bw = mlx::core::array(static_cast<uint32_t>(bit_width), workDtype);
+    val = mlx::core::subtract(bw, val);
+    values.emplace(ToKey(op->getResult(0)), mlx::core::astype(val, dtype));
+    return true;
+}
+
+// Handler for stablehlo.reduce_precision
+bool HandleReducePrecision(mlir::Operation* op, ValueMap& values,
+                           std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    auto rpOp = CastOp<mlir::stablehlo::ReducePrecisionOp>(op, "stablehlo.reduce_precision");
+    if (!rpOp)
+        return false;
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.reduce_precision");
+    if (!x)
+        return false;
+
+    uint32_t exponent_bits = rpOp.getExponentBits();
+    uint32_t mantissa_bits = rpOp.getMantissaBits();
+
+    // Work in float32 (IEEE 754: 8 exponent bits, 23 mantissa bits)
+    auto val = mlx::core::astype(*x, mlx::core::float32);
+
+    // Reinterpret as uint32 for bit manipulation
+    auto bits = mlx::core::view(val, mlx::core::uint32);
+
+    // Truncate mantissa: zero out the low (23 - mantissa_bits) bits
+    if (mantissa_bits < 23) {
+        uint32_t mantissa_mask = ~((1U << (23 - mantissa_bits)) - 1);
+        // Round to nearest even: add rounding bias
+        uint32_t round_bit = 1U << (23 - mantissa_bits - 1);
+        auto round_val = mlx::core::array(round_bit, mlx::core::uint32);
+        // Check if we're exactly at the midpoint (trailing bits are exactly the round bit)
+        auto trailing_mask_val =
+            mlx::core::array((1U << (23 - mantissa_bits)) - 1, mlx::core::uint32);
+        auto trailing = mlx::core::bitwise_and(bits, trailing_mask_val);
+        auto is_midpoint = mlx::core::equal(trailing, round_val);
+        // For midpoint, round to even (clear LSB of kept mantissa)
+        auto lsb_bit = mlx::core::array(1U << (23 - mantissa_bits), mlx::core::uint32);
+        auto lsb_set = mlx::core::not_equal(mlx::core::bitwise_and(bits, lsb_bit),
+                                            mlx::core::array(0U, mlx::core::uint32));
+        // Add round_bit, but for exact midpoint only round if LSB is set (round to even)
+        auto should_round = mlx::core::logical_or(mlx::core::greater(trailing, round_val),
+                                                  mlx::core::logical_and(is_midpoint, lsb_set));
+        bits = mlx::core::where(should_round, mlx::core::add(bits, round_val), bits);
+        bits = mlx::core::bitwise_and(bits, mlx::core::array(mantissa_mask, mlx::core::uint32));
+    }
+
+    // Clamp exponent: if exponent_bits < 8, clamp to the representable range
+    if (exponent_bits < 8) {
+        // Max biased exponent in reduced format
+        uint32_t max_biased = (1U << exponent_bits) - 1;
+        // Bias difference: float32 bias is 127, reduced bias is (1 << (exponent_bits-1)) - 1
+        uint32_t reduced_bias = (1U << (exponent_bits - 1)) - 1;
+        // Max unbiased exponent in reduced format
+        int max_exp = static_cast<int>(max_biased - reduced_bias);
+        int min_exp = static_cast<int>(1 - reduced_bias);
+        // Corresponding float32 biased exponents
+        uint32_t max_f32_biased = static_cast<uint32_t>(max_exp + 127);
+        uint32_t min_f32_biased = static_cast<uint32_t>(min_exp + 127);
+
+        // Extract sign, exponent, mantissa
+        auto sign_bit =
+            mlx::core::bitwise_and(bits, mlx::core::array(0x80000000U, mlx::core::uint32));
+        auto exp_field = mlx::core::bitwise_and(
+            mlx::core::right_shift(bits, mlx::core::array(23U, mlx::core::uint32)),
+            mlx::core::array(0xFFU, mlx::core::uint32));
+
+        // If exponent > max, set to infinity (preserve sign)
+        auto max_exp_arr = mlx::core::array(max_f32_biased, mlx::core::uint32);
+        auto overflow = mlx::core::greater(exp_field, max_exp_arr);
+        auto inf_bits =
+            mlx::core::bitwise_or(sign_bit, mlx::core::array(0x7F800000U, mlx::core::uint32));
+        bits = mlx::core::where(overflow, inf_bits, bits);
+
+        // If exponent < min, set to zero (preserve sign)
+        auto min_exp_arr = mlx::core::array(min_f32_biased, mlx::core::uint32);
+        auto underflow = mlx::core::less(exp_field, min_exp_arr);
+        bits = mlx::core::where(underflow, sign_bit, bits);
+    }
+
+    // Reinterpret back to float32
+    val = mlx::core::view(bits, mlx::core::float32);
+    values.emplace(ToKey(op->getResult(0)), mlx::core::astype(val, x->dtype()));
+    return true;
+}
+
 }  // namespace
 
 void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& handlers) {
@@ -310,6 +480,11 @@ void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& hand
     // Comparison/selection
     handlers.insert({"stablehlo.compare", HandleCompare});
     handlers.insert({"stablehlo.select", HandleSelect});
+
+    // Round, CLZ, reduce_precision
+    handlers.insert({"stablehlo.round_nearest_afz", HandleRoundNearestAfz});
+    handlers.insert({"stablehlo.count_leading_zeros", HandleCountLeadingZeros});
+    handlers.insert({"stablehlo.reduce_precision", HandleReducePrecision});
 }
 
 }  // namespace jax_mps
