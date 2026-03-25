@@ -107,12 +107,23 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     auto lhsRank = static_cast<int>(lhs->ndim());
     auto rhsRank = static_cast<int>(rhs->ndim());
 
+    // MLX matmul/einsum only supports floating-point types. For integer/bool inputs,
+    // cast to float32, compute, and cast back to the expected output type.
+    auto resultDtype = GetResultDtype(op, "stablehlo.dot_general");
+    if (!resultDtype)
+        return false;
+    bool needsIntCast = !mlx::core::issubdtype(lhs->dtype(), mlx::core::inexact);
+    mlx::core::array lhsVal = needsIntCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
+    mlx::core::array rhsVal = needsIntCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
+
     // Try einsum path if enabled
     if (UseEinsumForDotGeneral()) {
         std::string subscript = BuildEinsumSubscript(lhsRank, rhsRank, lhsBatchDims, rhsBatchDims,
                                                      lhsContractDims, rhsContractDims);
         MPS_LOG_DEBUG("dot_general einsum: %s\n", subscript.c_str());
-        auto result = mlx::core::einsum(subscript, {*lhs, *rhs});
+        auto result = mlx::core::einsum(subscript, {lhsVal, rhsVal});
+        if (needsIntCast)
+            result = mlx::core::astype(result, *resultDtype);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
@@ -152,8 +163,8 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     for (int d : rhsFreeDims)
         rhsPerm.push_back(d);
 
-    auto lhsT = mlx::core::transpose(*lhs, lhsPerm);
-    auto rhsT = mlx::core::transpose(*rhs, rhsPerm);
+    auto lhsT = mlx::core::transpose(lhsVal, lhsPerm);
+    auto rhsT = mlx::core::transpose(rhsVal, rhsPerm);
 
     int numBatch = static_cast<int>(lhsBatchDims.size());
     int numLhsFree = static_cast<int>(lhsFreeDims.size());
@@ -214,6 +225,8 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         finalShape.push_back(s);
 
     auto result = mlx::core::reshape(result3d, finalShape);
+    if (needsIntCast)
+        result = mlx::core::astype(result, *resultDtype);
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }

@@ -189,3 +189,26 @@ def make_matmul_op_configs():
             numpy.zeros((0, 4, 5), dtype=numpy.float32),
             name="batched_zero_batch",
         )
+
+        # Integer dot products (MLX matmul only supports float, so handler must cast)
+        yield OperationTestConfig(
+            jnp.dot,
+            numpy.array([1, 2, 3], dtype=numpy.int32),
+            numpy.array([4, 5, 6], dtype=numpy.int32),
+            differentiable_argnums=(),
+            name="dot_int32",
+        )
+        yield OperationTestConfig(
+            jnp.matmul,
+            numpy.array([[1, 2], [3, 4]], dtype=numpy.int32),
+            numpy.array([[5, 6], [7, 8]], dtype=numpy.int32),
+            differentiable_argnums=(),
+            name="matmul_int32",
+        )
+        yield OperationTestConfig(
+            jnp.dot,
+            numpy.array([True, False, True], dtype=numpy.bool_),
+            numpy.array([True, True, False], dtype=numpy.bool_),
+            differentiable_argnums=(),
+            name="dot_bool",
+        )
