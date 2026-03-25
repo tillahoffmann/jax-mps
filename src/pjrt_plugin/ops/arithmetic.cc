@@ -376,34 +376,41 @@ bool HandleReducePrecision(mlir::Operation* op, ValueMap& values,
 
     // Clamp exponent: if exponent_bits < 8, clamp to the representable range
     if (exponent_bits < 8) {
-        // Max biased exponent in reduced format
-        uint32_t max_biased = (1U << exponent_bits) - 1;
+        // Max biased exponent in reduced format (exclude all-ones which is reserved for inf/NaN)
+        uint32_t max_biased = (1U << exponent_bits) - 2;
         // Bias difference: float32 bias is 127, reduced bias is (1 << (exponent_bits-1)) - 1
         uint32_t reduced_bias = (1U << (exponent_bits - 1)) - 1;
-        // Max unbiased exponent in reduced format
+        // Max/min unbiased exponent in reduced format
         int max_exp = static_cast<int>(max_biased - reduced_bias);
         int min_exp = static_cast<int>(1 - reduced_bias);
         // Corresponding float32 biased exponents
         uint32_t max_f32_biased = static_cast<uint32_t>(max_exp + 127);
         uint32_t min_f32_biased = static_cast<uint32_t>(min_exp + 127);
 
-        // Extract sign, exponent, mantissa
+        // Extract sign and exponent
         auto sign_bit =
             mlx::core::bitwise_and(bits, mlx::core::array(0x80000000U, mlx::core::uint32));
         auto exp_field = mlx::core::bitwise_and(
             mlx::core::right_shift(bits, mlx::core::array(23U, mlx::core::uint32)),
             mlx::core::array(0xFFU, mlx::core::uint32));
 
-        // If exponent > max, set to infinity (preserve sign)
+        // Preserve NaN/inf (float32 exponent == 255): skip clamping for these values
+        auto is_nan_or_inf =
+            mlx::core::equal(exp_field, mlx::core::array(0xFFU, mlx::core::uint32));
+
+        // If exponent > max (and not NaN/inf), set to infinity (preserve sign)
         auto max_exp_arr = mlx::core::array(max_f32_biased, mlx::core::uint32);
-        auto overflow = mlx::core::greater(exp_field, max_exp_arr);
+        auto overflow = mlx::core::logical_and(mlx::core::greater(exp_field, max_exp_arr),
+                                               mlx::core::logical_not(is_nan_or_inf));
         auto inf_bits =
             mlx::core::bitwise_or(sign_bit, mlx::core::array(0x7F800000U, mlx::core::uint32));
         bits = mlx::core::where(overflow, inf_bits, bits);
 
-        // If exponent < min, set to zero (preserve sign)
+        // If exponent < min (and not zero/subnormal), set to zero (preserve sign)
         auto min_exp_arr = mlx::core::array(min_f32_biased, mlx::core::uint32);
-        auto underflow = mlx::core::less(exp_field, min_exp_arr);
+        auto is_zero = mlx::core::equal(exp_field, mlx::core::array(0U, mlx::core::uint32));
+        auto underflow = mlx::core::logical_and(mlx::core::less(exp_field, min_exp_arr),
+                                                mlx::core::logical_not(is_zero));
         bits = mlx::core::where(underflow, sign_bit, bits);
     }
 

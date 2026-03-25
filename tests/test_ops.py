@@ -319,3 +319,8 @@ def test_rng_bit_generator() -> None:
         # State should be updated (counter incremented)
         assert new_state.shape == state.shape
         assert not jnp.array_equal(new_state, state)
+
+        # Determinism: same input state and shape => same output and next-state.
+        new_state2, output2 = lax.rng_bit_generator(state, (8,))
+        assert jnp.array_equal(output2, output)
+        assert jnp.array_equal(new_state2, new_state)

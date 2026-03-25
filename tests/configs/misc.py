@@ -154,7 +154,6 @@ def make_misc_op_configs():
             OperationTestConfig(
                 lambda x: lax.reduce_precision(x, exponent_bits=5, mantissa_bits=10),
                 lambda key: random.normal(key, (16,)),
-                differentiable_argnums=(),
                 name="reduce_precision",
             ),
         ]

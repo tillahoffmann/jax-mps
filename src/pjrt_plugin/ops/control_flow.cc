@@ -874,6 +874,17 @@ bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
     if (!rngOp)
         return false;
 
+    // Validate algorithm — we support DEFAULT and THREE_FRY (both use ThreeFry4x32 state layout).
+    auto algorithm = rngOp.getRngAlgorithm();
+    if (algorithm != mlir::stablehlo::RngAlgorithm::DEFAULT &&
+        algorithm != mlir::stablehlo::RngAlgorithm::THREE_FRY) {
+        MPS_LOG_ERROR(
+            "stablehlo.rng_bit_generator: unsupported algorithm %s (only DEFAULT and THREE_FRY "
+            "are supported)\n",
+            mlir::stablehlo::stringifyRngAlgorithm(algorithm).str().c_str());
+        return false;
+    }
+
     auto* state = RequireValue(values, op->getOperand(0), "stablehlo.rng_bit_generator");
     if (!state)
         return false;
@@ -932,10 +943,16 @@ bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
         output_state = mlx::core::concatenate({key_part, counter}, 0);
     } else {
         auto key_part = mlx::core::slice(*state, {0}, {2});
-        auto counter_lo = mlx::core::add(
-            mlx::core::slice(*state, {2}, {3}),
-            mlx::core::array(static_cast<uint32_t>(counter_incr), mlx::core::uint32));
-        auto counter_hi = mlx::core::slice(*state, {3}, {4});
+        auto counter_lo_orig = mlx::core::slice(*state, {2}, {3});
+        auto counter_hi_orig = mlx::core::slice(*state, {3}, {4});
+        auto incr_lo = mlx::core::array(static_cast<uint32_t>(counter_incr), mlx::core::uint32);
+        auto incr_hi =
+            mlx::core::array(static_cast<uint32_t>(counter_incr >> 32), mlx::core::uint32);
+        auto counter_lo = mlx::core::add(counter_lo_orig, incr_lo);
+        // Carry: if counter_lo wrapped around (new < old), propagate carry to hi.
+        auto carry =
+            mlx::core::astype(mlx::core::less(counter_lo, counter_lo_orig), mlx::core::uint32);
+        auto counter_hi = mlx::core::add(counter_hi_orig, mlx::core::add(incr_hi, carry));
         output_state = mlx::core::concatenate({key_part, counter_lo, counter_hi}, 0);
     }
 
