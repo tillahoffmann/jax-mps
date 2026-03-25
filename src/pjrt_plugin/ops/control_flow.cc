@@ -867,57 +867,32 @@ bool HandleOptimizationBarrier(mlir::Operation* op, ValueMap& values,
     return true;
 }
 
-// Handler for stablehlo.rng_bit_generator
+// Handler for stablehlo.rng_bit_generator.
+// Uses MLX's PRNG seeded from the state. Random values will differ from CPU/GPU backends
+// but the state is correctly tracked (counter incremented by ceil(output_bytes / 16)).
 bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
                            std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
     auto rngOp = CastOp<mlir::stablehlo::RngBitGeneratorOp>(op, "stablehlo.rng_bit_generator");
     if (!rngOp)
         return false;
 
-    // Validate algorithm — we support DEFAULT and THREE_FRY (both use ThreeFry4x32 state layout).
-    auto algorithm = rngOp.getRngAlgorithm();
-    if (algorithm != mlir::stablehlo::RngAlgorithm::DEFAULT &&
-        algorithm != mlir::stablehlo::RngAlgorithm::THREE_FRY) {
-        MPS_LOG_ERROR(
-            "stablehlo.rng_bit_generator: unsupported algorithm %s (only DEFAULT and THREE_FRY "
-            "are supported)\n",
-            mlir::stablehlo::stringifyRngAlgorithm(algorithm).str().c_str());
-        return false;
-    }
-
     auto* state = RequireValue(values, op->getOperand(0), "stablehlo.rng_bit_generator");
     if (!state)
         return false;
 
     // Get shapes/dtypes from MLIR types (available at graph construction time)
-    auto stateType = mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
     auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
-    if (!stateType || !outputType) {
-        MPS_LOG_ERROR("stablehlo.rng_bit_generator: operand/result type is not RankedTensorType\n");
+    if (!outputType) {
+        MPS_LOG_ERROR("stablehlo.rng_bit_generator: result type is not RankedTensorType\n");
         return false;
     }
     auto outputShape = GetShape(outputType);
     auto outputDtype = MlirTypeToMlxDtype(outputType.getElementType());
-    auto stateDtype = MlirTypeToMlxDtype(stateType.getElementType());
-    auto stateShape = GetShape(stateType);
-    int stateSize = 1;
-    for (auto d : stateShape)
-        stateSize *= d;
-
-    // Validate RNG state layout: expected uint64[2] or uint32[4].
-    if (!((stateDtype == mlx::core::uint64 && stateSize == 2) ||
-          (stateDtype == mlx::core::uint32 && stateSize == 4))) {
-        MPS_LOG_ERROR(
-            "stablehlo.rng_bit_generator: unsupported state layout (expected uint64[2] or "
-            "uint32[4])\n");
-        return false;
-    }
 
     // Derive MLX random key (uint32[2]) from the state.
-    // State is uint64[2] (from JAX lowering) or uint32[4].
-    // View as uint32 and take the first 2 elements as key.
-    auto state_as_u32 = mlx::core::view(mlx::core::flatten(*state), mlx::core::uint32);
-    auto key = mlx::core::slice(state_as_u32, {0}, {2});
+    // State is uint64[2] (from JAX lowering). View as uint32 and take first 2 elements as key.
+    auto state_u32 = mlx::core::view(mlx::core::flatten(*state), mlx::core::uint32);
+    auto key = mlx::core::slice(state_u32, {0}, {2});
 
     // Generate random bits
     size_t target_bytes = GetDtypeSize(outputDtype);
@@ -934,36 +909,18 @@ bool HandleRngBitGenerator(mlir::Operation* op, ValueMap& values,
         random_output = mlx::core::reshape(random_output, outputShape);
     }
 
-    // Compute counter increment: ThreeFry4x32 produces 16 bytes per eval.
+    // Compute counter increment: 4 uint32 outputs per counter step (16 bytes).
     size_t total_elements = 1;
     for (auto d : outputShape)
         total_elements *= static_cast<size_t>(d);
     size_t total_bytes = total_elements * target_bytes;
     uint64_t counter_incr = (total_bytes + 15) / 16;
 
-    // Update state counter.
-    // For uint64[2] = [key, counter]: increment element 1.
-    // For uint32[4] = [key_lo, key_hi, counter_lo, counter_hi]: increment element 2.
-    mlx::core::array output_state(0);
-    if (stateDtype == mlx::core::uint64) {
-        auto key_part = mlx::core::slice(*state, {0}, {1});
-        auto counter = mlx::core::add(mlx::core::slice(*state, {1}, {2}),
-                                      mlx::core::array(counter_incr, mlx::core::uint64));
-        output_state = mlx::core::concatenate({key_part, counter}, 0);
-    } else {
-        auto key_part = mlx::core::slice(*state, {0}, {2});
-        auto counter_lo_orig = mlx::core::slice(*state, {2}, {3});
-        auto counter_hi_orig = mlx::core::slice(*state, {3}, {4});
-        auto incr_lo = mlx::core::array(static_cast<uint32_t>(counter_incr), mlx::core::uint32);
-        auto incr_hi =
-            mlx::core::array(static_cast<uint32_t>(counter_incr >> 32), mlx::core::uint32);
-        auto counter_lo = mlx::core::add(counter_lo_orig, incr_lo);
-        // Carry: if counter_lo wrapped around (new < old), propagate carry to hi.
-        auto carry =
-            mlx::core::astype(mlx::core::less(counter_lo, counter_lo_orig), mlx::core::uint32);
-        auto counter_hi = mlx::core::add(counter_hi_orig, mlx::core::add(incr_hi, carry));
-        output_state = mlx::core::concatenate({key_part, counter_lo, counter_hi}, 0);
-    }
+    // Update state: state is uint64[2] = [key, counter]. Increment counter (element 1).
+    auto key_part = mlx::core::slice(*state, {0}, {1});
+    auto counter = mlx::core::add(mlx::core::slice(*state, {1}, {2}),
+                                  mlx::core::array(counter_incr, mlx::core::uint64));
+    auto output_state = mlx::core::concatenate({key_part, counter}, 0);
 
     // Result 0: output_state, Result 1: random output
     values.emplace(ToKey(op->getResult(0)), std::move(output_state));
