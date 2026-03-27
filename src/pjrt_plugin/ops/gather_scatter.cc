@@ -88,26 +88,15 @@ std::optional<mlx::core::array> ApplyScatterGeneric(mlir::Region& body,
                                                     const std::vector<int>& axes, ExecContext& ctx,
                                                     const ValueMap& parentValues) {
     // Step 1: Gather current values at scatter indices.
-    // Compute slice_sizes: 1 at scatter axes, full at others.
+    // Derive slice_sizes from updates: the caller has already reshaped updates
+    // to have size-1 at scatter axes and the correct window extent elsewhere.
+    // The trailing operand-rank dims of updates give us the slice shape.
+    auto idxBatchRank = static_cast<int>(updates.ndim()) - static_cast<int>(operand.ndim());
     mlx::core::Shape sliceSizes;
-    std::set<int> axisSet(axes.begin(), axes.end());
     for (int d = 0; d < operand.ndim(); ++d) {
-        sliceSizes.push_back(axisSet.count(d) ? 1 : operand.shape(d));
+        sliceSizes.push_back(updates.shape(idxBatchRank + d));
     }
     auto gathered = mlx::core::gather(operand, idxVec, axes, sliceSizes);
-
-    // Squeeze the gathered result to match the updates shape.
-    std::vector<int> squeezeAxes;
-    for (int a : axes) {
-        // The gather output has size-1 dims at the scatter axes, after
-        // the index batch dims.
-        int gatherDim = static_cast<int>(idxVec[0].ndim()) + a;
-        // Adjust for axes before this one that are already size-1.
-        squeezeAxes.push_back(gatherDim);
-    }
-    if (!squeezeAxes.empty()) {
-        gathered = mlx::core::squeeze(gathered, squeezeAxes);
-    }
 
     // Reshape gathered to match updates shape for the body.
     if (gathered.shape() != updates.shape()) {
