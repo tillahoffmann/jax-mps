@@ -805,7 +805,53 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (!a)
             return false;
 
+        // Parse full_matrices from backend_config (default false).
+        bool full_matrices = false;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                if (cfg.find("\"full_matrices\": true") != std::string::npos ||
+                    cfg.find("\"full_matrices\":true") != std::string::npos)
+                    full_matrices = true;
+            }
+        }
+
         auto [Q, R] = mlx::core::linalg::qr(*a);
+
+        if (full_matrices) {
+            // MLX QR returns thin: Q is M×K, R is K×N (K=min(M,N)).
+            // For full_matrices: Q should be M×M, R should be M×N.
+            // Pad with zeros (the extra Q columns are not a proper
+            // orthogonal complement, but match JAX's convention for
+            // reconstruction: Q @ R = A regardless).
+            auto ndim = Q.ndim();
+            auto M = a->shape(static_cast<int>(a->ndim()) - 2);
+            auto N = a->shape(static_cast<int>(a->ndim()) - 1);
+            auto K = std::min(M, N);
+
+            if (Q.shape(static_cast<int>(ndim) - 1) != M) {
+                // Pad Q columns: M×K → M×M
+                auto pad_width = mlx::core::zeros({Q.shape(0), M - K}, Q.dtype());
+                if (ndim == 2) {
+                    Q = mlx::core::concatenate({Q, pad_width}, 1);
+                } else {
+                    // Batched: reshape pad to match batch dims
+                    auto pw_shape = Q.shape();
+                    pw_shape[static_cast<int>(ndim) - 1] = M - K;
+                    pad_width = mlx::core::zeros(pw_shape, Q.dtype());
+                    Q = mlx::core::concatenate({Q, pad_width}, static_cast<int>(ndim) - 1);
+                }
+            }
+            if (R.shape(static_cast<int>(ndim) - 2) != M) {
+                // Pad R rows: K×N → M×N
+                auto pw_shape = R.shape();
+                pw_shape[static_cast<int>(ndim) - 2] = M - K;
+                auto pad_rows = mlx::core::zeros(pw_shape, R.dtype());
+                R = mlx::core::concatenate({R, pad_rows}, static_cast<int>(ndim) - 2);
+            }
+        }
+
         values.emplace(ToKey(op->getResult(0)), std::move(Q));
         values.emplace(ToKey(op->getResult(1)), std::move(R));
         return true;

@@ -63,6 +63,10 @@ def _qr_reconstruct(A):
 def _qr_reconstruct_complete(A):
     """Reconstruct A from complete QR (full Q and R)."""
     Q, R = jnp.linalg.qr(A, mode="complete")
+    M = A.shape[-2]
+    # Verify Q is M×M (not M×K thin).
+    assert Q.shape[-1] == M, f"Q should be {M}×{M} but got {Q.shape}"
+    assert R.shape[-2] == M, f"R should be {M}×N but got {R.shape}"
     return Q @ R
 
 
@@ -319,10 +323,16 @@ def make_linalg_op_configs():
             lambda key: random.normal(key, (4, 2)),
             name="svd_values_4x2",
         )
-        yield OperationTestConfig(
-            _svd_values,
-            lambda key: random.normal(key, (2, 4)),
-            name="svd_values_2x4",
+        # Wide SVD (M < N) rejected at lowering (github.com/tillahoffmann/jax-mps#119)
+        yield pytest.param(
+            OperationTestConfig(
+                _svd_values,
+                lambda key: random.normal(key, (2, 4)),
+                name="svd_values_2x4",
+            ),
+            marks=[
+                xfail_match("does not yet support wide matrices|not yet support wide")
+            ],
         )
 
         # Batched SVD
@@ -531,8 +541,10 @@ def make_linalg_op_configs():
             marks=[_xfail_large],
         )
 
-        # Wide SVD (M < N) produces incorrect results (github.com/tillahoffmann/jax-mps#119)
-        _xfail_wide_svd = xfail_match("Values are not close")
+        # Wide SVD (M < N) rejected at lowering time (github.com/tillahoffmann/jax-mps#119)
+        _xfail_wide_svd = xfail_match(
+            "does not yet support wide matrices|not yet support wide"
+        )
         yield pytest.param(
             OperationTestConfig(
                 _svd_values,

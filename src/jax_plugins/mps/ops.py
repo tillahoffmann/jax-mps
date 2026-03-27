@@ -606,6 +606,13 @@ def _svd_lowering(
         raise NotImplementedError("subset_by_index not supported on MPS")
     if algorithm is not None:
         raise NotImplementedError("algorithm selection not supported on MPS")
+    operand_aval = ctx.avals_in[0]
+    m, n = operand_aval.shape[-2], operand_aval.shape[-1]
+    if m < n:
+        raise NotImplementedError(
+            f"MPS SVD does not yet support wide matrices (M < N). "
+            f"Got {m}×{n}. Transpose the input first."
+        )
     fm = "true" if full_matrices else "false"
     if compute_uv:
         # JAX svd_p abstract eval returns (s, u, vt) – note s first!
