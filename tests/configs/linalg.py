@@ -60,9 +60,23 @@ def _qr_reconstruct(A):
     return Q @ R
 
 
+def _qr_reconstruct_complete(A):
+    """Reconstruct A from complete QR (full Q and R)."""
+    Q, R = jnp.linalg.qr(A, mode="complete")
+    return Q @ R
+
+
 def _eigh_values(A):
     """Return eigenvalues only (avoids sign ambiguity in eigenvectors)."""
     return jnp.linalg.eigh(A)[0]
+
+
+def _eigh_values_upper(A):
+    """Eigh using upper triangle (lower=False, symmetrize_input=False)."""
+    from jax._src.lax import linalg as lax_linalg
+
+    _, w = lax_linalg.eigh(A, lower=False, symmetrize_input=False)
+    return w
 
 
 def _eigh_reconstruct(A):
@@ -386,6 +400,15 @@ def make_linalg_op_configs():
             name="qr_reconstruct_batched_2",
         )
 
+        # QR complete mode (full_matrices=True, tall input)
+        # JAX does not support QR gradient in complete mode (jax-ml/jax#23533).
+        yield OperationTestConfig(
+            _qr_reconstruct_complete,
+            lambda key: random.normal(key, (4, 2)),
+            name="qr_reconstruct_complete_4x2",
+            grad_xfail="Unimplemented case of QR decomposition derivative",
+        )
+
         # Large QR (at GPU kernel max: 64×64)
         yield OperationTestConfig(
             _qr_reconstruct,
@@ -439,6 +462,20 @@ def make_linalg_op_configs():
             _eigh_values,
             lambda key: _random_symmetric(key, 3, batch_shape=(2,)),
             name="eigh_values_batched_2",
+        )
+
+        # Eigh with lower=False (upper triangle, symmetrize_input=False).
+        # Input has valid data only in the upper triangle; lower is garbage.
+        def _make_upper_only(key, n=3):
+            A = _random_symmetric(key, n)
+            # Zero out lower triangle and fill with garbage
+            mask = jnp.triu(jnp.ones((n, n)))
+            return A * mask + (1 - mask) * 999.0
+
+        yield OperationTestConfig(
+            _eigh_values_upper,
+            lambda key: _make_upper_only(key, 3),
+            name="eigh_values_upper_3x3",
         )
 
         # Large eigh (at GPU kernel max: 63×63)
