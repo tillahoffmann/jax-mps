@@ -466,6 +466,45 @@ def make_linalg_op_configs():
             marks=[_xfail_no_prim],
         )
 
+        # --- Large matrices beyond GPU kernel limits (github.com/tillahoffmann/jax-mps#119) ---
+        _xfail_large = xfail_match("supports matrices up to|Output count mismatch")
+
+        yield pytest.param(
+            OperationTestConfig(
+                _eigh_values,
+                lambda key: _random_symmetric(key, 100),
+                name="eigh_values_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _qr_reconstruct,
+                lambda key: random.normal(key, (100, 100)),
+                name="qr_reconstruct_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _svd_values,
+                lambda key: random.normal(key, (100, 100)),
+                name="svd_values_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+
+        # Wide SVD (M < N) produces incorrect results (github.com/tillahoffmann/jax-mps#119)
+        _xfail_wide_svd = xfail_match("Values are not close")
+        yield pytest.param(
+            OperationTestConfig(
+                _svd_values,
+                lambda key: random.normal(key, (4, 8)),
+                name="svd_values_4x8_wide",
+            ),
+            marks=[_xfail_wide_svd],
+        )
+
         # --- LU Decomposition ---
 
         # LU via solve (most practical test: A x = b)
