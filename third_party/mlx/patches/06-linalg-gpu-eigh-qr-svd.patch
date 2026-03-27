@@ -1,16 +1,16 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index d399e8e..73054b9 100644
+index d399e8e..e1ac0d4 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -456,4 +456,806 @@ array ensure_row_contiguous(const array& src) {
+@@ -456,4 +456,813 @@ array ensure_row_contiguous(const array& src) {
    d.add_temporary(std::move(identity_temp), s.index);
  }
  
 +// ---------------------------------------------------------------------------
 +// Eigh – Jacobi eigenvalue decomposition on GPU via Metal compute kernel.
 +//
-+// For matrices up to 32×32 we run a monolithic kernel entirely in threadgroup
-+// shared memory.  Larger matrices fall back to the CPU implementation.
++// For matrices up to 63×63 we run a monolithic kernel entirely in threadgroup
++// shared memory.  Larger matrices are not yet supported.
 +// ---------------------------------------------------------------------------
 +
 +namespace /* anonymous – Eigh helpers */ {
@@ -20,7 +20,7 @@ index d399e8e..73054b9 100644
 +#include <metal_stdlib>
 +using namespace metal;
 +
-+// Jacobi eigenvalue for symmetric float32 matrices up to 32×32.
++// Jacobi eigenvalue for symmetric float32 matrices up to 63×63.
 +// One threadgroup per matrix.  All work in shared memory.
 +//
 +// Buffers:
@@ -45,6 +45,7 @@ index d399e8e..73054b9 100644
 +    const uint N           = params[0];
 +    const uint max_sweeps  = params[1];
 +    const uint compute_ev  = params[2];
++    const uint use_lower   = params[3]; // 1 = lower triangle, 0 = upper
 +    const float tol        = tol_buf[0];
 +
 +    // Shared memory – two N×N matrices plus 2 shared scalars (g_c, g_s).
@@ -56,10 +57,15 @@ index d399e8e..73054b9 100644
 +    device const float* A_batch = A_in + batch * NN;
 +
 +    // Load A into shared memory (full symmetric copy) and V = I.
++    // Symmetrise from the triangle specified by use_lower.
 +    for (uint idx = tid; idx < NN; idx += tg_sz) {
 +        uint r = idx / N, c = idx % N;
-+        // Always symmetrise: take lower triangle from input.
-+        float val = (r >= c) ? A_batch[r * N + c] : A_batch[c * N + r];
++        float val;
++        if (use_lower) {
++            val = (r >= c) ? A_batch[r * N + c] : A_batch[c * N + r];
++        } else {
++            val = (c >= r) ? A_batch[r * N + c] : A_batch[c * N + r];
++        }
 +        S[idx] = val;
 +        V[idx] = (r == c) ? 1.0f : 0.0f;
 +    }
@@ -280,13 +286,14 @@ index d399e8e..73054b9 100644
 +    id<MTLDevice> mtl_dev = (__bridge id<MTLDevice>)d.mtl_device();
 +    id<MTLComputePipelineState> pso = getEighPipeline(mtl_dev);
 +
-+    // Params buffer: {N, max_sweeps, compute_eigenvectors, 0}
++    // Params buffer: {N, max_sweeps, compute_eigenvectors, use_lower}
 +    uint32_t max_sweeps = (N <= 8) ? 30 : (N <= 16 ? 50 : 100);
++    bool use_lower = (uplo_ == "L");
 +    uint32_t params[4] = {
 +        static_cast<uint32_t>(N),
 +        max_sweeps,
 +        compute_eigenvectors_ ? 1u : 0u,
-+        0u
++        use_lower ? 1u : 0u
 +    };
 +    float tol = 1e-7f;
 +
@@ -318,8 +325,8 @@ index d399e8e..73054b9 100644
 +// ---------------------------------------------------------------------------
 +// QRF – Modified Gram-Schmidt QR decomposition on GPU via Metal compute.
 +//
-+// For matrices up to 32×32 we run a monolithic kernel in threadgroup shared
-+// memory.  Larger matrices currently throw.
++// For matrices up to 64×64 we run a monolithic kernel in threadgroup shared
++// memory.  Larger matrices are not yet supported.
 +// ---------------------------------------------------------------------------
 +
 +namespace /* anonymous – QR helpers */ {
@@ -328,7 +335,7 @@ index d399e8e..73054b9 100644
 +#include <metal_stdlib>
 +using namespace metal;
 +
-+// Modified Gram-Schmidt QR for float32 matrices up to 32×32.
++// Modified Gram-Schmidt QR for float32 matrices up to 64×64.
 +// One threadgroup per matrix.
 +//
 +// Buffers:
@@ -521,7 +528,7 @@ index d399e8e..73054b9 100644
 +// SVD – One-sided Jacobi SVD on GPU via Metal compute kernel.
 +//
 +// Computes A^T*A, diagonalises it with Jacobi rotations to get V and σ²,
-+// then U = A·V·Σ⁻¹.  Matrices up to 32×32.
++// then U = A·V·Σ⁻¹.  Matrices up to 51×51.
 +// ---------------------------------------------------------------------------
 +
 +namespace /* anonymous – SVD helpers */ {
@@ -530,7 +537,7 @@ index d399e8e..73054b9 100644
 +#include <metal_stdlib>
 +using namespace metal;
 +
-+// One-sided Jacobi SVD for float32 matrices up to 32×32.
++// One-sided Jacobi SVD for float32 matrices up to 51×51.
 +// One threadgroup per matrix.
 +//
 +// Buffers:

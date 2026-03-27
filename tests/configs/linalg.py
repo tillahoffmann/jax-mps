@@ -318,7 +318,7 @@ def make_linalg_op_configs():
             name="svd_values_batched_2",
         )
 
-        # Large SVD (at GPU kernel max: 52×52)
+        # Large SVD (at GPU kernel max: 51×51)
         yield OperationTestConfig(
             _svd_values,
             lambda key: random.normal(key, (51, 51)),
@@ -441,7 +441,7 @@ def make_linalg_op_configs():
             name="eigh_values_batched_2",
         )
 
-        # Large eigh (at GPU kernel max: 64×64)
+        # Large eigh (at GPU kernel max: 63×63)
         yield OperationTestConfig(
             _eigh_values,
             lambda key: _random_symmetric(key, 63),

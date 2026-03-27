@@ -565,7 +565,13 @@ def _eigh_lowering(
     ctx, operand, *, lower, sort_eigenvalues, subset_by_index, algorithm
 ):
     """MPS lowering for eigh: emit a custom_call @mps.eigh."""
-    del sort_eigenvalues, subset_by_index, algorithm  # handled by kernel
+    operand_aval = ctx.avals_in[0]
+    n = operand_aval.shape[-1]
+    if subset_by_index is not None and subset_by_index != (0, n):
+        raise NotImplementedError("subset_by_index not supported on MPS")
+    if algorithm is not None:
+        raise NotImplementedError("algorithm selection not supported on MPS")
+    del sort_eigenvalues  # kernel always sorts ascending
     v_aval, w_aval = ctx.avals_out
     v_type = mlir.aval_to_ir_type(v_aval)
     w_type = mlir.aval_to_ir_type(w_aval)
@@ -579,7 +585,8 @@ def _eigh_lowering(
 
 def _qr_lowering(ctx, operand, *, full_matrices, **kwargs):
     """MPS lowering for qr: emit a custom_call @mps.qr."""
-    del full_matrices, kwargs  # QR kernel always returns thin Q
+    del kwargs  # pivoting, use_magma — not applicable on MPS
+    # Result types from ctx.avals_out already reflect full_matrices setting.
     q_aval, r_aval = ctx.avals_out
     q_type = mlir.aval_to_ir_type(q_aval)
     r_type = mlir.aval_to_ir_type(r_aval)
@@ -587,7 +594,7 @@ def _qr_lowering(ctx, operand, *, full_matrices, **kwargs):
         call_target_name="mps.qr",
         result_types=[q_type, r_type],
         operands=[operand],
-        backend_config="",
+        backend_config=f'{{"full_matrices": {str(full_matrices).lower()}}}',
     ).results
 
 
@@ -595,7 +602,10 @@ def _svd_lowering(
     ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm
 ):
     """MPS lowering for svd: emit a custom_call @mps.svd."""
-    del subset_by_index, algorithm
+    if subset_by_index is not None:
+        raise NotImplementedError("subset_by_index not supported on MPS")
+    if algorithm is not None:
+        raise NotImplementedError("algorithm selection not supported on MPS")
     fm = "true" if full_matrices else "false"
     if compute_uv:
         # JAX svd_p abstract eval returns (s, u, vt) – note s first!

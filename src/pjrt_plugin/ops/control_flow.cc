@@ -822,6 +822,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (!a)
             return false;
 
+        if (op->getNumResults() != 1 && op->getNumResults() != 3) {
+            MPS_LOG_ERROR("mps.svd: expected 1 or 3 outputs, got %u\n", op->getNumResults());
+            return false;
+        }
         bool compute_uv = (op->getNumResults() == 3);
 
         // Parse full_matrices from backend_config (default true).
