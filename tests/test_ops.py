@@ -125,17 +125,13 @@ def test_op_grad(
         pytest.skip(f"No differentiable arguments for operation '{op_config.func}'.")
 
     if op_config.grad_xfail:
-        from .configs.util import MPS_DEVICE
-
-        # Only apply xfail when actually testing MPS, not just when MPS is available
-        if MPS_DEVICE is not None and "mps" in get_test_platforms():
-            request.applymarker(
-                pytest.mark.xfail(  # type: ignore[call-overload]
-                    reason=op_config.grad_xfail,
-                    match=op_config.grad_xfail,
-                    strict=True,
-                )
+        request.applymarker(
+            pytest.mark.xfail(  # type: ignore[call-overload]
+                reason=op_config.grad_xfail,
+                match=op_config.grad_xfail,
+                strict=True,
             )
+        )
 
     platforms = get_test_platforms()
     for argnum in argnums:
