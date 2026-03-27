@@ -29,11 +29,17 @@ fi
 MLX_DIR="$BUILD_DIR/mlx"
 MLX_BUILD_DIR="$BUILD_DIR/mlx-build"
 MLX_STAMP="$PREFIX/.mlx-tag"
+# Include patch checksums in the stamp so patches changes trigger a rebuild.
+MLX_PATCHES_HASH=""
+if [ -d "$MLX_PATCHES_DIR" ] && ls "$MLX_PATCHES_DIR"/*.patch &>/dev/null; then
+    MLX_PATCHES_HASH=$(cat "$MLX_PATCHES_DIR"/*.patch | shasum -a 256 | cut -d' ' -f1)
+fi
+MLX_FULL_TAG="${MLX_GIT_TAG}:${MLX_PATCHES_HASH}"
 INSTALLED_MLX_TAG=""
 if [ -f "$MLX_STAMP" ]; then
     INSTALLED_MLX_TAG="$(cat "$MLX_STAMP")"
 fi
-if [ "$INSTALLED_MLX_TAG" != "$MLX_GIT_TAG" ]; then
+if [ "$INSTALLED_MLX_TAG" != "$MLX_FULL_TAG" ]; then
     echo "=== Cloning MLX at tag $MLX_GIT_TAG ==="
     if [ ! -d "$MLX_DIR" ]; then
         mkdir -p "$MLX_DIR"
@@ -65,7 +71,7 @@ if [ "$INSTALLED_MLX_TAG" != "$MLX_GIT_TAG" ]; then
 
     cmake --build "$MLX_BUILD_DIR" -j "$JOBS"
     cmake --install "$MLX_BUILD_DIR"
-    echo "$MLX_GIT_TAG" > "$MLX_STAMP"
+    echo "$MLX_FULL_TAG" > "$MLX_STAMP"
     echo "MLX installed to $PREFIX"
 else
     echo "=== MLX already installed ($MLX_GIT_TAG) ==="

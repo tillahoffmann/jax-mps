@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 from jax._src import core
 from jax._src.interpreters import mlir
+from jax._src.lax import linalg as lax_linalg
 
 # ---------------------------------------------------------------------------
 # Scaled Dot-Product Attention (mps.sdpa)
@@ -555,6 +556,70 @@ def gelu(x):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Linalg lowerings: eigh, qr  (MPS-specific custom_call lowerings)
+# ---------------------------------------------------------------------------
+
+
+def _eigh_lowering(
+    ctx, operand, *, lower, sort_eigenvalues, subset_by_index, algorithm
+):
+    """MPS lowering for eigh: emit a custom_call @mps.eigh."""
+    del sort_eigenvalues, subset_by_index, algorithm  # handled by kernel
+    v_aval, w_aval = ctx.avals_out
+    v_type = mlir.aval_to_ir_type(v_aval)
+    w_type = mlir.aval_to_ir_type(w_aval)
+    return mlir.custom_call(
+        call_target_name="mps.eigh",
+        result_types=[v_type, w_type],
+        operands=[operand],
+        backend_config=f'{{"lower": {str(lower).lower()}}}',
+    ).results
+
+
+def _qr_lowering(ctx, operand, *, full_matrices, **kwargs):
+    """MPS lowering for qr: emit a custom_call @mps.qr."""
+    del full_matrices, kwargs  # QR kernel always returns thin Q
+    q_aval, r_aval = ctx.avals_out
+    q_type = mlir.aval_to_ir_type(q_aval)
+    r_type = mlir.aval_to_ir_type(r_aval)
+    return mlir.custom_call(
+        call_target_name="mps.qr",
+        result_types=[q_type, r_type],
+        operands=[operand],
+        backend_config="",
+    ).results
+
+
+def _svd_lowering(
+    ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm
+):
+    """MPS lowering for svd: emit a custom_call @mps.svd."""
+    del subset_by_index, algorithm
+    fm = "true" if full_matrices else "false"
+    if compute_uv:
+        # JAX svd_p abstract eval returns (s, u, vt) – note s first!
+        s_aval, u_aval, vt_aval = ctx.avals_out
+        return mlir.custom_call(
+            call_target_name="mps.svd",
+            result_types=[
+                mlir.aval_to_ir_type(s_aval),
+                mlir.aval_to_ir_type(u_aval),
+                mlir.aval_to_ir_type(vt_aval),
+            ],
+            operands=[operand],
+            backend_config=f'{{"compute_uv": true, "full_matrices": {fm}}}',
+        ).results
+    else:
+        (s_aval,) = ctx.avals_out
+        return mlir.custom_call(
+            call_target_name="mps.svd",
+            result_types=[mlir.aval_to_ir_type(s_aval)],
+            operands=[operand],
+            backend_config=f'{{"compute_uv": false, "full_matrices": {fm}}}',
+        ).results
+
+
 def register_fused_ops():
     """Register MLIR lowerings for all fused ops on the MPS platform."""
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
@@ -573,6 +638,11 @@ def register_fused_ops():
     mlir.register_lowering(_layer_norm_bwd_p, _layer_norm_bwd_lowering, platform="mps")
     mlir.register_lowering(_rope_bwd_p, _rope_bwd_lowering, platform="mps")
     mlir.register_lowering(_gelu_bwd_p, _gelu_bwd_lowering, platform="mps")
+
+    # Linalg lowerings (eigh, qr, svd) for MPS platform.
+    mlir.register_lowering(lax_linalg.eigh_p, _eigh_lowering, platform="mps")
+    mlir.register_lowering(lax_linalg.qr_p, _qr_lowering, platform="mps")
+    mlir.register_lowering(lax_linalg.svd_p, _svd_lowering, platform="mps")
 
     # Fallback lowerings for non-MPS platforms (CPU, GPU).
     mlir.register_lowering(
