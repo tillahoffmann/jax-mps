@@ -446,6 +446,42 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3, 4)),
                 name="dynamic_update_slice_single_axis_wide",
             ),
+            # --- Scatter-apply (generic update computation) ---
+            # scatter_apply with sin: replaces operand[idx] with sin(operand[idx])
+            # JAX does not support scatter_apply JVP (gradient).
+            OperationTestConfig(
+                lambda x: lax.scatter_apply(
+                    x,
+                    jnp.array([[0], [2], [4]]),
+                    jnp.sin,
+                    lax.ScatterDimensionNumbers(
+                        update_window_dims=(),
+                        inserted_window_dims=(0,),
+                        scatter_dims_to_operand_dims=(0,),
+                    ),
+                    update_shape=(3,),
+                ),
+                lambda key: random.normal(key, (6,)),
+                name="scatter_apply_sin",
+                grad_xfail="scatter_apply JVP not implemented",
+            ),
+            # scatter_apply with x*2: replaces operand[idx] with 2*operand[idx]
+            OperationTestConfig(
+                lambda x: lax.scatter_apply(
+                    x,
+                    jnp.array([[1], [3]]),
+                    lambda v: v * 2,
+                    lax.ScatterDimensionNumbers(
+                        update_window_dims=(),
+                        inserted_window_dims=(0,),
+                        scatter_dims_to_operand_dims=(0,),
+                    ),
+                    update_shape=(2,),
+                ),
+                lambda key: random.normal(key, (5,)),
+                name="scatter_apply_mul2",
+                grad_xfail="scatter_apply JVP not implemented",
+            ),
             # Scatter-add with non-contiguous update_window_dims.
             # Gradient of x[:, idx] where idx is a dynamic index array
             # produces a scatter with update_window_dims=[0,2,...] (gap at

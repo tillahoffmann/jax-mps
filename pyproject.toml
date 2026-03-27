@@ -55,7 +55,9 @@ ctcache = { git = "https://github.com/matus-chochlik/ctcache.git" }
 dev = [
     "ctcache",
     "flax>=0.10.7",
+    "flatbuffers",
     "huggingface-hub",
+    "hypothesis",
     "mlx-lm>=0.31.1",
     "numpyro>=0.20.0",
     "pre-commit>=4.5.1",

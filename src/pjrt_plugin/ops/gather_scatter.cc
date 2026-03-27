@@ -15,29 +15,39 @@ ScatterType DetectScatterType(mlir::Region& body) {
         return ScatterType::Unknown;
 
     auto& block = body.front();
+    auto arg0 = block.getArgument(0);
+    auto arg1 = block.getArgument(1);
+
     for (auto& op : block.getOperations()) {
         auto opName = op.getName().getStringRef();
-        // The body takes (current, update) and returns the result
-        // For simple update: return update (the second arg)
+        // For simple update: return the second arg directly
         if (opName == "stablehlo.return") {
-            // Check if it returns the second block argument directly
-            if (op.getNumOperands() == 1) {
-                auto returnVal = op.getOperand(0);
-                if (returnVal == block.getArgument(1)) {
-                    return ScatterType::Update;
-                }
+            if (op.getNumOperands() == 1 && op.getOperand(0) == arg1) {
+                return ScatterType::Update;
+            }
+            continue;
+        }
+        // Only match binary ops that use BOTH block arguments.
+        // This avoids misclassifying scatter_apply bodies like
+        // `arg0 * constant` as ScatterType::Mul.
+        if (op.getNumOperands() == 2) {
+            auto lhs = op.getOperand(0);
+            auto rhs = op.getOperand(1);
+            bool usesArg0 = (lhs == arg0 || rhs == arg0);
+            bool usesArg1 = (lhs == arg1 || rhs == arg1);
+            if (usesArg0 && usesArg1) {
+                if (opName == "stablehlo.add")
+                    return ScatterType::Add;
+                if (opName == "stablehlo.subtract")
+                    return ScatterType::Sub;
+                if (opName == "stablehlo.multiply")
+                    return ScatterType::Mul;
+                if (opName == "stablehlo.minimum")
+                    return ScatterType::Min;
+                if (opName == "stablehlo.maximum")
+                    return ScatterType::Max;
             }
         }
-        if (opName == "stablehlo.add")
-            return ScatterType::Add;
-        if (opName == "stablehlo.subtract")
-            return ScatterType::Sub;
-        if (opName == "stablehlo.multiply")
-            return ScatterType::Mul;
-        if (opName == "stablehlo.minimum")
-            return ScatterType::Min;
-        if (opName == "stablehlo.maximum")
-            return ScatterType::Max;
     }
     return ScatterType::Unknown;
 }
@@ -64,6 +74,60 @@ std::optional<mlx::core::array> ApplyScatter(ScatterType scatterType,
             MPS_LOG_ERROR("stablehlo.scatter: unsupported scatter update type\n");
             return std::nullopt;
     }
+}
+
+// Generic scatter fallback: gather current values, execute the body region
+// on (current, updates), then scatter the result back.
+// This handles scatter_apply and any non-standard update computations.
+// Note: for duplicate indices, this gives implementation-defined (last-write)
+// behaviour rather than compounding, which is permitted by the StableHLO spec.
+std::optional<mlx::core::array> ApplyScatterGeneric(mlir::Region& body,
+                                                    const mlx::core::array& operand,
+                                                    const std::vector<mlx::core::array>& idxVec,
+                                                    const mlx::core::array& updates,
+                                                    const std::vector<int>& axes, ExecContext& ctx,
+                                                    const ValueMap& parentValues) {
+    // Step 1: Gather current values at scatter indices.
+    // Compute slice_sizes: 1 at scatter axes, full at others.
+    mlx::core::Shape sliceSizes;
+    std::set<int> axisSet(axes.begin(), axes.end());
+    for (int d = 0; d < operand.ndim(); ++d) {
+        sliceSizes.push_back(axisSet.count(d) ? 1 : operand.shape(d));
+    }
+    auto gathered = mlx::core::gather(operand, idxVec, axes, sliceSizes);
+
+    // Squeeze the gathered result to match the updates shape.
+    std::vector<int> squeezeAxes;
+    for (int a : axes) {
+        // The gather output has size-1 dims at the scatter axes, after
+        // the index batch dims.
+        int gatherDim = static_cast<int>(idxVec[0].ndim()) + a;
+        // Adjust for axes before this one that are already size-1.
+        squeezeAxes.push_back(gatherDim);
+    }
+    if (!squeezeAxes.empty()) {
+        gathered = mlx::core::squeeze(gathered, squeezeAxes);
+    }
+
+    // Reshape gathered to match updates shape for the body.
+    if (gathered.shape() != updates.shape()) {
+        gathered = mlx::core::reshape(gathered, updates.shape());
+    }
+
+    // Step 2: Execute the body region on (gathered_current, updates).
+    std::vector<mlx::core::array> bodyArgs = {gathered, updates};
+    std::vector<mlx::core::array> bodyResults;
+    if (!ExecuteRegion(body, bodyArgs, bodyResults, ctx, &parentValues)) {
+        MPS_LOG_ERROR("stablehlo.scatter: failed to execute generic body\n");
+        return std::nullopt;
+    }
+    if (bodyResults.empty()) {
+        MPS_LOG_ERROR("stablehlo.scatter: generic body produced no results\n");
+        return std::nullopt;
+    }
+
+    // Step 3: Scatter the results back using simple update (last-write-wins).
+    return mlx::core::scatter(operand, idxVec, bodyResults[0], axes);
 }
 
 namespace {
@@ -268,10 +332,6 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
 
     auto& body = scatterOp.getUpdateComputation();
     auto scatterType = DetectScatterType(body);
-    if (scatterType == ScatterType::Unknown) {
-        MPS_LOG_ERROR("stablehlo.scatter: unsupported update computation\n");
-        return false;
-    }
 
     // Determine which operand dims have window extent > 1
     std::set<int> insertedSet(insertedWindowDims.begin(), insertedWindowDims.end());
@@ -554,7 +614,13 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         }
         auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
-        auto result = ApplyScatter(scatterType, *operand, idxVec, reshapedUpdates, axes);
+        std::optional<mlx::core::array> result;
+        if (scatterType != ScatterType::Unknown) {
+            result = ApplyScatter(scatterType, *operand, idxVec, reshapedUpdates, axes);
+        } else {
+            result =
+                ApplyScatterGeneric(body, *operand, idxVec, reshapedUpdates, axes, ctx, values);
+        }
         if (!result)
             return false;
         values.emplace(ToKey(op->getResult(0)), std::move(*result));
@@ -617,7 +683,12 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     }
     auto reshapedUpdates = mlx::core::reshape(transposedUpdates, newShape);
 
-    auto result = ApplyScatter(scatterType, *operand, idxVec, reshapedUpdates, axes);
+    std::optional<mlx::core::array> result;
+    if (scatterType != ScatterType::Unknown) {
+        result = ApplyScatter(scatterType, *operand, idxVec, reshapedUpdates, axes);
+    } else {
+        result = ApplyScatterGeneric(body, *operand, idxVec, reshapedUpdates, axes, ctx, values);
+    }
     if (!result)
         return false;
 
