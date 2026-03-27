@@ -1,0 +1,899 @@
+diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
+index d399e8e..e1ac0d4 100644
+--- a/mlx/backend/metal/linalg.mm
++++ b/mlx/backend/metal/linalg.mm
+@@ -456,4 +456,813 @@ array ensure_row_contiguous(const array& src) {
+   d.add_temporary(std::move(identity_temp), s.index);
+ }
+ 
++// ---------------------------------------------------------------------------
++// Eigh – Jacobi eigenvalue decomposition on GPU via Metal compute kernel.
++//
++// For matrices up to 63×63 we run a monolithic kernel entirely in threadgroup
++// shared memory.  Larger matrices are not yet supported.
++// ---------------------------------------------------------------------------
++
++namespace /* anonymous – Eigh helpers */ {
++
++// Metal shader source compiled once at first use.
++static NSString* const kEighKernelSource = @R"(
++#include <metal_stdlib>
++using namespace metal;
++
++// Jacobi eigenvalue for symmetric float32 matrices up to 63×63.
++// One threadgroup per matrix.  All work in shared memory.
++//
++// Buffers:
++//   0  – input  A   (batch × N × N, row-major, only lower/upper used)
++//   1  – output eigenvalues  (batch × N)
++//   2  – output eigenvectors (batch × N × N, row-major)
++//   3  – params: uint4(N, max_sweeps, compute_eigenvectors, 0)
++//   4  – tolerance (float)
++//
++// Grid:  (batch, 1, 1)  threadgroups of (256, 1, 1).
++
++kernel void eigh_jacobi(
++    device const float* A_in           [[buffer(0)]],
++    device float*       eigenvalues    [[buffer(1)]],
++    device float*       eigenvectors   [[buffer(2)]],
++    device const uint*  params         [[buffer(3)]],
++    device const float* tol_buf        [[buffer(4)]],
++    uint  tid   [[thread_index_in_threadgroup]],
++    uint  tg_sz [[threads_per_threadgroup]],
++    uint  batch [[threadgroup_position_in_grid]])
++{
++    const uint N           = params[0];
++    const uint max_sweeps  = params[1];
++    const uint compute_ev  = params[2];
++    const uint use_lower   = params[3]; // 1 = lower triangle, 0 = upper
++    const float tol        = tol_buf[0];
++
++    // Shared memory – two N×N matrices plus 2 shared scalars (g_c, g_s).
++    // Max N = 63 → 63*63*4*2 + 8 = 31,760 bytes (< 32KB limit).
++    threadgroup float S[63 * 63];  // working copy of A (symmetrised)
++    threadgroup float V[63 * 63];  // eigenvector accumulator
++
++    const uint NN = N * N;
++    device const float* A_batch = A_in + batch * NN;
++
++    // Load A into shared memory (full symmetric copy) and V = I.
++    // Symmetrise from the triangle specified by use_lower.
++    for (uint idx = tid; idx < NN; idx += tg_sz) {
++        uint r = idx / N, c = idx % N;
++        float val;
++        if (use_lower) {
++            val = (r >= c) ? A_batch[r * N + c] : A_batch[c * N + r];
++        } else {
++            val = (c >= r) ? A_batch[r * N + c] : A_batch[c * N + r];
++        }
++        S[idx] = val;
++        V[idx] = (r == c) ? 1.0f : 0.0f;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // Shared scalars written by thread 0, read by all.
++    threadgroup float g_c;
++    threadgroup float g_s;
++
++    for (uint sweep = 0; sweep < max_sweeps; sweep++) {
++        bool any_rotated = false;
++
++        // Cyclic sweep over all (p,q) pairs with p < q.
++        for (uint p = 0; p < N - 1; p++) {
++            for (uint q = p + 1; q < N; q++) {
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                // Thread 0 computes the rotation for this pair.
++                if (tid == 0) {
++                    float Apq = S[p * N + q];
++                    float App = S[p * N + p];
++                    float Aqq = S[q * N + q];
++
++                    g_c = 1.0f;
++                    g_s = 0.0f;
++
++                    if (metal::abs(Apq) > tol) {
++                        float tau = (Aqq - App) / (2.0f * Apq);
++                        float t;
++                        if (tau >= 0.0f)
++                            t = 1.0f / ( tau + metal::sqrt(1.0f + tau * tau));
++                        else
++                            t = 1.0f / ( tau - metal::sqrt(1.0f + tau * tau));
++                        g_c = 1.0f / metal::sqrt(1.0f + t * t);
++                        g_s = t * g_c;
++                    }
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                float c = g_c;
++                float s = g_s;
++                if (s == 0.0f) continue;  // no rotation needed
++                any_rotated = true;
++
++                // --- Apply rotation to columns p, q of S (symmetric update) ---
++                // Each thread handles a subset of rows.
++                for (uint i = tid; i < N; i += tg_sz) {
++                    float sip = S[i * N + p];
++                    float siq = S[i * N + q];
++                    float np = c * sip - s * siq;
++                    float nq = s * sip + c * siq;
++                    S[i * N + p] = np;
++                    S[i * N + q] = nq;
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                // Apply rotation to rows p, q of S.
++                for (uint j = tid; j < N; j += tg_sz) {
++                    float spj = S[p * N + j];
++                    float sqj = S[q * N + j];
++                    float np = c * spj - s * sqj;
++                    float nq = s * spj + c * sqj;
++                    S[p * N + j] = np;
++                    S[q * N + j] = nq;
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                // Force A[p][q] = A[q][p] = 0 (numerical hygiene).
++                if (tid == 0) {
++                    S[p * N + q] = 0.0f;
++                    S[q * N + p] = 0.0f;
++                }
++
++                // Update eigenvector matrix V: columns p, q.
++                if (compute_ev) {
++                    for (uint i = tid; i < N; i += tg_sz) {
++                        float vip = V[i * N + p];
++                        float viq = V[i * N + q];
++                        V[i * N + p] = c * vip - s * viq;
++                        V[i * N + q] = s * vip + c * viq;
++                    }
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++            } // q
++        } // p
++
++        if (!any_rotated) break;  // converged
++    } // sweep
++
++    // --- Sort eigenvalues ascending (and permute eigenvector columns) ---
++    if (tid == 0) {
++        for (uint i = 0; i < N - 1; i++) {
++            uint min_idx = i;
++            for (uint j = i + 1; j < N; j++) {
++                if (S[j * N + j] < S[min_idx * N + min_idx]) min_idx = j;
++            }
++            if (min_idx != i) {
++                float tmp = S[i * N + i];
++                S[i * N + i] = S[min_idx * N + min_idx];
++                S[min_idx * N + min_idx] = tmp;
++                if (compute_ev) {
++                    for (uint r = 0; r < N; r++) {
++                        float vt = V[r * N + i];
++                        V[r * N + i] = V[r * N + min_idx];
++                        V[r * N + min_idx] = vt;
++                    }
++                }
++            }
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // --- Write eigenvalues (diagonal of S) ---
++    device float* eval_batch = eigenvalues + batch * N;
++    for (uint i = tid; i < N; i += tg_sz) {
++        eval_batch[i] = S[i * N + i];
++    }
++
++    // --- Write eigenvectors ---
++    if (compute_ev) {
++        device float* evec_batch = eigenvectors + batch * NN;
++        for (uint idx = tid; idx < NN; idx += tg_sz) {
++            evec_batch[idx] = V[idx];
++        }
++    }
++}
++)";
++
++static id<MTLComputePipelineState> compilePipeline(
++    id<MTLDevice> device, NSString* source, NSString* funcName,
++    const char* label) {
++    @autoreleasepool {
++        NSError* error = nil;
++        MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
++        opts.fastMathEnabled = YES;
++        id<MTLLibrary> lib = [device newLibraryWithSource:source
++                                                  options:opts
++                                                    error:&error];
++        if (!lib) {
++            throw std::runtime_error(
++                std::string(label) + " Failed to compile Metal kernel: " +
++                [[error localizedDescription] UTF8String]);
++        }
++        id<MTLFunction> func = [lib newFunctionWithName:funcName];
++        if (!func) {
++            throw std::runtime_error(
++                std::string(label) + " Kernel function not found");
++        }
++        id<MTLComputePipelineState> pso =
++            [device newComputePipelineStateWithFunction:func error:&error];
++        if (!pso) {
++            throw std::runtime_error(
++                std::string(label) + " Failed to create pipeline: " +
++                [[error localizedDescription] UTF8String]);
++        }
++        return pso;
++    }
++}
++
++static id<MTLComputePipelineState> getEighPipeline(id<MTLDevice> device) {
++    static dispatch_once_t once;
++    static id<MTLComputePipelineState> pso;
++    dispatch_once(&once, ^{
++        pso = compilePipeline(device, kEighKernelSource,
++                              @"eigh_jacobi", "[Eigh::eval_gpu]");
++    });
++    return pso;
++}
++
++} // anonymous namespace
++
++void Eigh::eval_gpu(
++    const std::vector<array>& inputs,
++    std::vector<array>& outputs) {
++    const auto& a = inputs[0];
++
++    if (a.dtype() != float32) {
++        throw std::runtime_error(
++            "[Eigh::eval_gpu] Only float32 is supported on Metal.");
++    }
++
++    int N = a.shape(-1);
++    if (N == 0) {
++        for (auto& o : outputs) {
++            o.set_data(allocator::malloc(o.nbytes()));
++        }
++        return;
++    }
++    if (N > 63) {
++        throw std::runtime_error(
++            "[Eigh::eval_gpu] Metal Eigh currently supports matrices up to "
++            "63×63. Got " + std::to_string(N) + "×" + std::to_string(N) + ".");
++    }
++
++    size_t num_matrices = a.size() / (N * N);
++
++    auto& values = outputs[0];
++    values.set_data(allocator::malloc(values.nbytes()));
++
++    // If computing eigenvectors, output[1] holds them; otherwise we still
++    // need a temporary for the kernel (which reads A through the eigenvector
++    // buffer path).
++    array vectors = compute_eigenvectors_
++        ? outputs[1]
++        : array(a.shape(), a.dtype(), nullptr, {});
++    if (compute_eigenvectors_) {
++        vectors.set_data(allocator::malloc(vectors.nbytes()));
++    } else {
++        vectors.set_data(allocator::malloc(a.nbytes()));
++    }
++
++    // Ensure input is row-contiguous.
++    array a_contig = ensure_row_contiguous(a);
++
++    auto& s = stream();
++    auto& d = metal::device(s.device);
++
++    id<MTLDevice> mtl_dev = (__bridge id<MTLDevice>)d.mtl_device();
++    id<MTLComputePipelineState> pso = getEighPipeline(mtl_dev);
++
++    // Params buffer: {N, max_sweeps, compute_eigenvectors, use_lower}
++    uint32_t max_sweeps = (N <= 8) ? 30 : (N <= 16 ? 50 : 100);
++    bool use_lower = (uplo_ == "L");
++    uint32_t params[4] = {
++        static_cast<uint32_t>(N),
++        max_sweeps,
++        compute_eigenvectors_ ? 1u : 0u,
++        use_lower ? 1u : 0u
++    };
++    float tol = 1e-7f;
++
++    // Use MLX's managed compute encoder (ensures proper ordering with
++    // prior work that produced the input arrays).
++    auto& compute_encoder = d.get_command_encoder(s.index);
++    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
++    compute_encoder.set_input_array(a_contig, 0);
++    compute_encoder.set_output_array(values, 1);
++    compute_encoder.set_output_array(vectors, 2);
++    compute_encoder.set_bytes(params, sizeof(params), 3);
++    compute_encoder.set_bytes(&tol, sizeof(tol), 4);
++
++    NSUInteger tg_size = std::min(
++        static_cast<NSUInteger>(256),
++        [pso maxTotalThreadsPerThreadgroup]);
++    compute_encoder.dispatch_threadgroups(
++        MTL::Size(num_matrices, 1, 1),
++        MTL::Size(tg_size, 1, 1));
++
++    // Sorting is done in the Metal kernel (in shared memory before writing).
++
++    if (!compute_eigenvectors_) {
++        d.add_temporary(std::move(vectors), s.index);
++    }
++    d.add_temporary(std::move(a_contig), s.index);
++}
++
++// ---------------------------------------------------------------------------
++// QRF – Modified Gram-Schmidt QR decomposition on GPU via Metal compute.
++//
++// For matrices up to 64×64 we run a monolithic kernel in threadgroup shared
++// memory.  Larger matrices are not yet supported.
++// ---------------------------------------------------------------------------
++
++namespace /* anonymous – QR helpers */ {
++
++static NSString* const kQRKernelSource = @R"(
++#include <metal_stdlib>
++using namespace metal;
++
++// Modified Gram-Schmidt QR for float32 matrices up to 64×64.
++// One threadgroup per matrix.
++//
++// Buffers:
++//   0 – input  A  (batch × M × N, row-major)
++//   1 – output Q  (batch × M × K, row-major)   K = min(M,N)
++//   2 – output R  (batch × K × N, row-major)
++//   3 – params: uint4(M, N, K, 0)
++//
++// Grid: (batch,1,1) threadgroups of (256,1,1).
++
++kernel void qr_mgs(
++    device const float* A_in  [[buffer(0)]],
++    device float*       Q_out [[buffer(1)]],
++    device float*       R_out [[buffer(2)]],
++    device const uint*  params [[buffer(3)]],
++    uint tid   [[thread_index_in_threadgroup]],
++    uint tg_sz [[threads_per_threadgroup]],
++    uint batch [[threadgroup_position_in_grid]])
++{
++    const uint M = params[0];
++    const uint N = params[1];
++    const uint K = params[2]; // min(M,N)
++
++    // Shared memory: working copy of A (M×N) used in-place.
++    threadgroup float W[64 * 64];  // max 64×64
++    // Shared reduction buffer.
++    threadgroup float red[256];
++
++    const uint MN = M * N;
++    device const float* A_batch = A_in + batch * MN;
++    device float* Q_batch = Q_out + batch * M * K;
++    device float* R_batch = R_out + batch * K * N;
++
++    // Load A into shared memory.
++    for (uint idx = tid; idx < MN; idx += tg_sz) {
++        W[idx] = A_batch[idx];
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // Zero R output (only the part this kernel touches).
++    for (uint idx = tid; idx < K * N; idx += tg_sz) {
++        R_batch[idx] = 0.0f;
++    }
++
++    for (uint j = 0; j < K; j++) {
++        // --- Compute norm of column j of W ---
++        float local_sum = 0.0f;
++        for (uint i = tid; i < M; i += tg_sz) {
++            float v = W[i * N + j];
++            local_sum += v * v;
++        }
++        red[tid] = local_sum;
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        // Tree reduction.
++        for (uint stride = tg_sz / 2; stride > 0; stride /= 2) {
++            if (tid < stride) red[tid] += red[tid + stride];
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++        float norm = metal::sqrt(red[0]);
++
++        // R[j,j] = norm.
++        if (tid == 0) {
++            R_batch[j * N + j] = norm;
++        }
++
++        // Normalise column j → Q column j, stored in W[:,j].
++        float inv_norm = (norm > 1e-30f) ? 1.0f / norm : 0.0f;
++        for (uint i = tid; i < M; i += tg_sz) {
++            W[i * N + j] *= inv_norm;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        // --- Orthogonalise subsequent columns against column j ---
++        for (uint k = j + 1; k < N; k++) {
++            // Dot product: Q[:,j]^T * W[:,k]
++            float local_dot = 0.0f;
++            for (uint i = tid; i < M; i += tg_sz) {
++                local_dot += W[i * N + j] * W[i * N + k];
++            }
++            red[tid] = local_dot;
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++
++            for (uint stride = tg_sz / 2; stride > 0; stride /= 2) {
++                if (tid < stride) red[tid] += red[tid + stride];
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++            }
++            float dot = red[0];
++
++            // R[j,k] = dot.
++            if (tid == 0) {
++                R_batch[j * N + k] = dot;
++            }
++
++            // W[:,k] -= dot * W[:,j]
++            for (uint i = tid; i < M; i += tg_sz) {
++                W[i * N + k] -= dot * W[i * N + j];
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++    }
++
++    // --- Write Q from W columns 0..K-1 ---
++    for (uint i = tid; i < M * K; i += tg_sz) {
++        uint r = i / K;
++        uint c = i % K;
++        Q_batch[i] = W[r * N + c];
++    }
++}
++)";
++
++static id<MTLComputePipelineState> getQRPipeline(id<MTLDevice> device) {
++    static dispatch_once_t once;
++    static id<MTLComputePipelineState> pso;
++    dispatch_once(&once, ^{
++        pso = compilePipeline(device, kQRKernelSource,
++                              @"qr_mgs", "[QRF::eval_gpu]");
++    });
++    return pso;
++}
++
++} // anonymous namespace
++
++void QRF::eval_gpu(
++    const std::vector<array>& inputs,
++    std::vector<array>& outputs) {
++    const auto& a = inputs[0];
++
++    if (a.dtype() != float32) {
++        throw std::runtime_error(
++            "[QRF::eval_gpu] Only float32 is supported on Metal.");
++    }
++
++    int M = a.shape(-2);
++    int N = a.shape(-1);
++    int K = std::min(M, N);
++
++    if (M == 0 || N == 0) {
++        for (auto& o : outputs) {
++            o.set_data(allocator::malloc(o.nbytes()));
++        }
++        return;
++    }
++    if (M > 64 || N > 64) {
++        throw std::runtime_error(
++            "[QRF::eval_gpu] Metal QR currently supports matrices up to "
++            "64×64. Got " + std::to_string(M) + "×" + std::to_string(N) + ".");
++    }
++
++    size_t num_matrices = a.size() / (M * N);
++
++    auto& q = outputs[0];  // M×K
++    auto& r = outputs[1];  // K×N
++    q.set_data(allocator::malloc(q.nbytes()));
++    r.set_data(allocator::malloc(r.nbytes()));
++
++    array a_contig = ensure_row_contiguous(a);
++
++    auto& s = stream();
++    auto& d = metal::device(s.device);
++
++    id<MTLDevice> mtl_dev = (__bridge id<MTLDevice>)d.mtl_device();
++    id<MTLComputePipelineState> pso = getQRPipeline(mtl_dev);
++
++    uint32_t params[4] = {
++        static_cast<uint32_t>(M),
++        static_cast<uint32_t>(N),
++        static_cast<uint32_t>(K),
++        0u
++    };
++
++    auto& compute_encoder = d.get_command_encoder(s.index);
++    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
++    compute_encoder.set_input_array(a_contig, 0);
++    compute_encoder.set_output_array(q, 1);
++    compute_encoder.set_output_array(r, 2);
++    compute_encoder.set_bytes(params, sizeof(params), 3);
++
++    NSUInteger tg_size = std::min(
++        static_cast<NSUInteger>(256),
++        [pso maxTotalThreadsPerThreadgroup]);
++    compute_encoder.dispatch_threadgroups(
++        MTL::Size(num_matrices, 1, 1),
++        MTL::Size(tg_size, 1, 1));
++
++    d.add_temporary(std::move(a_contig), s.index);
++}
++
++// ---------------------------------------------------------------------------
++// SVD – One-sided Jacobi SVD on GPU via Metal compute kernel.
++//
++// Computes A^T*A, diagonalises it with Jacobi rotations to get V and σ²,
++// then U = A·V·Σ⁻¹.  Matrices up to 51×51.
++// ---------------------------------------------------------------------------
++
++namespace /* anonymous – SVD helpers */ {
++
++static NSString* const kSVDKernelSource = @R"(
++#include <metal_stdlib>
++using namespace metal;
++
++// One-sided Jacobi SVD for float32 matrices up to 51×51.
++// One threadgroup per matrix.
++//
++// Buffers:
++//   0  – input  A   (batch × M × N, row-major)
++//   1  – output U   (batch × M × M, row-major) [if compute_uv]
++//   2  – output S   (batch × K)                 K = min(M,N)
++//   3  – output Vt  (batch × N × N, row-major) [if compute_uv]
++//   4  – params: uint4(M, N, K, compute_uv)
++//   5  – tolerance (float)
++//   6  – max_sweeps (uint)
++//
++// Grid: (batch,1,1)  threadgroups of (256,1,1).
++
++kernel void svd_jacobi(
++    device const float* A_in   [[buffer(0)]],
++    device float*       U_out  [[buffer(1)]],
++    device float*       S_out  [[buffer(2)]],
++    device float*       Vt_out [[buffer(3)]],
++    device const uint*  params [[buffer(4)]],
++    device const float* tol_buf [[buffer(5)]],
++    device const uint*  sweep_buf [[buffer(6)]],
++    uint tid   [[thread_index_in_threadgroup]],
++    uint tg_sz [[threads_per_threadgroup]],
++    uint batch [[threadgroup_position_in_grid]])
++{
++    const uint M = params[0];
++    const uint N = params[1];
++    const uint K = params[2];
++    const uint compute_uv = params[3];
++    const float tol = tol_buf[0];
++    const uint max_sweeps = sweep_buf[0];
++
++    // Shared memory pools.
++    threadgroup float A_sh[51 * 51];   // copy of A (M×N)
++    threadgroup float G[51 * 51];      // A^T*A (N×N)
++    threadgroup float V[51 * 51];      // eigenvectors of G (N×N)
++
++    const uint MN = M * N;
++    const uint NN = N * N;
++    device const float* A_batch = A_in + batch * MN;
++
++    // Load A into shared memory.
++    for (uint idx = tid; idx < MN; idx += tg_sz) {
++        A_sh[idx] = A_batch[idx];
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // --- Step 1: Compute G = A^T * A in shared memory ---
++    for (uint idx = tid; idx < NN; idx += tg_sz) {
++        uint i = idx / N;
++        uint j = idx % N;
++        float sum = 0.0f;
++        for (uint k = 0; k < M; k++) {
++            sum += A_sh[k * N + i] * A_sh[k * N + j];
++        }
++        G[idx] = sum;
++        V[idx] = (i == j) ? 1.0f : 0.0f;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // --- Step 2: Jacobi eigenvalue iteration on G ---
++    threadgroup float g_c;
++    threadgroup float g_s;
++
++    for (uint sweep = 0; sweep < max_sweeps; sweep++) {
++        bool any_rotated = false;
++        for (uint p = 0; p < N - 1; p++) {
++            for (uint q = p + 1; q < N; q++) {
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                if (tid == 0) {
++                    float Gpq = G[p * N + q];
++                    float Gpp = G[p * N + p];
++                    float Gqq = G[q * N + q];
++                    g_c = 1.0f;
++                    g_s = 0.0f;
++                    if (metal::abs(Gpq) > tol) {
++                        float tau = (Gqq - Gpp) / (2.0f * Gpq);
++                        float t;
++                        if (tau >= 0.0f)
++                            t = 1.0f / (tau + metal::sqrt(1.0f + tau * tau));
++                        else
++                            t = 1.0f / (tau - metal::sqrt(1.0f + tau * tau));
++                        g_c = 1.0f / metal::sqrt(1.0f + t * t);
++                        g_s = t * g_c;
++                    }
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++
++                float c = g_c, s = g_s;
++                if (s == 0.0f) continue;
++                any_rotated = true;
++
++                for (uint i = tid; i < N; i += tg_sz) {
++                    float gip = G[i * N + p], giq = G[i * N + q];
++                    G[i * N + p] = c * gip - s * giq;
++                    G[i * N + q] = s * gip + c * giq;
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++                for (uint j = tid; j < N; j += tg_sz) {
++                    float gpj = G[p * N + j], gqj = G[q * N + j];
++                    G[p * N + j] = c * gpj - s * gqj;
++                    G[q * N + j] = s * gpj + c * gqj;
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++                if (tid == 0) {
++                    G[p * N + q] = 0.0f;
++                    G[q * N + p] = 0.0f;
++                }
++                for (uint i = tid; i < N; i += tg_sz) {
++                    float vip = V[i * N + p], viq = V[i * N + q];
++                    V[i * N + p] = c * vip - s * viq;
++                    V[i * N + q] = s * vip + c * viq;
++                }
++                threadgroup_barrier(mem_flags::mem_threadgroup);
++            }
++        }
++        if (!any_rotated) break;
++    }
++
++    // --- Step 3: Extract singular values and sort descending in shared mem ---
++    for (uint i = tid; i < K; i += tg_sz) {
++        float eigval = G[i * N + i];
++        G[i * N + i] = metal::sqrt(metal::max(eigval, 0.0f));
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // Thread 0: selection sort descending.
++    if (tid == 0) {
++        for (uint i = 0; i < K - 1; i++) {
++            uint max_idx = i;
++            for (uint j = i + 1; j < K; j++) {
++                if (G[j * N + j] > G[max_idx * N + max_idx]) max_idx = j;
++            }
++            if (max_idx != i) {
++                float tmp = G[i * N + i];
++                G[i * N + i] = G[max_idx * N + max_idx];
++                G[max_idx * N + max_idx] = tmp;
++                for (uint r = 0; r < N; r++) {
++                    float vt = V[r * N + i];
++                    V[r * N + i] = V[r * N + max_idx];
++                    V[r * N + max_idx] = vt;
++                }
++            }
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // Write S.
++    device float* S_batch = S_out + batch * K;
++    for (uint i = tid; i < K; i += tg_sz) {
++        S_batch[i] = G[i * N + i];
++    }
++
++    if (!compute_uv) return;
++
++    // --- Step 4: Write Vt (transpose of V) ---
++    device float* Vt_batch = Vt_out + batch * NN;
++    for (uint idx = tid; idx < NN; idx += tg_sz) {
++        uint i = idx / N, j = idx % N;
++        Vt_batch[idx] = V[j * N + i]; // transpose
++    }
++
++    // --- Step 5: Compute U = A * V * Σ^{-1} ---
++    // U is M×M.  We compute U[:,j] for j < K; fill rest with zeros.
++    device float* U_batch = U_out + batch * M * M;
++    for (uint idx = tid; idx < M * M; idx += tg_sz) {
++        uint i = idx / M;  // row of U
++        uint j = idx % M;  // col of U
++
++        if (j < K) {
++            float sigma = G[j * N + j]; // σ_j stored in diagonal
++            float inv_sigma = (sigma > 1e-10f) ? 1.0f / sigma : 0.0f;
++            float sum = 0.0f;
++            for (uint k = 0; k < N; k++) {
++                sum += A_sh[i * N + k] * V[k * N + j];
++            }
++            U_batch[idx] = sum * inv_sigma;
++        } else {
++            U_batch[idx] = (i == j) ? 1.0f : 0.0f;
++        }
++    }
++}
++)";
++
++static id<MTLComputePipelineState> getSVDPipeline(id<MTLDevice> device) {
++    static dispatch_once_t once;
++    static id<MTLComputePipelineState> pso;
++    dispatch_once(&once, ^{
++        pso = compilePipeline(device, kSVDKernelSource,
++                              @"svd_jacobi", "[SVD::eval_gpu]");
++    });
++    return pso;
++}
++
++} // anonymous namespace
++
++void SVD::eval_gpu(
++    const std::vector<array>& inputs,
++    std::vector<array>& outputs) {
++    const auto& a = inputs[0];
++
++    if (a.dtype() != float32) {
++        throw std::runtime_error(
++            "[SVD::eval_gpu] Only float32 is supported on Metal.");
++    }
++
++    int M = a.shape(-2);
++    int N = a.shape(-1);
++    int K = std::min(M, N);
++
++    if (M == 0 || N == 0) {
++        for (auto& o : outputs) {
++            o.set_data(allocator::malloc(o.nbytes()));
++        }
++        return;
++    }
++    if (M > 51 || N > 51) {
++        throw std::runtime_error(
++            "[SVD::eval_gpu] Metal SVD currently supports matrices up to "
++            "51×51. Got " + std::to_string(M) + "×" + std::to_string(N) + ".");
++    }
++
++    size_t num_matrices = a.size() / (M * N);
++
++    // Allocate outputs.
++    for (auto& o : outputs) {
++        o.set_data(allocator::malloc(o.nbytes()));
++    }
++
++    array a_contig = ensure_row_contiguous(a);
++
++    auto& s = stream();
++    auto& d = metal::device(s.device);
++
++    id<MTLDevice> mtl_dev = (__bridge id<MTLDevice>)d.mtl_device();
++    id<MTLComputePipelineState> pso = getSVDPipeline(mtl_dev);
++
++    uint32_t params[4] = {
++        static_cast<uint32_t>(M),
++        static_cast<uint32_t>(N),
++        static_cast<uint32_t>(K),
++        compute_uv_ ? 1u : 0u
++    };
++    float tol = 1e-7f;
++    uint32_t max_sweeps = (K <= 8) ? 30 : (K <= 16 ? 50 : 100);
++
++    auto& compute_encoder = d.get_command_encoder(s.index);
++    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
++    compute_encoder.set_input_array(a_contig, 0);
++
++    if (compute_uv_) {
++        compute_encoder.set_output_array(outputs[0], 1); // U
++        compute_encoder.set_output_array(outputs[1], 2); // S
++        compute_encoder.set_output_array(outputs[2], 3); // Vt
++    } else {
++        compute_encoder.set_input_array(a_contig, 1);    // dummy
++        compute_encoder.set_output_array(outputs[0], 2); // S
++        compute_encoder.set_input_array(a_contig, 3);    // dummy
++    }
++
++    compute_encoder.set_bytes(params, sizeof(params), 4);
++    compute_encoder.set_bytes(&tol, sizeof(tol), 5);
++    compute_encoder.set_bytes(&max_sweeps, sizeof(max_sweeps), 6);
++
++    NSUInteger tg_size = std::min(
++        static_cast<NSUInteger>(256),
++        [pso maxTotalThreadsPerThreadgroup]);
++    compute_encoder.dispatch_threadgroups(
++        MTL::Size(num_matrices, 1, 1),
++        MTL::Size(tg_size, 1, 1));
++
++    // Sorting is done in the Metal kernel (in shared memory before writing).
++
++    d.add_temporary(std::move(a_contig), s.index);
++}
++
+ } // namespace mlx::core
+diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
+index 5764ddd..b2c82c5 100644
+--- a/mlx/backend/metal/primitives.cpp
++++ b/mlx/backend/metal/primitives.cpp
+@@ -200,17 +200,9 @@ void RandomBits::eval_gpu(const std::vector<array>& inputs, array& out) {
+   compute_encoder.dispatch_threads(grid_dims, group_dims);
+ }
+ 
+-void QRF::eval_gpu(
+-    const std::vector<array>& inputs,
+-    std::vector<array>& outputs) {
+-  throw std::runtime_error("[QRF::eval_gpu] Metal QR factorization NYI.");
+-}
++// QRF::eval_gpu is in linalg.mm
+ 
+-void SVD::eval_gpu(
+-    const std::vector<array>& inputs,
+-    std::vector<array>& outputs) {
+-  throw std::runtime_error("[SVD::eval_gpu] Metal SVD NYI.");
+-}
++// SVD::eval_gpu is in linalg.mm
+ 
+ // Inverse::eval_gpu is in linalg.mm
+ 
+@@ -222,11 +214,7 @@ void Eig::eval_gpu(
+   throw std::runtime_error("[Eig::eval_gpu] Metal Eig NYI.");
+ }
+ 
+-void Eigh::eval_gpu(
+-    const std::vector<array>& inputs,
+-    std::vector<array>& outputs) {
+-  throw std::runtime_error("[Eigh::eval_gpu] Metal Eigh NYI.");
+-}
++// Eigh::eval_gpu is in linalg.mm
+ 
+ // LUF::eval_gpu is in linalg.mm
+ 
+diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
+index 7eda94f..4c7099b 100644
+--- a/mlx/linalg.cpp
++++ b/mlx/linalg.cpp
+@@ -224,7 +224,6 @@ array norm(
+ }
+ 
+ std::pair<array, array> qr(const array& a, StreamOrDevice s /* = {} */) {
+-  check_cpu_stream(s, "[linalg::qr]");
+   check_float(a.dtype(), "[linalg::qr]");
+ 
+   if (a.ndim() < 2) {
+@@ -249,7 +248,6 @@ std::pair<array, array> qr(const array& a, StreamOrDevice s /* = {} */) {
+ 
+ std::vector<array>
+ svd(const array& a, bool compute_uv, StreamOrDevice s /* = {} */) {
+-  check_cpu_stream(s, "[linalg::svd]");
+   check_float_or_complex(a.dtype(), "[linalg::svd]");
+ 
+   if (a.ndim() < 2) {
+@@ -501,7 +499,6 @@ void validate_eig(
+     const array& a,
+     const StreamOrDevice& stream,
+     const std::string& fname) {
+-  check_cpu_stream(stream, fname);
+   check_float_or_complex(a.dtype(), fname);
+ 
+   if (a.ndim() < 2) {
+@@ -545,6 +542,7 @@ std::pair<array, array> eigh(
+ }
+ 
+ array eigvals(const array& a, StreamOrDevice s /* = {} */) {
++  check_cpu_stream(s, "[linalg::eigvals]");
+   validate_eig(a, s, "[linalg::eigvals]");
+   Shape out_shape(a.shape().begin(), a.shape().end() - 1);
+   return array(
+@@ -555,6 +553,7 @@ array eigvals(const array& a, StreamOrDevice s /* = {} */) {
+ }
+ 
+ std::pair<array, array> eig(const array& a, StreamOrDevice s /* = {} */) {
++  check_cpu_stream(s, "[linalg::eig]");
+   validate_eig(a, s, "[linalg::eig]");
+   auto out = array::make_arrays(
+       {Shape(a.shape().begin(), a.shape().end() - 1), a.shape()},

@@ -30,7 +30,19 @@ def _svd_values(A):
 def _svd_reconstruct(A):
     """Reconstruct A from its SVD to verify correctness without sign issues."""
     U, S, Vh = jnp.linalg.svd(A, full_matrices=False)
-    return U @ jnp.diag(S) @ Vh
+    # Use broadcasting-safe diagonal: S[..., :, None] * Vh works for batched.
+    return U @ (S[..., None] * Vh)
+
+
+def _svd_reconstruct_full(A):
+    """Reconstruct A from full SVD: U @ Sigma @ Vh where U is M×M, Vh is N×N."""
+    U, S, Vh = jnp.linalg.svd(A, full_matrices=True)
+    M, N = A.shape[-2], A.shape[-1]
+    K = min(M, N)
+    # Build full Sigma (M×N) with S on the diagonal.
+    Sigma = jnp.zeros_like(A)
+    Sigma = Sigma.at[..., :K, :K].set(jnp.diag(S))
+    return U @ Sigma @ Vh
 
 
 def _qr_r(A):
@@ -48,9 +60,27 @@ def _qr_reconstruct(A):
     return Q @ R
 
 
+def _qr_reconstruct_complete(A):
+    """Reconstruct A from complete QR (full Q and R)."""
+    Q, R = jnp.linalg.qr(A, mode="complete")
+    M = A.shape[-2]
+    # Verify Q is M×M (not M×K thin).
+    assert Q.shape[-1] == M, f"Q should be {M}×{M} but got {Q.shape}"
+    assert R.shape[-2] == M, f"R should be {M}×N but got {R.shape}"
+    return Q @ R
+
+
 def _eigh_values(A):
     """Return eigenvalues only (avoids sign ambiguity in eigenvectors)."""
     return jnp.linalg.eigh(A)[0]
+
+
+def _eigh_values_upper(A):
+    """Eigh using upper triangle (lower=False, symmetrize_input=False)."""
+    from jax._src.lax import linalg as lax_linalg
+
+    _, w = lax_linalg.eigh(A, lower=False, symmetrize_input=False)
+    return w
 
 
 def _eigh_reconstruct(A):
@@ -269,151 +299,211 @@ def make_linalg_op_configs():
             name="triangular_solve_zero_batch",
         )
 
-        # --- SVD (needs 'svd'/'eigh' primitives not available on MPS) ---
-
-        _xfail_no_prim = xfail_match(
-            "not found for platform mps|unsupported target|Output count mismatch"
-        )
+        # --- SVD ---
 
         # SVD singular values (no sign ambiguity)
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _svd_values,
-                    lambda key, n=n: random.normal(key, (n, n)),
-                    name=f"svd_values_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _svd_values,
+                lambda key, n=n: random.normal(key, (n, n)),
+                name=f"svd_values_{n}x{n}",
             )
 
         # SVD reconstruction (avoids sign ambiguity in U/Vh)
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _svd_reconstruct,
-                    lambda key, n=n: random.normal(key, (n, n)),
-                    name=f"svd_reconstruct_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _svd_reconstruct,
+                lambda key, n=n: random.normal(key, (n, n)),
+                name=f"svd_reconstruct_{n}x{n}",
             )
 
         # Rectangular SVD
-        yield pytest.param(
-            OperationTestConfig(
-                _svd_values,
-                lambda key: random.normal(key, (4, 2)),
-                name="svd_values_4x2",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (4, 2)),
+            name="svd_values_4x2",
         )
+        # Wide SVD (M < N) rejected at lowering (github.com/tillahoffmann/jax-mps#119)
         yield pytest.param(
             OperationTestConfig(
                 _svd_values,
                 lambda key: random.normal(key, (2, 4)),
                 name="svd_values_2x4",
             ),
-            marks=[_xfail_no_prim],
+            marks=[
+                xfail_match("does not yet support wide matrices|not yet support wide")
+            ],
         )
 
         # Batched SVD
-        yield pytest.param(
-            OperationTestConfig(
-                _svd_values,
-                lambda key: random.normal(key, (2, 3, 3)),
-                name="svd_values_batched_2",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (2, 3, 3)),
+            name="svd_values_batched_2",
         )
 
-        # --- QR (needs QR custom_call handler not available on MPS) ---
+        # Large SVD (at GPU kernel max: 51×51)
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (51, 51)),
+            name="svd_values_51x51",
+        )
+        yield OperationTestConfig(
+            _svd_reconstruct,
+            lambda key: random.normal(key, (51, 51)),
+            name="svd_reconstruct_51x51",
+        )
+
+        # SVD reconstruction with full_matrices=True (square)
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                _svd_reconstruct_full,
+                lambda key, n=n: random.normal(key, (n, n)),
+                name=f"svd_reconstruct_full_{n}x{n}",
+            )
+
+        # SVD reconstruction with full_matrices=True (rectangular)
+        # JAX does not support SVD JVP for full matrices on rectangular (jax-ml/jax#508).
+        yield OperationTestConfig(
+            _svd_reconstruct_full,
+            lambda key: random.normal(key, (4, 2)),
+            name="svd_reconstruct_full_4x2",
+            grad_xfail="Singular value decomposition JVP not implemented for full matrices",
+        )
+
+        # Non-square SVD (tall: M > N)
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (51, 32)),
+            name="svd_values_51x32",
+        )
+
+        # --- QR ---
 
         # QR R-factor (sign-normalized to avoid ambiguity)
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _qr_r,
-                    lambda key, n=n: random.normal(key, (n, n)),
-                    name=f"qr_r_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _qr_r,
+                lambda key, n=n: random.normal(key, (n, n)),
+                name=f"qr_r_{n}x{n}",
             )
 
         # QR reconstruction
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _qr_reconstruct,
-                    lambda key, n=n: random.normal(key, (n, n)),
-                    name=f"qr_reconstruct_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _qr_reconstruct,
+                lambda key, n=n: random.normal(key, (n, n)),
+                name=f"qr_reconstruct_{n}x{n}",
             )
 
         # Rectangular QR (tall)
-        yield pytest.param(
-            OperationTestConfig(
-                _qr_reconstruct,
-                lambda key: random.normal(key, (4, 2)),
-                name="qr_reconstruct_4x2",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: random.normal(key, (4, 2)),
+            name="qr_reconstruct_4x2",
         )
 
         # Batched QR
-        yield pytest.param(
-            OperationTestConfig(
-                _qr_reconstruct,
-                lambda key: random.normal(key, (2, 3, 3)),
-                name="qr_reconstruct_batched_2",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: random.normal(key, (2, 3, 3)),
+            name="qr_reconstruct_batched_2",
         )
 
-        # --- Eigenvalue Decomposition (needs 'eigh'/'eig' primitives) ---
+        # QR complete mode (full_matrices=True, tall input)
+        # JAX does not support QR gradient in complete mode (jax-ml/jax#23533).
+        yield OperationTestConfig(
+            _qr_reconstruct_complete,
+            lambda key: random.normal(key, (4, 2)),
+            name="qr_reconstruct_complete_4x2",
+            grad_xfail="Unimplemented case of QR decomposition derivative",
+        )
+
+        # Large QR (at GPU kernel max: 64×64)
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: random.normal(key, (64, 64)),
+            name="qr_reconstruct_64x64",
+        )
+
+        # Non-square QR (tall: 64×32)
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: random.normal(key, (64, 32)),
+            name="qr_reconstruct_64x32",
+        )
+
+        # Non-square QR (wide: 8×16)
+        # JAX does not support QR gradient for wide matrices (jax-ml/jax#23533).
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: random.normal(key, (8, 16)),
+            name="qr_reconstruct_8x16",
+            grad_xfail="Unimplemented case of QR decomposition derivative",
+        )
+
+        # --- Eigenvalue Decomposition ---
 
         # Eigenvalues only (no sign ambiguity)
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _eigh_values,
-                    lambda key, n=n: _random_symmetric(key, n),
-                    name=f"eigh_values_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _eigh_values,
+                lambda key, n=n: _random_symmetric(key, n),
+                name=f"eigh_values_{n}x{n}",
             )
 
         # Eigh reconstruction (A = V @ diag(w) @ V.T)
         for n in [2, 3, 4]:
-            yield pytest.param(
-                OperationTestConfig(
-                    _eigh_reconstruct,
-                    lambda key, n=n: _random_symmetric(key, n),
-                    name=f"eigh_reconstruct_{n}x{n}",
-                ),
-                marks=[_xfail_no_prim],
+            yield OperationTestConfig(
+                _eigh_reconstruct,
+                lambda key, n=n: _random_symmetric(key, n),
+                name=f"eigh_reconstruct_{n}x{n}",
             )
 
         # Eigh on positive definite matrix
-        yield pytest.param(
-            OperationTestConfig(
-                _eigh_values,
-                lambda key: _random_posdef(key, 3),
-                name="eigh_values_posdef",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _eigh_values,
+            lambda key: _random_posdef(key, 3),
+            name="eigh_values_posdef",
         )
 
         # Batched eigh
-        yield pytest.param(
-            OperationTestConfig(
-                _eigh_values,
-                lambda key: _random_symmetric(key, 3, batch_shape=(2,)),
-                name="eigh_values_batched_2",
-            ),
-            marks=[_xfail_no_prim],
+        yield OperationTestConfig(
+            _eigh_values,
+            lambda key: _random_symmetric(key, 3, batch_shape=(2,)),
+            name="eigh_values_batched_2",
         )
 
-        # General (non-symmetric) eigenvalues
+        # Eigh with lower=False (upper triangle, symmetrize_input=False).
+        # Input has valid data only in the upper triangle; lower is garbage.
+        def _make_upper_only(key, n=3):
+            A = _random_symmetric(key, n)
+            # Zero out lower triangle and fill with garbage
+            mask = jnp.triu(jnp.ones((n, n)))
+            return A * mask + (1 - mask) * 999.0
+
+        yield OperationTestConfig(
+            _eigh_values_upper,
+            lambda key: _make_upper_only(key, 3),
+            name="eigh_values_upper_3x3",
+        )
+
+        # Large eigh (at GPU kernel max: 63×63)
+        yield OperationTestConfig(
+            _eigh_values,
+            lambda key: _random_symmetric(key, 63),
+            name="eigh_values_63x63",
+        )
+        yield OperationTestConfig(
+            _eigh_reconstruct,
+            lambda key: _random_symmetric(key, 63),
+            name="eigh_reconstruct_63x63",
+        )
+
+        # General (non-symmetric) eigenvalues (CPU-only: Eig primitive)
+        _xfail_no_prim = xfail_match(
+            "not found for platform mps|unsupported target|Output count mismatch"
+        )
         yield pytest.param(
             OperationTestConfig(
                 jnp.linalg.eigvals,
@@ -421,6 +511,47 @@ def make_linalg_op_configs():
                 name="eigvals_3x3",
             ),
             marks=[_xfail_no_prim],
+        )
+
+        # --- Large matrices beyond GPU kernel limits (github.com/tillahoffmann/jax-mps#119) ---
+        _xfail_large = xfail_match("supports matrices up to|Output count mismatch")
+
+        yield pytest.param(
+            OperationTestConfig(
+                _eigh_values,
+                lambda key: _random_symmetric(key, 100),
+                name="eigh_values_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _qr_reconstruct,
+                lambda key: random.normal(key, (100, 100)),
+                name="qr_reconstruct_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _svd_values,
+                lambda key: random.normal(key, (100, 100)),
+                name="svd_values_100x100",
+            ),
+            marks=[_xfail_large],
+        )
+
+        # Wide SVD (M < N) rejected at lowering time (github.com/tillahoffmann/jax-mps#119)
+        _xfail_wide_svd = xfail_match(
+            "does not yet support wide matrices|not yet support wide"
+        )
+        yield pytest.param(
+            OperationTestConfig(
+                _svd_values,
+                lambda key: random.normal(key, (4, 8)),
+                name="svd_values_4x8_wide",
+            ),
+            marks=[_xfail_wide_svd],
         )
 
         # --- LU Decomposition ---

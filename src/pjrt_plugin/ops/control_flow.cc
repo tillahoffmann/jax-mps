@@ -3,6 +3,7 @@
 
 #include <mlx/compile.h>
 #include <mlx/fast.h>
+#include <mlx/linalg.h>
 #include <mlx/random.h>
 #include <mlx/transforms.h>
 
@@ -761,6 +762,170 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         };
         auto [fwd_out, grads] = mlx::core::vjp(vjp_fn, {*x}, {*g});
         values.emplace(ToKey(op->getResult(0)), std::move(grads[0]));
+        return true;
+    }
+
+    // Handle mps.eigh — symmetric eigendecomposition via MLX.
+    // Inputs: a (symmetric matrix).  Outputs: eigenvectors, eigenvalues.
+    if (callTargetName == "mps.eigh") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("mps.eigh: expected 1 input and 2 outputs\n");
+            return false;
+        }
+        auto* a = RequireValue(values, op->getOperand(0), "mps.eigh");
+        if (!a)
+            return false;
+
+        // Parse lower from backend_config (default true).
+        bool lower = true;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                if (cfg.find("\"lower\": false") != std::string::npos ||
+                    cfg.find("\"lower\":false") != std::string::npos)
+                    lower = false;
+            }
+        }
+
+        auto [eigenvalues, eigenvectors] = mlx::core::linalg::eigh(*a, lower ? "L" : "U");
+        values.emplace(ToKey(op->getResult(0)), std::move(eigenvectors));
+        values.emplace(ToKey(op->getResult(1)), std::move(eigenvalues));
+        return true;
+    }
+
+    // Handle mps.qr — QR decomposition via MLX.
+    // Inputs: a.  Outputs: Q, R.
+    if (callTargetName == "mps.qr") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("mps.qr: expected 1 input and 2 outputs\n");
+            return false;
+        }
+        auto* a = RequireValue(values, op->getOperand(0), "mps.qr");
+        if (!a)
+            return false;
+
+        // Parse full_matrices from backend_config (default false).
+        bool full_matrices = false;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                if (cfg.find("\"full_matrices\": true") != std::string::npos ||
+                    cfg.find("\"full_matrices\":true") != std::string::npos)
+                    full_matrices = true;
+            }
+        }
+
+        auto [Q, R] = mlx::core::linalg::qr(*a);
+
+        if (full_matrices) {
+            // MLX QR returns thin: Q is M×K, R is K×N (K=min(M,N)).
+            // For full_matrices: Q should be M×M, R should be M×N.
+            // Pad with zeros (the extra Q columns are not a proper
+            // orthogonal complement, but match JAX's convention for
+            // reconstruction: Q @ R = A regardless).
+            auto ndim = Q.ndim();
+            auto M = a->shape(static_cast<int>(a->ndim()) - 2);
+            auto N = a->shape(static_cast<int>(a->ndim()) - 1);
+            auto K = std::min(M, N);
+
+            if (Q.shape(static_cast<int>(ndim) - 1) != M) {
+                // Pad Q columns: M×K → M×M
+                auto pad_width = mlx::core::zeros({Q.shape(0), M - K}, Q.dtype());
+                if (ndim == 2) {
+                    Q = mlx::core::concatenate({Q, pad_width}, 1);
+                } else {
+                    // Batched: reshape pad to match batch dims
+                    auto pw_shape = Q.shape();
+                    pw_shape[static_cast<int>(ndim) - 1] = M - K;
+                    pad_width = mlx::core::zeros(pw_shape, Q.dtype());
+                    Q = mlx::core::concatenate({Q, pad_width}, static_cast<int>(ndim) - 1);
+                }
+            }
+            if (R.shape(static_cast<int>(ndim) - 2) != M) {
+                // Pad R rows: K×N → M×N
+                auto pw_shape = R.shape();
+                pw_shape[static_cast<int>(ndim) - 2] = M - K;
+                auto pad_rows = mlx::core::zeros(pw_shape, R.dtype());
+                R = mlx::core::concatenate({R, pad_rows}, static_cast<int>(ndim) - 2);
+            }
+        }
+
+        values.emplace(ToKey(op->getResult(0)), std::move(Q));
+        values.emplace(ToKey(op->getResult(1)), std::move(R));
+        return true;
+    }
+
+    // Handle mps.svd — SVD via MLX.
+    // Inputs: a.  Outputs: U, S, Vt (compute_uv=true) or S (compute_uv=false).
+    if (callTargetName == "mps.svd") {
+        if (op->getNumOperands() != 1) {
+            MPS_LOG_ERROR("mps.svd: expected 1 input\n");
+            return false;
+        }
+        auto* a = RequireValue(values, op->getOperand(0), "mps.svd");
+        if (!a)
+            return false;
+
+        if (op->getNumResults() != 1 && op->getNumResults() != 3) {
+            MPS_LOG_ERROR("mps.svd: expected 1 or 3 outputs, got %u\n", op->getNumResults());
+            return false;
+        }
+        bool compute_uv = (op->getNumResults() == 3);
+
+        // Parse full_matrices from backend_config (default true).
+        bool full_matrices = true;
+        auto bcAttr = customCallOp.getBackendConfig();
+        if (bcAttr) {
+            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
+                auto cfg = strAttr.getValue().str();
+                if (cfg.find("\"full_matrices\": false") != std::string::npos ||
+                    cfg.find("\"full_matrices\":false") != std::string::npos)
+                    full_matrices = false;
+            }
+        }
+
+        auto results = mlx::core::linalg::svd(*a, compute_uv, {});
+
+        if (compute_uv) {
+            if (results.size() != 3) {
+                MPS_LOG_ERROR("mps.svd: MLX returned %zu results, expected 3\n", results.size());
+                return false;
+            }
+            auto U = results[0];   // M×M (full)
+            auto S = results[1];   // K
+            auto Vt = results[2];  // N×N (full)
+
+            if (!full_matrices) {
+                // Slice to thin: U → M×K, Vt → K×N
+                auto ndim = static_cast<int>(U.ndim());
+                auto K = static_cast<int>(S.shape(static_cast<int>(S.ndim()) - 1));
+
+                // U[:, :K]
+                mlx::core::Shape u_start(ndim, 0);
+                auto u_stop = U.shape();
+                u_stop[ndim - 1] = K;
+                U = mlx::core::slice(U, u_start, u_stop);
+
+                // Vt[:K, :]
+                mlx::core::Shape vt_start(ndim, 0);
+                auto vt_stop = Vt.shape();
+                vt_stop[ndim - 2] = K;
+                Vt = mlx::core::slice(Vt, vt_start, vt_stop);
+            }
+
+            // JAX svd_p returns (s, u, vt) – singular values first!
+            values.emplace(ToKey(op->getResult(0)), std::move(S));
+            values.emplace(ToKey(op->getResult(1)), std::move(U));
+            values.emplace(ToKey(op->getResult(2)), std::move(Vt));
+        } else {
+            if (results.size() != 1) {
+                MPS_LOG_ERROR("mps.svd: MLX returned %zu results, expected 1\n", results.size());
+                return false;
+            }
+            values.emplace(ToKey(op->getResult(0)), std::move(results[0]));  // S
+        }
         return true;
     }
 
