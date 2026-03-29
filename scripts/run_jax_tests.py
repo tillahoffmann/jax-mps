@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Run upstream JAX test suite against the MPS backend and report pass rate.
 
-Runs each test file in a separate subprocess to bound memory usage.
-
 Usage:
     uv run python scripts/run_jax_tests.py [OPTIONS]
 
 Options:
-    --filter PATTERN    Only run test files matching glob pattern
     --results-dir DIR   Where to write results (default: /tmp/jax-test-results)
     --clone-dir DIR     Where to clone JAX tests (default: /tmp/jax-test-suite)
     --keep              Reuse existing clone
@@ -22,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from fnmatch import fnmatch
 from pathlib import Path
 
 # Files excluded from the suite
@@ -115,52 +111,10 @@ def parse_junit_xml(xml_path: Path) -> dict[str, int]:
     }
 
 
-def run_file(
-    test_file: Path, xml_dir: Path, timeout: int, project_root: Path
-) -> dict[str, int] | None:
-    """Run a single test file in a subprocess, return parsed counts or None."""
-    xml_path = xml_dir / f"{test_file.stem}.xml"
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        str(test_file),
-        f"--junitxml={xml_path}",
-        "--override-ini=addopts=",
-        "-p",
-        "no:faulthandler",
-        "-p",
-        "no:benchmark",
-        "--tb=no",
-        "-q",
-        f"--timeout={timeout}",
-        "--continue-on-collection-errors",
-    ]
-    env = {**os.environ, "JAX_PLATFORMS": "mps"}
-    try:
-        subprocess.run(
-            cmd,
-            capture_output=True,
-            cwd=project_root,
-            timeout=60 + timeout * 100,
-            env=env,
-        )  # generous file-level cap
-    except subprocess.TimeoutExpired:
-        pass
-
-    if xml_path.exists():
-        try:
-            return parse_junit_xml(xml_path)
-        except ET.ParseError:
-            return None
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Run JAX upstream tests against MPS backend"
     )
-    parser.add_argument("--filter", default="*_test.py", help="Glob for test files")
     parser.add_argument("--results-dir", default="/tmp/jax-test-results")
     parser.add_argument("--clone-dir", default="/tmp/jax-test-suite")
     parser.add_argument("--keep", action="store_true", help="Reuse existing clone")
@@ -184,34 +138,46 @@ def main():
 
     tests_dir = clone_jax_tests(version, clone_dir, keep=args.keep)
 
-    test_files = sorted(
-        f
-        for f in tests_dir.glob("*_test.py")
-        if fnmatch(f.name, args.filter) and f.name not in EXCLUDED_FILES
-    )
+    # Build ignore list for excluded files
+    ignore_args: list[str] = []
+    for name in sorted(EXCLUDED_FILES):
+        ignore_args.extend(["--ignore", str(tests_dir / name)])
     if EXCLUDED_FILES:
         print(f"Excluded: {', '.join(sorted(EXCLUDED_FILES))}")
-    print(f"Found {len(test_files)} test files\n")
 
-    # Run each file in a separate subprocess
-    totals = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "xfailed": 0}
-    crashed_files: list[str] = []
-    for i, tf in enumerate(test_files, 1):
-        print(f"[{i}/{len(test_files)}] {tf.name} ...", end=" ", flush=True)
-        counts = run_file(tf, xml_dir, args.timeout, project_root)
-        if counts is None:
-            print("CRASHED (no results)")
-            crashed_files.append(tf.name)
-            continue
-        for k in totals:
-            totals[k] += counts[k]
-        n = sum(counts.values())
-        print(
-            f"P={counts['passed']} F={counts['failed']} "
-            f"E={counts['errors']} S={counts['skipped']} ({n} tests)"
-        )
+    xml_path = xml_dir / "results.xml"
 
-    # Summary
+    # Remove stale results from a previous run
+    xml_path.unlink(missing_ok=True)
+
+    # Run pytest directly on the test suite
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(tests_dir),
+        *ignore_args,
+        f"--junitxml={xml_path}",
+        "--override-ini=addopts=",
+        "-p",
+        "no:faulthandler",
+        "-p",
+        "no:benchmark",
+        "--tb=no",
+        "-q",
+        f"--timeout={args.timeout}",
+        "--continue-on-collection-errors",
+    ]
+    env = {**os.environ, "JAX_PLATFORMS": "mps"}
+    print(f"\nRunning: pytest {tests_dir} ...\n")
+    subprocess.run(cmd, cwd=project_root, env=env)
+
+    # Parse results
+    if not xml_path.exists():
+        print("\nERROR: No JUnit XML produced — pytest may have crashed.")
+        sys.exit(1)
+
+    totals = parse_junit_xml(xml_path)
     total = sum(totals.values())
     available = total - totals["skipped"] - totals["xfailed"]
     passed = totals["passed"]
@@ -235,14 +201,8 @@ def main():
 
     summary_path = results_dir / "summary.txt"
     summary_path.write_text(f"{passed}/{available} ({pct:.1f}%) -- JAX {version}\n")
-    print(f"\nPer-file XML: {xml_dir}/")
-    print(f"Summary:      {summary_path}")
-
-    if crashed_files:
-        print(f"\nERROR: {len(crashed_files)} file(s) produced no results (crashed):")
-        for f in crashed_files:
-            print(f"  - {f}")
-        sys.exit(1)
+    print(f"\nJUnit XML: {xml_path}")
+    print(f"Summary:   {summary_path}")
 
 
 if __name__ == "__main__":

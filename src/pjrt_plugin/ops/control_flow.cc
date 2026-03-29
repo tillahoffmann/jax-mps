@@ -788,7 +788,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
         }
 
-        auto [eigenvalues, eigenvectors] = mlx::core::linalg::eigh(*a, lower ? "L" : "U");
+        auto a_contig = mlx::core::contiguous(*a);
+        auto [eigenvalues, eigenvectors] = mlx::core::linalg::eigh(a_contig, lower ? "L" : "U");
         values.emplace(ToKey(op->getResult(0)), std::move(eigenvectors));
         values.emplace(ToKey(op->getResult(1)), std::move(eigenvalues));
         return true;
@@ -817,7 +818,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
         }
 
-        auto [Q, R] = mlx::core::linalg::qr(*a);
+        auto a_contig = mlx::core::contiguous(*a);
+        auto [Q, R] = mlx::core::linalg::qr(a_contig);
 
         if (full_matrices) {
             // MLX QR returns thin: Q is M×K, R is K×N (K=min(M,N)).
@@ -886,7 +888,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
         }
 
-        auto results = mlx::core::linalg::svd(*a, compute_uv, {});
+        auto a_contig = mlx::core::contiguous(*a);
+        auto results = mlx::core::linalg::svd(a_contig, compute_uv, {});
 
         if (compute_uv) {
             if (results.size() != 3) {
