@@ -5,7 +5,6 @@ Usage:
     uv run python scripts/run_jax_tests.py [OPTIONS]
 
 Options:
-    --filter PATTERN    Only run test files matching glob pattern
     --results-dir DIR   Where to write results (default: /tmp/jax-test-results)
     --clone-dir DIR     Where to clone JAX tests (default: /tmp/jax-test-suite)
     --keep              Reuse existing clone
@@ -116,7 +115,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run JAX upstream tests against MPS backend"
     )
-    parser.add_argument("--filter", default="*_test.py", help="Glob for test files")
     parser.add_argument("--results-dir", default="/tmp/jax-test-results")
     parser.add_argument("--clone-dir", default="/tmp/jax-test-suite")
     parser.add_argument("--keep", action="store_true", help="Reuse existing clone")
@@ -147,31 +145,17 @@ def main():
     if EXCLUDED_FILES:
         print(f"Excluded: {', '.join(sorted(EXCLUDED_FILES))}")
 
-    # Build the file filter if not the default
-    file_args: list[str] = []
-    if args.filter != "*_test.py":
-        from fnmatch import fnmatch
-
-        file_args = sorted(
-            str(f)
-            for f in tests_dir.glob("*_test.py")
-            if fnmatch(f.name, args.filter) and f.name not in EXCLUDED_FILES
-        )
-        if not file_args:
-            print(f"No test files matching '{args.filter}'")
-            sys.exit(1)
-        print(f"Selected {len(file_args)} test files matching '{args.filter}'")
-    else:
-        file_args = [str(tests_dir)]
-
     xml_path = xml_dir / "results.xml"
+
+    # Remove stale results from a previous run
+    xml_path.unlink(missing_ok=True)
 
     # Run pytest directly on the test suite
     cmd = [
         sys.executable,
         "-m",
         "pytest",
-        *file_args,
+        str(tests_dir),
         *ignore_args,
         f"--junitxml={xml_path}",
         "--override-ini=addopts=",
@@ -185,7 +169,7 @@ def main():
         "--continue-on-collection-errors",
     ]
     env = {**os.environ, "JAX_PLATFORMS": "mps"}
-    print(f"\nRunning: pytest {' '.join(file_args)} ...\n")
+    print(f"\nRunning: pytest {tests_dir} ...\n")
     subprocess.run(cmd, cwd=project_root, env=env)
 
     # Parse results

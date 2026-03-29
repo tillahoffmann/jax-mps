@@ -513,6 +513,25 @@ def make_linalg_op_configs():
             marks=[_xfail_no_prim],
         )
 
+        # --- Non-contiguous inputs (broadcast arrays) ---
+        # MLX Metal kernels require contiguous inputs; verify our contiguous() fix.
+
+        yield OperationTestConfig(
+            _eigh_values,
+            lambda key: jnp.broadcast_to(_random_symmetric(key, 3), (2, 3, 3)),
+            name="eigh_values_broadcast",
+        )
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key: jnp.broadcast_to(random.normal(key, (4, 3)), (2, 4, 3)),
+            name="qr_reconstruct_broadcast",
+        )
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: jnp.broadcast_to(random.normal(key, (4, 3)), (2, 4, 3)),
+            name="svd_values_broadcast",
+        )
+
         # --- Large matrices beyond GPU kernel limits (github.com/tillahoffmann/jax-mps#119) ---
         _xfail_large = xfail_match("supports matrices up to|Output count mismatch")
 
