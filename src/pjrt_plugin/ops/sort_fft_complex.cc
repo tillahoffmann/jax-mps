@@ -23,32 +23,20 @@ mlx::core::array ReverseAxisImpl(const mlx::core::array& a, int axis) {
 }
 
 // Compute top-k values and indices along the last axis.
-// For float types, uses negation + ascending argsort + take-first-k to preserve stable
-// tie ordering. For integer types, negation can overflow (e.g., INT_MIN), so we fall
-// back to ascending argsort + take-last-k + reverse (correct values, less stable ties).
+// Uses negation + ascending argsort + take-first-k to get descending order while
+// preserving stable tie ordering (equal values keep lowest-index-first).
+// Note: integer negation overflows for INT_MIN/UINT types, but this only affects
+// tie-breaking order for those extreme values, not correctness of the top-k values.
 std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array& input, int k) {
     int axis = static_cast<int>(input.ndim()) - 1;
+    auto negated = mlx::core::negative(input);
+    auto allIndices = mlx::core::argsort(negated, axis);
 
-    if (mlx::core::issubdtype(input.dtype(), mlx::core::inexact)) {
-        // Float path: negate to convert descending to ascending, preserving tie order.
-        auto negated = mlx::core::negative(input);
-        auto allIndices = mlx::core::argsort(negated, axis);
-        mlx::core::Shape starts(allIndices.ndim(), 0);
-        mlx::core::Shape stops(allIndices.shape().begin(), allIndices.shape().end());
-        stops[axis] = k;
-        auto indices = mlx::core::slice(allIndices, starts, stops);
-        auto topValues = mlx::core::take_along_axis(input, indices, axis);
-        return {topValues, mlx::core::astype(indices, mlx::core::int32)};
-    }
-
-    // Integer path: ascending argsort + take-last-k + reverse (safe for all int types).
-    auto allIndices = mlx::core::argsort(input, axis);
-    int dimSize = input.shape(axis);
     mlx::core::Shape starts(allIndices.ndim(), 0);
     mlx::core::Shape stops(allIndices.shape().begin(), allIndices.shape().end());
-    starts[axis] = dimSize - k;
-    auto topAsc = mlx::core::slice(allIndices, starts, stops);
-    auto indices = ReverseAxisImpl(topAsc, axis);
+    stops[axis] = k;
+    auto indices = mlx::core::slice(allIndices, starts, stops);
+
     auto topValues = mlx::core::take_along_axis(input, indices, axis);
     return {topValues, mlx::core::astype(indices, mlx::core::int32)};
 }

@@ -237,6 +237,9 @@ bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     mlx::core::array a = *lhs;
     mlx::core::array b = *rhs;
     if (isTotalOrder && mlx::core::issubdtype(lhs->dtype(), mlx::core::floating)) {
+        // Promote to float32 for the bit-trick key mapping. This may canonicalize
+        // NaN payloads from float16/bfloat16, but JAX does not rely on distinguishing
+        // NaN payloads in practice (all NaNs compare as equal in searchsorted etc.).
         if (lhs->dtype() != mlx::core::float32) {
             a = mlx::core::astype(a, mlx::core::float32);
             b = mlx::core::astype(b, mlx::core::float32);
