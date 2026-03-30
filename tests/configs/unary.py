@@ -244,4 +244,12 @@ def make_unary_op_configs():
             differentiable_argnums=(),
             name="clz-int32",
         ),
+        # sign(NaN) must propagate NaN, not return 0
+        OperationTestConfig(
+            jnp.sign,
+            numpy.array(
+                [1.0, -1.0, 0.0, float("nan"), float("-inf")], dtype=numpy.float32
+            ),
+            name="sign-nan-propagation",
+        ),
     ]

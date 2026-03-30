@@ -384,4 +384,33 @@ def make_sort_op_configs():
             )
         )
 
+        # top_k with ties: test stable tie ordering (negate approach)
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.top_k(x, 3),
+                jnp.array([3.0, 1.0, 3.0, 2.0, 3.0]),
+                name="lax.top_k.ties",
+            )
+        )
+
+        # top_k with integer input (uses reverse path, not negate)
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.top_k(x, 3),
+                jnp.array([5, 3, 8, 1, 7], dtype=jnp.int32),
+                differentiable_argnums=(),
+                name="lax.top_k.int32",
+            )
+        )
+
+        # searchsorted with NaN (exercises TOTALORDER comparison)
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.searchsorted(x, x),
+                jnp.array([-jnp.inf, -1.0, 0.0, 1.0, jnp.inf, jnp.nan]),
+                differentiable_argnums=(),
+                name="jnp.searchsorted.nan",
+            )
+        )
+
         return configs

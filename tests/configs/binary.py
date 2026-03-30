@@ -283,4 +283,21 @@ def make_binary_op_configs():
                 differentiable_argnums=(),
                 name="lax.shift_right_arithmetic-negative-shift-count",
             ),
+            # Integer division: truncation toward zero (not float promotion)
+            OperationTestConfig(
+                lax.div,
+                numpy.array([7, -7, 7, -7, 0, 100], dtype=numpy.int32),
+                numpy.array([2, 2, -2, -2, 3, 7], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.div-integer-truncation",
+            ),
+            # Mixed unsigned/signed tensordot (exercises unsigned->signed convert
+            # workaround for ml-explore/mlx#3338)
+            OperationTestConfig(
+                lambda a, b: jnp.tensordot(a, b, axes=0),
+                numpy.array([1, 2, 3], dtype=numpy.int8),
+                numpy.array([10, 20, 30], dtype=numpy.uint16),
+                differentiable_argnums=(),
+                name="jnp.tensordot-mixed-unsigned-signed",
+            ),
         ]
