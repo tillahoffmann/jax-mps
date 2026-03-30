@@ -18,23 +18,33 @@ ReduceType DetectReduceType(mlir::Region& body) {
     if (body.empty())
         return ReduceType::Unknown;
 
+    // Only match bodies with exactly one "real" op (plus the return).
+    // Multi-op bodies (e.g., logaddexp: max + sub + exp + log1p + add + select)
+    // must not be misidentified as a simple reduction.
     auto& block = body.front();
+    int realOpCount = 0;
+    ReduceType detected = ReduceType::Unknown;
     for (auto& op : block.getOperations()) {
         auto opName = op.getName().getStringRef();
+        if (opName == "stablehlo.return")
+            continue;
+        ++realOpCount;
+        if (realOpCount > 1)
+            return ReduceType::Unknown;
         if (opName == "stablehlo.add")
-            return ReduceType::Sum;
-        if (opName == "stablehlo.maximum")
-            return ReduceType::Max;
-        if (opName == "stablehlo.minimum")
-            return ReduceType::Min;
-        if (opName == "stablehlo.multiply")
-            return ReduceType::Prod;
-        if (opName == "stablehlo.and")
-            return ReduceType::And;
-        if (opName == "stablehlo.or")
-            return ReduceType::Or;
+            detected = ReduceType::Sum;
+        else if (opName == "stablehlo.maximum")
+            detected = ReduceType::Max;
+        else if (opName == "stablehlo.minimum")
+            detected = ReduceType::Min;
+        else if (opName == "stablehlo.multiply")
+            detected = ReduceType::Prod;
+        else if (opName == "stablehlo.and")
+            detected = ReduceType::And;
+        else if (opName == "stablehlo.or")
+            detected = ReduceType::Or;
     }
-    return ReduceType::Unknown;
+    return detected;
 }
 
 // Detect argmax/argmin pattern in a 2-input reduce body.
