@@ -32,7 +32,7 @@ mlx::core::array DescendingKey(const mlx::core::array& input) {
     }
     // Integer (signed or unsigned): bitwise NOT reverses order without overflow.
     // Unsigned: NOT(0)=MAX, NOT(MAX)=0. Signed: NOT(MIN)=MAX, NOT(MAX)=MIN.
-    return mlx::core::bitwise_xor(input, mlx::core::full(input.shape(), -1, dtype));
+    return mlx::core::bitwise_xor(input, mlx::core::full({}, -1, dtype));
 }
 
 // Compute top-k values and indices along the last axis.

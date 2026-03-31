@@ -393,7 +393,7 @@ def make_sort_op_configs():
             )
         )
 
-        # top_k with integer input (exercises widen+negate path)
+        # top_k with integer input (exercises bitwise-NOT descending key)
         configs.append(
             OperationTestConfig(
                 lambda x: lax.top_k(x, 3),
