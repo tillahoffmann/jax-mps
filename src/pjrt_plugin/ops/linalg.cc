@@ -112,9 +112,11 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     auto resultDtype = GetResultDtype(op, "stablehlo.dot_general");
     if (!resultDtype)
         return false;
-    bool needsCast = !mlx::core::issubdtype(lhs->dtype(), mlx::core::inexact);
-    mlx::core::array lhsVal = needsCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
-    mlx::core::array rhsVal = needsCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
+    bool lhsNeedsCast = !mlx::core::issubdtype(lhs->dtype(), mlx::core::inexact);
+    bool rhsNeedsCast = !mlx::core::issubdtype(rhs->dtype(), mlx::core::inexact);
+    bool needsCast = lhsNeedsCast || rhsNeedsCast;
+    mlx::core::array lhsVal = lhsNeedsCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
+    mlx::core::array rhsVal = rhsNeedsCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
 
     // Try einsum path if enabled
     if (UseEinsumForDotGeneral()) {

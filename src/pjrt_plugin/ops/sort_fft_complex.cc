@@ -22,21 +22,32 @@ mlx::core::array ReverseAxisImpl(const mlx::core::array& a, int axis) {
     return mlx::core::take(a, fwd, axis);
 }
 
+// Build a descending sort key: ascending sort of the key gives descending order
+// of the original values, preserving stable tie ordering.
+mlx::core::array DescendingKey(const mlx::core::array& input) {
+    auto dtype = input.dtype();
+    if (mlx::core::issubdtype(dtype, mlx::core::inexact)) {
+        // Float/complex: negate (safe, no overflow issues).
+        return mlx::core::negative(input);
+    }
+    // Integer (signed or unsigned): bitwise NOT reverses order without overflow.
+    // Unsigned: NOT(0)=MAX, NOT(MAX)=0. Signed: NOT(MIN)=MAX, NOT(MAX)=MIN.
+    return mlx::core::bitwise_xor(input, mlx::core::full({}, -1, dtype));
+}
+
 // Compute top-k values and indices along the last axis.
-// Uses ascending argsort + take-from-end + reverse (no negation, safe for all dtypes).
+// Uses a descending sort key + ascending argsort + take-first-k to preserve stable
+// tie ordering (equal values keep lowest-index-first).
 std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array& input, int k) {
     int axis = static_cast<int>(input.ndim()) - 1;
-    auto allIndices = mlx::core::argsort(input, axis);
+    auto key = DescendingKey(input);
+    auto allIndices = mlx::core::argsort(key, axis);
 
-    // Take the last k indices (largest values in ascending order)
-    int dimSize = input.shape(axis);
     mlx::core::Shape starts(allIndices.ndim(), 0);
     mlx::core::Shape stops(allIndices.shape().begin(), allIndices.shape().end());
-    starts[axis] = dimSize - k;
-    auto topAsc = mlx::core::slice(allIndices, starts, stops);
+    stops[axis] = k;
+    auto indices = mlx::core::slice(allIndices, starts, stops);
 
-    // Reverse to get descending order
-    auto indices = ReverseAxisImpl(topAsc, axis);
     auto topValues = mlx::core::take_along_axis(input, indices, axis);
     return {topValues, mlx::core::astype(indices, mlx::core::int32)};
 }

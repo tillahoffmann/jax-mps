@@ -199,6 +199,22 @@ bool HandleSelect(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     return true;
 }
 
+// Convert float to a sortable integer key for IEEE 754 total ordering.
+// Maps floats to signed integers such that integer comparison gives total order:
+// -NaN < -inf < -finite < -0 < +0 < +finite < +inf < +NaN
+mlx::core::array FloatToTotalOrderKey(const mlx::core::array& x) {
+    auto bits = mlx::core::view(x, mlx::core::int32);
+    // For positive floats (sign bit 0), the int32 representation already has
+    // the correct order. For negative floats (sign bit 1), flip all value bits
+    // and subtract 1 to reverse their order.
+    auto zero = mlx::core::array(0, mlx::core::int32);
+    auto is_neg = mlx::core::less(bits, zero);
+    auto flipped = mlx::core::subtract(
+        mlx::core::bitwise_xor(bits, mlx::core::array(0x7FFFFFFF, mlx::core::int32)),
+        mlx::core::array(1, mlx::core::int32));
+    return mlx::core::where(is_neg, flipped, bits);
+}
+
 // Handler for stablehlo.compare
 bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                    ExecContext& ctx) {
@@ -212,27 +228,46 @@ bool HandleCompare(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         return false;
 
     auto direction = compareOp.getComparisonDirection();
-    std::optional<mlx::core::array> result;
+    auto compareType = compareOp.getCompareType();
 
+    // For TOTALORDER comparisons on floats, use IEEE 754 total ordering
+    // where NaN has a defined position: -NaN < -inf < ... < +inf < +NaN.
+    bool isTotalOrder =
+        compareType.has_value() && *compareType == mlir::stablehlo::ComparisonType::TOTALORDER;
+    mlx::core::array a = *lhs;
+    mlx::core::array b = *rhs;
+    if (isTotalOrder && mlx::core::issubdtype(lhs->dtype(), mlx::core::floating)) {
+        // Promote to float32 for the bit-trick key mapping. This may canonicalize
+        // NaN payloads from float16/bfloat16, but JAX does not rely on distinguishing
+        // NaN payloads in practice (all NaNs compare as equal in searchsorted etc.).
+        if (lhs->dtype() != mlx::core::float32) {
+            a = mlx::core::astype(a, mlx::core::float32);
+            b = mlx::core::astype(b, mlx::core::float32);
+        }
+        a = FloatToTotalOrderKey(a);
+        b = FloatToTotalOrderKey(b);
+    }
+
+    std::optional<mlx::core::array> result;
     using Dir = mlir::stablehlo::ComparisonDirection;
     switch (direction) {
         case Dir::EQ:
-            result = mlx::core::equal(*lhs, *rhs);
+            result = mlx::core::equal(a, b);
             break;
         case Dir::NE:
-            result = mlx::core::not_equal(*lhs, *rhs);
+            result = mlx::core::not_equal(a, b);
             break;
         case Dir::LT:
-            result = mlx::core::less(*lhs, *rhs);
+            result = mlx::core::less(a, b);
             break;
         case Dir::LE:
-            result = mlx::core::less_equal(*lhs, *rhs);
+            result = mlx::core::less_equal(a, b);
             break;
         case Dir::GT:
-            result = mlx::core::greater(*lhs, *rhs);
+            result = mlx::core::greater(a, b);
             break;
         case Dir::GE:
-            result = mlx::core::greater_equal(*lhs, *rhs);
+            result = mlx::core::greater_equal(a, b);
             break;
         default:
             MPS_LOG_ERROR("stablehlo.compare: unsupported comparison direction\n");
@@ -420,6 +455,47 @@ bool HandleReducePrecision(mlir::Operation* op, ValueMap& values,
     return true;
 }
 
+// Handler for stablehlo.divide
+// MLX divide promotes integer operands to float. StableHLO divide on integers
+// must be integer division (truncation toward zero), so use floor_divide for
+// integer types (MLX floor_divide on integers is C-style truncation division).
+bool HandleDivide(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                  ExecContext& ctx) {
+    auto* lhs = RequireValue(values, op->getOperand(0), "stablehlo.divide");
+    auto* rhs = RequireValue(values, op->getOperand(1), "stablehlo.divide");
+    if (!lhs || !rhs)
+        return false;
+    auto dtype = lhs->dtype();
+    bool isInteger =
+        (dtype == mlx::core::int8 || dtype == mlx::core::int16 || dtype == mlx::core::int32 ||
+         dtype == mlx::core::int64 || dtype == mlx::core::uint8 || dtype == mlx::core::uint16 ||
+         dtype == mlx::core::uint32 || dtype == mlx::core::uint64);
+    if (isInteger) {
+        values.emplace(ToKey(op->getResult(0)), mlx::core::floor_divide(*lhs, *rhs));
+    } else {
+        values.emplace(ToKey(op->getResult(0)), mlx::core::divide(*lhs, *rhs));
+    }
+    return true;
+}
+
+// Handler for stablehlo.sign
+// MLX sign returns 0 for NaN, but StableHLO requires NaN propagation.
+bool HandleSign(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                ExecContext& ctx) {
+    auto* x = RequireValue(values, op->getOperand(0), "stablehlo.sign");
+    if (!x)
+        return false;
+    auto result = mlx::core::sign(*x);
+    auto dtype = x->dtype();
+    bool isFloat = (dtype == mlx::core::float16 || dtype == mlx::core::bfloat16 ||
+                    dtype == mlx::core::float32 || dtype == mlx::core::complex64);
+    if (isFloat) {
+        result = mlx::core::where(mlx::core::isnan(*x), *x, result);
+    }
+    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    return true;
+}
+
 }  // namespace
 
 void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& handlers) {
@@ -438,7 +514,7 @@ void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& hand
     handlers.insert({"stablehlo.cosine", MakeUnaryHandler("stablehlo.cosine", mlx::core::cos)});
     handlers.insert({"stablehlo.tanh", MakeUnaryHandler("stablehlo.tanh", mlx::core::tanh)});
     handlers.insert({"stablehlo.tan", MakeUnaryHandler("stablehlo.tan", mlx::core::tan)});
-    handlers.insert({"stablehlo.sign", MakeUnaryHandler("stablehlo.sign", mlx::core::sign)});
+    handlers.insert({"stablehlo.sign", HandleSign});
     handlers.insert(
         {"stablehlo.log_plus_one", MakeUnaryHandler("stablehlo.log_plus_one", mlx::core::log1p)});
     handlers.insert({"stablehlo.round_nearest_even",
@@ -456,7 +532,7 @@ void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& hand
         {"stablehlo.subtract", MakeBinaryHandler("stablehlo.subtract", mlx::core::subtract)});
     handlers.insert(
         {"stablehlo.multiply", MakeBinaryHandler("stablehlo.multiply", mlx::core::multiply)});
-    handlers.insert({"stablehlo.divide", MakeBinaryHandler("stablehlo.divide", mlx::core::divide)});
+    handlers.insert({"stablehlo.divide", HandleDivide});
     handlers.insert(
         {"stablehlo.maximum", MakeBinaryHandler("stablehlo.maximum", mlx::core::maximum)});
     handlers.insert(

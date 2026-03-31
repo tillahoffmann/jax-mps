@@ -116,7 +116,32 @@ bool HandleConvert(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     if (!targetDtype)
         return false;
 
-    values.emplace(ToKey(op->getResult(0)), mlx::core::astype(*input, *targetDtype));
+    auto result = *input;
+    auto srcDtype = input->dtype();
+
+    // Workaround for https://github.com/ml-explore/mlx/issues/3338
+    // MLX compile() incorrectly fuses chained casts when converting from an unsigned
+    // integer type to a signed type followed by float promotion (e.g.,
+    // uint16->int32->float32 gets fused into a single kernel that misreads bytes).
+    // Work around by widening to the unsigned type of the target width, then using
+    // view() to reinterpret bits as signed. view() acts as a compile barrier (it is
+    // not fused with subsequent astype) and has zero runtime cost.
+    bool srcUnsigned = mlx::core::issubdtype(srcDtype, mlx::core::unsignedinteger);
+    bool tgtSigned = mlx::core::issubdtype(*targetDtype, mlx::core::signedinteger);
+    if (srcUnsigned && tgtSigned) {
+        mlx::core::Dtype targetUnsigned = mlx::core::uint32;
+        if (*targetDtype == mlx::core::int8)
+            targetUnsigned = mlx::core::uint8;
+        else if (*targetDtype == mlx::core::int16)
+            targetUnsigned = mlx::core::uint16;
+        else if (*targetDtype == mlx::core::int64)
+            targetUnsigned = mlx::core::uint64;
+        result = mlx::core::astype(result, targetUnsigned);
+        values.emplace(ToKey(op->getResult(0)), mlx::core::view(result, *targetDtype));
+        return true;
+    }
+
+    values.emplace(ToKey(op->getResult(0)), mlx::core::astype(result, *targetDtype));
     return true;
 }
 
