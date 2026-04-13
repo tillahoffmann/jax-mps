@@ -697,12 +697,7 @@ def register_fused_ops():
         (lax_lax.acosh_p, "mhlo.acosh"),
         (lax_lax.atanh_p, "mhlo.atanh"),
         (lax_special.erf_p, "mhlo.erf"),
-        # erf_inv is intentionally NOT intercepted: jax.random.normal uses it
-        # to transform uniform samples to Gaussian, and MLX's native erfinv
-        # differs from the CHLO-decomposed implementation in the LSB. That LSB
-        # difference propagates through random.normal → every test that uses
-        # normal inputs gets slightly different MPS vs CPU values, breaking
-        # downstream correctness comparisons that are tight by design.
+        (lax_special.erf_inv_p, "mhlo.erf_inv"),
     ]
     for prim, target in _mps_native_unary_ops:
         mlir.register_lowering(
