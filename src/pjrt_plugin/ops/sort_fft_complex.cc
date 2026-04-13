@@ -38,7 +38,9 @@ mlx::core::array DescendingKey(const mlx::core::array& input) {
 // Compute top-k values and indices along the last axis.
 // Uses a descending sort key + ascending argsort + take-first-k to preserve stable
 // tie ordering (equal values keep lowest-index-first).
-std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array& input, int k) {
+std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array& input_, int k) {
+    // argsort requires contiguous input; handle it here so callers don't have to.
+    auto input = mlx::core::contiguous(input_);
     int axis = static_cast<int>(input.ndim()) - 1;
     auto key = DescendingKey(input);
     auto allIndices = mlx::core::argsort(key, axis);
@@ -234,8 +236,7 @@ bool HandleChloTopK(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
         return false;
 
     int k = static_cast<int>(topKOp.getK());
-    auto input = mlx::core::contiguous(*input_ptr);
-    auto [topValues, indices] = TopKImplFn(input, k);
+    auto [topValues, indices] = TopKImplFn(*input_ptr, k);
     values.emplace(ToKey(op->getResult(0)), std::move(topValues));
     values.emplace(ToKey(op->getResult(1)), std::move(indices));
     return true;

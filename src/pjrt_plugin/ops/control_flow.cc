@@ -331,8 +331,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
 
         auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
         int k = static_cast<int>(resultType.getShape().back());
-        auto contiguous_input = mlx::core::contiguous(*input);
-        auto [topValues, indices] = TopKImpl(contiguous_input, k);
+        auto [topValues, indices] = TopKImpl(*input, k);
         values.emplace(ToKey(op->getResult(0)), std::move(topValues));
         values.emplace(ToKey(op->getResult(1)), std::move(indices));
         return true;
@@ -995,10 +994,9 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
 
     // Handle chlo.top_k natively using shared TopKImpl
     if (inputs.size() == 1 && op->getNumResults() == 2 && compositeName == "chlo.top_k") {
-        auto input = mlx::core::contiguous(inputs[0]);
         auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
         int k = static_cast<int>(resultType.getShape().back());
-        auto [topValues, indices] = TopKImpl(input, k);
+        auto [topValues, indices] = TopKImpl(inputs[0], k);
         values.emplace(ToKey(op->getResult(0)), std::move(topValues));
         values.emplace(ToKey(op->getResult(1)), std::move(indices));
         return true;
