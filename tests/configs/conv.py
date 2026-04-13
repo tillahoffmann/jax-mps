@@ -14,13 +14,13 @@ def make_conv_op_configs():
                     padding="SAME",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 8, 8, 3)),
-                lambda key: random.normal(key, (3, 3, 3, 8)),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 3, 8), minval=-1.0, maxval=1.0),
             ),
             OperationTestConfig(
                 lambda lhs, rhs: lax.conv(lhs, rhs, (1, 1), "SAME"),
-                lambda key: random.normal(key, (1, 3, 8, 8)),
-                lambda key: random.normal(key, (16, 3, 3, 3)),
+                lambda key: random.uniform(key, (1, 3, 8, 8), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (16, 3, 3, 3), minval=-1.0, maxval=1.0),
                 name="lax.conv-SAME",
             ),
             OperationTestConfig(
@@ -31,8 +31,8 @@ def make_conv_op_configs():
                     padding="SAME",
                     dimension_numbers=("NWC", "WIO", "NWC"),
                 ),
-                lambda key: random.normal(key, (2, 16, 3)),
-                lambda key: random.normal(key, (3, 3, 4)),
+                lambda key: random.uniform(key, (2, 16, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 4), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-1d-NWC",
             ),
             # Strided 2D convolutions with SAME padding
@@ -44,8 +44,8 @@ def make_conv_op_configs():
                     padding="SAME",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 8, 8, 3)),
-                lambda key: random.normal(key, (3, 3, 3, 8)),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 3, 8), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-stride2-SAME",
             ),
             # Asymmetric padding test
@@ -57,8 +57,8 @@ def make_conv_op_configs():
                     padding=((1, 0), (1, 0)),
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 8, 8, 3)),
-                lambda key: random.normal(key, (3, 3, 3, 8)),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 3, 8), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-stride2-asymmetric",
             ),
             # Larger kernel with stride
@@ -70,8 +70,10 @@ def make_conv_op_configs():
                     padding="SAME",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 16, 16, 3)),
-                lambda key: random.normal(key, (5, 5, 3, 8)),
+                lambda key: random.uniform(
+                    key, (2, 16, 16, 3), minval=-1.0, maxval=1.0
+                ),
+                lambda key: random.uniform(key, (5, 5, 3, 8), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-5x5-stride2",
             ),
             # Stride + dilation combined
@@ -84,8 +86,10 @@ def make_conv_op_configs():
                     rhs_dilation=(2, 2),
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 16, 16, 3)),
-                lambda key: random.normal(key, (3, 3, 3, 8)),
+                lambda key: random.uniform(
+                    key, (2, 16, 16, 3), minval=-1.0, maxval=1.0
+                ),
+                lambda key: random.uniform(key, (3, 3, 3, 8), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-stride2-dilated",
             ),
             # VALID padding with stride
@@ -97,8 +101,10 @@ def make_conv_op_configs():
                     padding="VALID",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (2, 16, 16, 3)),
-                lambda key: random.normal(key, (3, 3, 3, 8)),
+                lambda key: random.uniform(
+                    key, (2, 16, 16, 3), minval=-1.0, maxval=1.0
+                ),
+                lambda key: random.uniform(key, (3, 3, 3, 8), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-stride2-VALID",
             ),
             # 1D strided + dilated
@@ -111,8 +117,8 @@ def make_conv_op_configs():
                     rhs_dilation=(2,),
                     dimension_numbers=("NWC", "WIO", "NWC"),
                 ),
-                lambda key: random.normal(key, (2, 32, 3)),
-                lambda key: random.normal(key, (3, 3, 4)),
+                lambda key: random.uniform(key, (2, 32, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 4), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-1d-stride2-dilated",
             ),
             # Large-kernel conv where kernel_size >= input_size with SAME padding.
@@ -126,8 +132,8 @@ def make_conv_op_configs():
                     padding="SAME",
                     dimension_numbers=("NHWC", "HWIO", "NHWC"),
                 ),
-                lambda key: random.normal(key, (1, 4, 4, 3)),
-                lambda key: random.normal(key, (8, 8, 3, 16)),
+                lambda key: random.uniform(key, (1, 4, 4, 3), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (8, 8, 3, 16), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-large-kernel",
             ),
         ]

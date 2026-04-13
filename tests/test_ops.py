@@ -294,6 +294,38 @@ def test_unsupported_op_error_message(jit: bool) -> None:
             pytest.skip("clz is now supported; test needs a new unregistered op")
 
 
+@pytest.mark.parametrize(
+    "jax_fn,target",
+    [
+        (jnp.sinh, "mhlo.sinh"),
+        (jnp.cosh, "mhlo.cosh"),
+        (jnp.arcsin, "mhlo.asin"),
+        (jnp.arccos, "mhlo.acos"),
+        (jnp.arctan, "mhlo.atan"),
+        (jnp.arcsinh, "mhlo.asinh"),
+        (jnp.arccosh, "mhlo.acosh"),
+        (jnp.arctanh, "mhlo.atanh"),
+        (jax.lax.erf, "mhlo.erf"),
+        (jax.scipy.special.erfinv, "mhlo.erf_inv"),
+    ],
+)
+def test_unary_ops_lower_to_mhlo_custom_call(jax_fn, target) -> None:
+    """Regression: ensure our MPS-platform lowerings in jax_plugins.mps.ops
+    keep these ops as stablehlo.custom_call @mhlo.<name> instead of letting
+    JAX decompose them through CHLO. A future JAX pipeline change that
+    silently reintroduces the decomposition would make this fail."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    device = jax.devices("mps")[0]
+    with jax.default_device(device):
+        x = jnp.ones((3,), dtype=jnp.float32)
+        ir_text = str(jax.jit(jax_fn).lower(x).compiler_ir(dialect="stablehlo"))
+    assert f"@{target}" in ir_text, (
+        f"Expected `@{target}` in lowered IR; got:\n{ir_text}"
+    )
+
+
 def test_rng_bit_generator() -> None:
     """Test that stablehlo.rng_bit_generator produces valid output and correct state."""
     OperationTestConfig.EXERCISED_STABLEHLO_OPS.add("stablehlo.rng_bit_generator")
