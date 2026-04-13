@@ -658,7 +658,14 @@ def _make_native_unary_lowering(call_target_name):
 
 
 def register_fused_ops():
-    """Register MLIR lowerings for all fused ops on the MPS platform."""
+    """Register MPS MLIR lowerings for fused custom_calls and related ops.
+
+    Covers fused forward/backward primitives (sdpa, rms_norm, layer_norm, rope,
+    gelu), linalg custom lowerings (eigh, qr, svd), CPU/GPU fallback lowerings
+    for the fused primitives, and MPS-specific lowerings of JAX unary
+    primitives (sinh, cosh, asin, acos, atan, asinh, acosh, atanh, erf,
+    erf_inv) that would otherwise decompose through CHLO.
+    """
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
     mlir.register_lowering(_sdpa_causal_p, _sdpa_causal_lowering, platform="mps")
     mlir.register_lowering(_rms_norm_p, _rms_norm_lowering, platform="mps")

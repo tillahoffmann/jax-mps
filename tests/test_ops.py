@@ -320,7 +320,7 @@ def test_unary_ops_lower_to_mhlo_custom_call(jax_fn, target) -> None:
     device = jax.devices("mps")[0]
     with jax.default_device(device):
         x = jnp.ones((3,), dtype=jnp.float32)
-        ir_text = str(jax.jit(jax_fn).lower(x).compiler_ir("stablehlo"))
+        ir_text = str(jax.jit(jax_fn).lower(x).compiler_ir(dialect="stablehlo"))
     assert f"@{target}" in ir_text, (
         f"Expected `@{target}` in lowered IR; got:\n{ir_text}"
     )
