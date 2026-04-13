@@ -651,6 +651,7 @@ def _make_native_unary_lowering(call_target_name):
             call_target_name=call_target_name,
             result_types=[mlir.aval_to_ir_type(aval_out)],
             operands=[x],
+            backend_config="",
         ).results
 
     return _lowering
