@@ -7,12 +7,11 @@
 #include <mlx/random.h>
 #include <mlx/transforms.h>
 
-#include <cstdlib>
-#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
 
+#include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -35,6 +34,30 @@ const std::unordered_map<std::string_view, UnaryMlxFn>& UnaryMlxOps() {
         {"erf_inv", mlx::core::erfinv},
     };
     return kOps;
+}
+
+// Parse the custom_call's backend_config (a JSON string, emitted by our Python
+// lowerings in src/jax_plugins/mps/ops.py) into a JSON object. Returns an empty
+// object on any failure, so callers can freely probe for keys with defaults.
+//
+// Note: unregistered MLIR attributes (e.g. `mhlo.backend_config = {...}`) do
+// not round-trip through StableHLO portable artifacts, so we can't pass a
+// typed DictAttr here — JSON-in-a-string is the stable wire format.
+llvm::json::Object ParseBackendConfig(mlir::stablehlo::CustomCallOp op) {
+    auto bcAttr = op.getBackendConfig();
+    if (!bcAttr)
+        return {};
+    auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr);
+    if (!strAttr || strAttr.getValue().empty())
+        return {};
+    auto parsed = llvm::json::parse(strAttr.getValue());
+    if (!parsed) {
+        llvm::consumeError(parsed.takeError());
+        return {};
+    }
+    if (auto* obj = parsed->getAsObject())
+        return std::move(*obj);
+    return {};
 }
 
 // Convert a boolean mask to an additive attention mask (true -> 0, false -> -1e9)
@@ -354,16 +377,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"scale\":");
-                if (pos != std::string::npos) {
-                    scale = std::stof(cfg.substr(pos + 8));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("scale"))
+            scale = static_cast<float>(*v);
 
         auto additive_mask = BoolMaskToAdditive(*mask, queries->dtype());
         auto result = mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale,
@@ -385,16 +401,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"scale\":");
-                if (pos != std::string::npos) {
-                    scale = std::stof(cfg.substr(pos + 8));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("scale"))
+            scale = static_cast<float>(*v);
 
         auto result =
             mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale, "causal");
@@ -416,16 +425,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float eps = 1e-6F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"eps\":");
-                if (pos != std::string::npos) {
-                    eps = std::stof(cfg.substr(pos + 6));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("eps"))
+            eps = static_cast<float>(*v);
 
         // MLX rms_norm applies: x / sqrt(mean(x^2) + eps) * weight
         // Gemma's RMSNorm uses (1 + weight), so we pass (1 + weight) here.
@@ -450,16 +452,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float eps = 1e-5F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"eps\":");
-                if (pos != std::string::npos) {
-                    eps = std::stof(cfg.substr(pos + 6));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("eps"))
+            eps = static_cast<float>(*v);
 
         auto result = mlx::core::fast::layer_norm(*x, *weight, *bias, eps);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
@@ -481,16 +476,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float eps = 1e-5F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"eps\":");
-                if (pos != std::string::npos) {
-                    eps = std::stof(cfg.substr(pos + 6));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("eps"))
+            eps = static_cast<float>(*v);
 
         auto vjp_fn = [eps](const std::vector<mlx::core::array>& primals) {
             return std::vector<mlx::core::array>{
@@ -521,33 +509,15 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         bool traditional = false;
         float base = 10000.0F;
         float rope_scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto findFloat = [&](const char* key) -> std::optional<float> {
-                    auto pos = cfg.find(key);
-                    if (pos != std::string::npos)
-                        return std::stof(cfg.substr(pos + std::strlen(key)));
-                    return std::nullopt;
-                };
-                auto findInt = [&](const char* key) -> std::optional<int> {
-                    auto pos = cfg.find(key);
-                    if (pos != std::string::npos)
-                        return std::stoi(cfg.substr(pos + std::strlen(key)));
-                    return std::nullopt;
-                };
-                if (auto v = findInt("\"dims\":"))
-                    dims = *v;
-                if (auto v = findFloat("\"base\":"))
-                    base = *v;
-                if (auto v = findFloat("\"rope_scale\":"))
-                    rope_scale = *v;
-                if (cfg.find("\"traditional\": true") != std::string::npos ||
-                    cfg.find("\"traditional\":true") != std::string::npos)
-                    traditional = true;
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getInteger("dims"))
+            dims = static_cast<int>(*v);
+        if (auto v = bc.getNumber("base"))
+            base = static_cast<float>(*v);
+        if (auto v = bc.getNumber("rope_scale"))
+            rope_scale = static_cast<float>(*v);
+        if (auto v = bc.getBoolean("traditional"))
+            traditional = *v;
 
         auto result = mlx::core::fast::rope(*x, dims, traditional, base, rope_scale, *offsetArr);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
@@ -598,16 +568,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"scale\":");
-                if (pos != std::string::npos) {
-                    scale = std::stof(cfg.substr(pos + 8));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("scale"))
+            scale = static_cast<float>(*v);
 
         auto additive_mask = BoolMaskToAdditive(*mask, q->dtype());
         auto vjp_fn = [scale, &additive_mask](const std::vector<mlx::core::array>& primals) {
@@ -635,16 +598,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"scale\":");
-                if (pos != std::string::npos) {
-                    scale = std::stof(cfg.substr(pos + 8));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("scale"))
+            scale = static_cast<float>(*v);
 
         auto vjp_fn = [scale](const std::vector<mlx::core::array>& primals) {
             return std::vector<mlx::core::array>{mlx::core::fast::scaled_dot_product_attention(
@@ -672,16 +628,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
 
         float eps = 1e-6F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto pos = cfg.find("\"eps\":");
-                if (pos != std::string::npos) {
-                    eps = std::stof(cfg.substr(pos + 6));
-                }
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("eps"))
+            eps = static_cast<float>(*v);
 
         auto vjp_fn = [eps](const std::vector<mlx::core::array>& primals) {
             return std::vector<mlx::core::array>{
@@ -711,33 +660,15 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         bool traditional = false;
         float base = 10000.0F;
         float rope_scale = 1.0F;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                auto findFloat = [&](const char* key) -> std::optional<float> {
-                    auto pos = cfg.find(key);
-                    if (pos != std::string::npos)
-                        return std::stof(cfg.substr(pos + std::strlen(key)));
-                    return std::nullopt;
-                };
-                auto findInt = [&](const char* key) -> std::optional<int> {
-                    auto pos = cfg.find(key);
-                    if (pos != std::string::npos)
-                        return std::stoi(cfg.substr(pos + std::strlen(key)));
-                    return std::nullopt;
-                };
-                if (auto v = findInt("\"dims\":"))
-                    dims = *v;
-                if (auto v = findFloat("\"base\":"))
-                    base = *v;
-                if (auto v = findFloat("\"rope_scale\":"))
-                    rope_scale = *v;
-                if (cfg.find("\"traditional\": true") != std::string::npos ||
-                    cfg.find("\"traditional\":true") != std::string::npos)
-                    traditional = true;
-            }
-        }
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getInteger("dims"))
+            dims = static_cast<int>(*v);
+        if (auto v = bc.getNumber("base"))
+            base = static_cast<float>(*v);
+        if (auto v = bc.getNumber("rope_scale"))
+            rope_scale = static_cast<float>(*v);
+        if (auto v = bc.getBoolean("traditional"))
+            traditional = *v;
 
         auto vjp_fn = [dims, traditional, base, rope_scale,
                        &offsetArr](const std::vector<mlx::core::array>& primals) {
@@ -790,17 +721,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (!a)
             return false;
 
-        // Parse lower from backend_config (default true).
         bool lower = true;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                if (cfg.find("\"lower\": false") != std::string::npos ||
-                    cfg.find("\"lower\":false") != std::string::npos)
-                    lower = false;
-            }
-        }
+        if (auto v = ParseBackendConfig(customCallOp).getBoolean("lower"))
+            lower = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
         auto [eigenvalues, eigenvectors] = mlx::core::linalg::eigh(a_contig, lower ? "L" : "U");
@@ -820,17 +743,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (!a)
             return false;
 
-        // Parse full_matrices from backend_config (default false).
         bool full_matrices = false;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                if (cfg.find("\"full_matrices\": true") != std::string::npos ||
-                    cfg.find("\"full_matrices\":true") != std::string::npos)
-                    full_matrices = true;
-            }
-        }
+        if (auto v = ParseBackendConfig(customCallOp).getBoolean("full_matrices"))
+            full_matrices = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
         auto [Q, R] = mlx::core::linalg::qr(a_contig);
@@ -890,17 +805,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         }
         bool compute_uv = (op->getNumResults() == 3);
 
-        // Parse full_matrices from backend_config (default true).
         bool full_matrices = true;
-        auto bcAttr = customCallOp.getBackendConfig();
-        if (bcAttr) {
-            if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(*bcAttr)) {
-                auto cfg = strAttr.getValue().str();
-                if (cfg.find("\"full_matrices\": false") != std::string::npos ||
-                    cfg.find("\"full_matrices\":false") != std::string::npos)
-                    full_matrices = false;
-            }
-        }
+        if (auto v = ParseBackendConfig(customCallOp).getBoolean("full_matrices"))
+            full_matrices = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
         auto results = mlx::core::linalg::svd(a_contig, compute_uv, {});
