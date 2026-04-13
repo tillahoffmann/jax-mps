@@ -11,6 +11,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "pjrt_plugin/ops/handler_utils.h"
@@ -21,10 +22,11 @@ namespace jax_mps {
 namespace {
 
 // Shared unary op table used by both the mhlo.* custom_call path (HandleCustomCall)
-// and the chlo.* composite path (HandleComposite). Keyed by the bare op name; callers
-// strip the "mhlo." / "chlo." prefix before looking up.
-const std::unordered_map<std::string, UnaryMlxFn>& UnaryMlxOps() {
-    static const std::unordered_map<std::string, UnaryMlxFn> kOps = {
+// and the chlo.* composite path (HandleComposite). Keyed by the bare op name as a
+// string_view pointing into the static string literals below, so callers can
+// probe with a string_view into the original op name without allocating.
+const std::unordered_map<std::string_view, UnaryMlxFn>& UnaryMlxOps() {
+    static const std::unordered_map<std::string_view, UnaryMlxFn> kOps = {
         {"sinh", mlx::core::sinh},      {"cosh", mlx::core::cosh},
         {"tan", mlx::core::tan},        {"asin", mlx::core::arcsin},
         {"acos", mlx::core::arccos},    {"atan", mlx::core::arctan},
@@ -297,11 +299,12 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     }
 
     // Handle unary mhlo.* custom calls via the shared unary op table.
+    // Use string_view throughout so the lookup doesn't allocate.
     static constexpr std::string_view kMhloPrefix = "mhlo.";
-    if (callTargetName.compare(0, kMhloPrefix.size(), kMhloPrefix) == 0) {
-        auto bareName = callTargetName.substr(kMhloPrefix.size());
+    std::string_view callName{callTargetName};
+    if (callName.substr(0, kMhloPrefix.size()) == kMhloPrefix) {
         const auto& unaryOps = UnaryMlxOps();
-        auto unaryIt = unaryOps.find(bareName);
+        auto unaryIt = unaryOps.find(callName.substr(kMhloPrefix.size()));
         if (unaryIt != unaryOps.end()) {
             if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
                 MPS_LOG_ERROR("stablehlo.custom_call %s: expected 1 input and 1 output\n",
@@ -971,12 +974,13 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     }
 
     // Try native MLX dispatch for known single-input CHLO composite ops,
-    // via the shared unary op table.
+    // via the shared unary op table. Use string_view to avoid per-lookup allocation.
     static constexpr std::string_view kChloPrefix = "chlo.";
+    std::string_view compName{compositeName};
     if (inputs.size() == 1 && op->getNumResults() == 1 &&
-        compositeName.compare(0, kChloPrefix.size(), kChloPrefix) == 0) {
+        compName.substr(0, kChloPrefix.size()) == kChloPrefix) {
         const auto& unaryOps = UnaryMlxOps();
-        auto it = unaryOps.find(compositeName.substr(kChloPrefix.size()));
+        auto it = unaryOps.find(compName.substr(kChloPrefix.size()));
         if (it != unaryOps.end()) {
             values.emplace(ToKey(op->getResult(0)), it->second(inputs[0], {}));
             return true;
