@@ -15,7 +15,9 @@ import jax
 import jax.numpy as jnp
 from jax._src import core
 from jax._src.interpreters import mlir
+from jax._src.lax import lax as lax_lax
 from jax._src.lax import linalg as lax_linalg
+from jax._src.lax import special as lax_special
 
 # ---------------------------------------------------------------------------
 # Scaled Dot-Product Attention (mps.sdpa)
@@ -637,6 +639,23 @@ def _svd_lowering(
         ).results
 
 
+def _make_native_unary_lowering(call_target_name):
+    """Return a JAX MLIR lowering that emits a stablehlo.custom_call with the
+    given target name (expected to be one of the mhlo.* entries recognized by
+    our C++ HandleCustomCall). Keeps us off the CHLO decomposition path so the
+    unary op stays a single MLX kernel call."""
+
+    def _lowering(ctx, x):
+        (aval_out,) = ctx.avals_out
+        return mlir.custom_call(
+            call_target_name=call_target_name,
+            result_types=[mlir.aval_to_ir_type(aval_out)],
+            operands=[x],
+        ).results
+
+    return _lowering
+
+
 def register_fused_ops():
     """Register MLIR lowerings for all fused ops on the MPS platform."""
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
@@ -660,6 +679,35 @@ def register_fused_ops():
     mlir.register_lowering(lax_linalg.eigh_p, _eigh_lowering, platform="mps")
     mlir.register_lowering(lax_linalg.qr_p, _qr_lowering, platform="mps")
     mlir.register_lowering(lax_linalg.svd_p, _svd_lowering, platform="mps")
+
+    # Intercept unary ops that JAX would normally lower to chlo.* primitives
+    # (then decomposed to stablehlo.exp / add / etc. by CHLO legalization) and
+    # route them directly to our native MLX implementation via a
+    # stablehlo.custom_call @mhlo.* — which the C++ dispatcher handles in
+    # HandleCustomCall with a single call to mlx::core::sinh/cosh/arcsin/....
+    # Ops that JAX already lowers to a native stablehlo primitive we handle
+    # (tan, atan2) are deliberately NOT in this list.
+    _mps_native_unary_ops = [
+        (lax_lax.sinh_p, "mhlo.sinh"),
+        (lax_lax.cosh_p, "mhlo.cosh"),
+        (lax_lax.asin_p, "mhlo.asin"),
+        (lax_lax.acos_p, "mhlo.acos"),
+        (lax_lax.atan_p, "mhlo.atan"),
+        (lax_lax.asinh_p, "mhlo.asinh"),
+        (lax_lax.acosh_p, "mhlo.acosh"),
+        (lax_lax.atanh_p, "mhlo.atanh"),
+        (lax_special.erf_p, "mhlo.erf"),
+        # erf_inv is intentionally NOT intercepted: jax.random.normal uses it
+        # to transform uniform samples to Gaussian, and MLX's native erfinv
+        # differs from the CHLO-decomposed implementation in the LSB. That LSB
+        # difference propagates through random.normal → every test that uses
+        # normal inputs gets slightly different MPS vs CPU values, breaking
+        # downstream correctness comparisons that are tight by design.
+    ]
+    for prim, target in _mps_native_unary_ops:
+        mlir.register_lowering(
+            prim, _make_native_unary_lowering(target), platform="mps"
+        )
 
     # Fallback lowerings for non-MPS platforms (CPU, GPU).
     mlir.register_lowering(
