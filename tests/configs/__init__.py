@@ -5,6 +5,7 @@ from .conv import make_conv_op_configs
 from .conversion import make_conversion_op_configs
 from .flax import make_flax_op_configs
 from .fused import make_fused_op_configs
+from .fusion import FusionTestConfig, make_fusion_configs
 from .linalg import make_linalg_op_configs
 from .matmul import make_matmul_op_configs
 from .misc import make_misc_op_configs
@@ -18,6 +19,7 @@ from .unary import make_unary_op_configs
 from .util import OperationTestConfig
 
 __all__ = [
+    "FusionTestConfig",
     "OperationTestConfig",
     "make_benchmark_op_configs",
     "make_binary_op_configs",
@@ -26,6 +28,7 @@ __all__ = [
     "make_conversion_op_configs",
     "make_flax_op_configs",
     "make_fused_op_configs",
+    "make_fusion_configs",
     "make_linalg_op_configs",
     "make_matmul_op_configs",
     "make_misc_op_configs",

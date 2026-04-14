@@ -830,6 +830,27 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         return true;
     }
 
+    // Handle mps.addmm — fused matmul + bias emitted by the fuse_bias_add
+    // StableHLO rewrite pattern. Inputs: lhs, rhs, bias (1D, size = trailing
+    // output dim). Computes bias + lhs @ rhs with the standard matmul layout
+    // (contracting dims = last of lhs / first of rhs after any leading batch
+    // dims).
+    if (callTargetName == "mps.addmm") {
+        if (op->getNumOperands() != 3 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.addmm: expected 3 inputs and 1 output\n");
+            return false;
+        }
+        auto* lhs = RequireValue(values, op->getOperand(0), "mps.addmm");
+        auto* rhs = RequireValue(values, op->getOperand(1), "mps.addmm");
+        auto* bias = RequireValue(values, op->getOperand(2), "mps.addmm");
+        if (!lhs || !rhs || !bias)
+            return false;
+
+        auto result = mlx::core::addmm(*bias, *lhs, *rhs);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
     // Handle mps.layer_norm — fused layer normalization via mlx::core::fast.
     // Inputs: x, weight, bias
     // backend_config: {"eps": <float>}

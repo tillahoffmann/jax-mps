@@ -137,6 +137,35 @@ set(PJRT_SOURCES
     ${PROTO_SRCS}
 )
 
+# Pass library: compiled -fno-rtti to match MLIR's build convention so we can
+# inherit from RewritePattern/PassWrapper. Linked into the shared lib below
+# so the final wheel ships a single dylib. Position-independent so it can go
+# into a shared library. No exceptions cross this boundary — MLIR uses
+# LogicalResult, not exceptions — so RTTI-mismatched std::exception catching
+# isn't an issue.
+add_library(pjrt_plugin_passes STATIC
+    src/pjrt_plugin/passes/mps_fusion_pass.cc
+    src/pjrt_plugin/passes/fuse_bias_add.cc
+)
+set_target_properties(pjrt_plugin_passes PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+# -fno-rtti matches MLIR's build (prevents undefined typeinfo for base classes).
+# -fno-exceptions declares that nothing in here throws — MLIR uses LogicalResult
+# and we only call non-throwing interfaces — so this TU doesn't need to emit any
+# std::exception typeinfo that could clash with the -frtti main lib's.
+# Hidden visibility keeps any incidental weak symbols (std lib template
+# instantiations) local to this TU so they don't merge with the main lib's.
+target_compile_options(pjrt_plugin_passes PRIVATE -fno-rtti -fno-exceptions)
+target_include_directories(pjrt_plugin_passes PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${LLVM_INCLUDE_DIRS}
+    ${MLIR_INCLUDE_DIRS}
+    ${STABLEHLO_INCLUDE_DIR}
+)
+
 add_library(pjrt_plugin_mps SHARED ${PJRT_SOURCES})
 
 target_include_directories(pjrt_plugin_mps PRIVATE
@@ -240,6 +269,7 @@ if(UTF8_VALIDITY_LIB)
 endif()
 
 target_link_libraries(pjrt_plugin_mps PRIVATE
+    pjrt_plugin_passes
     ${METAL_FRAMEWORK}
     ${MPS_FRAMEWORK}
     ${STABLEHLO_LIBS}
@@ -248,6 +278,10 @@ target_link_libraries(pjrt_plugin_mps PRIVATE
     ${UTF8_LIBS}
     ${ABSL_LIBS}
     mlx
+)
+target_link_libraries(pjrt_plugin_passes PRIVATE
+    ${STABLEHLO_LIBS}
+    ${MLIR_LIBS}
 )
 
 # For wheel distribution: ensure RPATH is set correctly

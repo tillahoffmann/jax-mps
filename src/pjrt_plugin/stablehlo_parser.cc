@@ -3,8 +3,10 @@
 
 #include "pjrt_plugin/stablehlo_parser.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <system_error>
 #include <unordered_set>
 
 #include "llvm/Support/MemoryBuffer.h"
@@ -20,6 +22,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/ops/registry.h"
+#include "pjrt_plugin/passes/mps_fusion_pass.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/Serialization.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -69,6 +72,10 @@ bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
     // Algebraic simplification: x*1 -> x, x+0 -> x, etc.
     pm.addNestedPass<mlir::func::FuncOp>(
         mlir::stablehlo::createStablehloAggressiveSimplificationPass());
+    // MPS-specific fusions (matmul+bias -> addmm, etc.). Run after upstream
+    // simplification so patterns like x+0 are already cleaned up before we
+    // try to match.
+    pm.addNestedPass<mlir::func::FuncOp>(createMpsFusionPass());
 
     if (mlir::failed(pm.run(module))) {
         fprintf(stderr,
@@ -155,6 +162,20 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
     // failed pass may leave the module partially transformed.
     if (!runOptimizationPasses(*context, *module)) {
         return result;
+    }
+
+    // Optional: dump the post-pass module to a file. Tests use this to inspect
+    // the IR that our passes produced (see tests/test_fusion.py). Path is the
+    // env var's value; one file per parsed module, named after a counter.
+    if (const char* dumpPath = std::getenv("JAX_MPS_DUMP_OPTIMIZED_IR")) {
+        static std::atomic<int> counter{0};
+        int id = counter.fetch_add(1);
+        std::string filename = std::string(dumpPath) + "/module_" + std::to_string(id) + ".mlir";
+        std::error_code ec;
+        llvm::raw_fd_ostream os(filename, ec);
+        if (!ec) {
+            module->print(os);
+        }
     }
 
     // Find the entry function
