@@ -11,6 +11,7 @@
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Bytecode/BytecodeReader.h"
@@ -175,8 +176,11 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
             MPS_LOG_WARN("JAX_MPS_DUMP_OPTIMIZED_IR: could not create %s: %s\n", dumpPath,
                          dirEc.message().c_str());
         } else {
-            std::string filename =
-                std::string(dumpPath) + "/module_" + std::to_string(id) + ".mlir";
+            // PID-stamped so concurrent processes pointing at the same
+            // directory don't overwrite each other's dumps.
+            std::string filename = std::string(dumpPath) + "/module_" +
+                                   std::to_string(llvm::sys::Process::getProcessId()) + "_" +
+                                   std::to_string(id) + ".mlir";
             llvm::raw_fd_ostream os(filename, ec);
             if (ec) {
                 MPS_LOG_WARN("JAX_MPS_DUMP_OPTIMIZED_IR: could not open %s: %s\n", filename.c_str(),

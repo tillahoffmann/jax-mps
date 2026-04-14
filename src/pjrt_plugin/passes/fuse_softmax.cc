@@ -120,13 +120,39 @@ Value stripNegInfMaximum(Value v) {
     return v;
 }
 
-// Match a reduce over a single axis. Returns (input, axis) if matched.
+// Predicate for the expected init value of a reduce: either -inf (for max)
+// or 0 (for add). Returning false on mismatch prevents rewriting a reduce
+// whose init gives it different semantics than a plain max/sum.
+enum class ExpectedInit { NegInf, Zero };
+
+bool initValueMatches(Value initVal, ExpectedInit expected) {
+    mlir::DenseElementsAttr attr;
+    if (!mlir::matchPattern(initVal, mlir::m_Constant(&attr)) || !attr.isSplat())
+        return false;
+    if (!mlir::isa<mlir::FloatType>(attr.getElementType()))
+        return false;
+    auto f = attr.getSplatValue<llvm::APFloat>();
+    switch (expected) {
+        case ExpectedInit::NegInf:
+            return f.isNegative() && f.isInfinity();
+        case ExpectedInit::Zero:
+            return f.isZero();
+    }
+    return false;
+}
+
+// Match a reduce over a single axis with the given combiner op and expected
+// init value. Returns (input, axis) if matched.
 template <typename ReducerOp>
-std::pair<Value, int64_t> matchSingleAxisReduce(Value v) {
+std::pair<Value, int64_t> matchSingleAxisReduce(Value v, ExpectedInit expectedInit) {
     auto reduce = v.getDefiningOp<stablehlo::ReduceOp>();
     if (!reduce)
         return {Value{}, -1};
     if (reduce.getInputs().size() != 1 || reduce.getNumResults() != 1)
+        return {Value{}, -1};
+    if (reduce.getInitValues().size() != 1)
+        return {Value{}, -1};
+    if (!initValueMatches(reduce.getInitValues()[0], expectedInit))
         return {Value{}, -1};
     auto dims = reduce.getDimensions();
     if (dims.size() != 1)
@@ -174,8 +200,8 @@ public:
         auto sumBcast = divOp.getRhs().getDefiningOp<stablehlo::BroadcastInDimOp>();
         if (!sumBcast)
             return mlir::failure();
-        auto [sumReduceInput, sumAxis] =
-            matchSingleAxisReduce<stablehlo::AddOp>(stripTrivialReshapes(sumBcast.getOperand()));
+        auto [sumReduceInput, sumAxis] = matchSingleAxisReduce<stablehlo::AddOp>(
+            stripTrivialReshapes(sumBcast.getOperand()), ExpectedInit::Zero);
         if (!sumReduceInput || sumAxis < 0)
             return mlir::failure();
         if (sumReduceInput != expOp.getResult())
@@ -188,7 +214,8 @@ public:
         if (!maxBcast)
             return mlir::failure();
         Value maxInner = stripNegInfMaximum(stripTrivialReshapes(maxBcast.getOperand()));
-        auto [maxReduceInput, maxAxis] = matchSingleAxisReduce<stablehlo::MaxOp>(maxInner);
+        auto [maxReduceInput, maxAxis] =
+            matchSingleAxisReduce<stablehlo::MaxOp>(maxInner, ExpectedInit::NegInf);
         if (!maxReduceInput || maxAxis < 0)
             return mlir::failure();
         if (maxReduceInput != x || maxAxis != sumAxis)
