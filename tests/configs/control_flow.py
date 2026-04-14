@@ -404,6 +404,27 @@ def make_control_flow_op_configs():
                 differentiable_argnums=(),
                 name="lax.fori_loop.zero_iter",
             ),
+            # fori_loop with non-zero lower bound: exercises counted-loop
+            # primitive with initial counter != 0.
+            OperationTestConfig(
+                lambda x: lax.fori_loop(3, 8, lambda i, val: val + i, x),
+                numpy.float32(0.0),
+                differentiable_argnums=(),
+                name="lax.fori_loop.nonzero_start",
+            ),
+            # while_loop whose condition is NOT "counter < const" with +1
+            # increment. Exercises the dynamic-condition WhileLoopPrimitive
+            # path (compiledCond_ + per-iteration cond eval).
+            OperationTestConfig(
+                lambda x: lax.while_loop(
+                    lambda v: v < 10.0,
+                    lambda v: v * 1.5 + 0.1,
+                    x,
+                ),
+                numpy.float32(0.5),
+                differentiable_argnums=(),
+                name="lax.while_loop.dynamic_cond",
+            ),
             # ==================== cond inside while ====================
             OperationTestConfig(
                 lambda x: lax.while_loop(
