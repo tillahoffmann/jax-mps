@@ -74,6 +74,21 @@ Benchmarks are excluded from normal test runs. To run them:
 uv run pytest -m benchmark --benchmark-only -n0
 ```
 
+# Debugging
+
+- `JAX_MPS_NO_OPTIMIZE=1` disables the StableHLO simplification + MPS fusion passes. Useful for bisecting whether a regression comes from a fusion.
+- `JAX_MPS_DUMP_OPTIMIZED_IR=<dir>` writes each parsed+optimized module as `<dir>/module_<n>.mlir` (post-pass, so `@mps.*` custom_calls from fusion are visible). Used by `tests/test_fusion.py`; also handy for ad-hoc inspection.
+
+# Adding New Fusion Patterns
+
+Fusion passes live in `src/pjrt_plugin/passes/` as MLIR `RewritePattern`s inside a single `MpsFusionPass` (see `mps_fusion_pass.cc`). The pass library is compiled `-fno-rtti -fno-exceptions` with hidden visibility — see CMake comments and the memory note for why.
+
+To add a pattern:
+1. Add a new `populateXxxPatterns(mlir::RewritePatternSet&)` in `passes/xxx.{h,cc}`.
+2. Register it in `MpsFusionPass::runOnOperation`.
+3. Add a runtime branch in `HandleCustomCall` (`src/pjrt_plugin/ops/control_flow.cc`) that lowers the new `@mps.xxx` custom_call to the MLX kernel call.
+4. Append a `FusionTestConfig(...)` to `make_fusion_configs()` in `tests/configs/fusion.py`. The test harness verifies the expected custom_calls appear in dumped IR AND checks numerical equivalence against both unfused-MPS (tight tolerance) and CPU (loose). The fused-vs-unfused check uses `fusion_atol`/`fusion_rtol` (default 1e-6) — loosen these on the config if the pattern targets fp16/bf16 or a non-IEEE-associative rewrite.
+
 # Bugs and Issues
 
 When fixing a bug or addressing an issue, use TDD:
