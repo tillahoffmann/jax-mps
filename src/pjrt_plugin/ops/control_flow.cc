@@ -851,6 +851,27 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         return true;
     }
 
+    // Handle mps.softmax — fused numerically-stable softmax emitted by
+    // fuse_softmax. One input, one output; axis comes from backend_config.
+    if (callTargetName == "mps.softmax") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.softmax: expected 1 input and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.softmax");
+        if (!x)
+            return false;
+        int axis = static_cast<int>(x->ndim()) - 1;  // default = trailing
+        auto bc = ParseBackendConfig(customCallOp);
+        if (auto v = bc.getNumber("axis"))
+            axis = static_cast<int>(*v);
+        if (axis < 0)
+            axis += static_cast<int>(x->ndim());
+        auto result = mlx::core::softmax(*x, std::vector<int>{axis}, /*precise=*/false);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
     // Handle mps.layer_norm — fused layer normalization via mlx::core::fast.
     // Inputs: x, weight, bias
     // backend_config: {"eps": <float>}

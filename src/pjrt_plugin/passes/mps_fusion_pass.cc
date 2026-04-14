@@ -4,6 +4,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "pjrt_plugin/passes/fuse_bias_add.h"
+#include "pjrt_plugin/passes/fuse_softmax.h"
 
 namespace mps {
 
@@ -24,6 +25,7 @@ protected:
     void runOnOperation() override {
         mlir::RewritePatternSet patterns(&getContext());
         populateFuseBiasAddPatterns(patterns);
+        populateFuseSoftmaxPatterns(patterns);
         if (mlir::failed(mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
             signalPassFailure();
         }

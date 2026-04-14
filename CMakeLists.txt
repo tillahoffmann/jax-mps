@@ -146,6 +146,7 @@ set(PJRT_SOURCES
 add_library(pjrt_plugin_passes STATIC
     src/pjrt_plugin/passes/mps_fusion_pass.cc
     src/pjrt_plugin/passes/fuse_bias_add.cc
+    src/pjrt_plugin/passes/fuse_softmax.cc
 )
 set_target_properties(pjrt_plugin_passes PROPERTIES
     POSITION_INDEPENDENT_CODE ON

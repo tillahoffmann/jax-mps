@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+import jax.nn as jnn
 import numpy
 from jax import numpy as jnp
 from jax import random
@@ -114,6 +115,73 @@ def make_fusion_configs() -> list[FusionTestConfig]:
             func=lambda x, w, other: x @ w + other,
             args=(randn(16, 32), randn(32, 8), randn(16, 8)),
             expected_custom_calls={"mps.addmm": 0},
+        )
+    )
+
+    # --- fuse_softmax: reduce_max/sub/exp/reduce_sum/divide -> mps.softmax ---
+
+    # Trailing-axis softmax at several ranks & shapes.
+    for shape in [(8,), (4, 16), (2, 3, 12), (2, 4, 8, 32)]:
+        configs.append(
+            FusionTestConfig(
+                name=f"softmax.trailing.{'x'.join(map(str, shape))}",
+                func=lambda x: jnn.softmax(x, axis=-1),
+                args=(randn(*shape),),
+                expected_custom_calls={"mps.softmax": 1},
+            )
+        )
+
+    # Non-trailing axis (explicit).
+    configs.append(
+        FusionTestConfig(
+            name="softmax.axis0",
+            func=lambda x: jnn.softmax(x, axis=0),
+            args=(randn(16, 32),),
+            expected_custom_calls={"mps.softmax": 1},
+        )
+    )
+    configs.append(
+        FusionTestConfig(
+            name="softmax.axis1_of_3",
+            func=lambda x: jnn.softmax(x, axis=1),
+            args=(randn(4, 16, 8),),
+            expected_custom_calls={"mps.softmax": 1},
+        )
+    )
+    # Negative axis (should normalize to positive inside the pass).
+    configs.append(
+        FusionTestConfig(
+            name="softmax.negative_axis",
+            func=lambda x: jnn.softmax(x, axis=-2),
+            args=(randn(4, 8, 16),),
+            expected_custom_calls={"mps.softmax": 1},
+        )
+    )
+    # Larger batch dim — shape-invariance sanity.
+    configs.append(
+        FusionTestConfig(
+            name="softmax.big_batch",
+            func=lambda x: jnn.softmax(x, axis=-1),
+            args=(randn(64, 128),),
+            expected_custom_calls={"mps.softmax": 1},
+        )
+    )
+    # Two independent softmaxes — both should fuse.
+    configs.append(
+        FusionTestConfig(
+            name="softmax.two_independent",
+            func=lambda x, y: jnn.softmax(x, axis=-1) + jnn.softmax(y, axis=-1),
+            args=(randn(4, 16), randn(4, 16)),
+            expected_custom_calls={"mps.softmax": 2},
+        )
+    )
+    # A plain elementwise divide — must NOT match the softmax pattern.
+    configs.append(
+        FusionTestConfig(
+            name="softmax.not_softmax",
+            func=lambda x, y: x / y,
+            args=(randn(4, 8), randn(4, 8)),
+            expected_custom_calls={"mps.softmax": 0},
         )
     )
 
