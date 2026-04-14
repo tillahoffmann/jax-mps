@@ -118,6 +118,27 @@ def make_fusion_configs() -> list[FusionTestConfig]:
         )
     )
 
+    # Scalar bias (0-D): must NOT fuse (no trailing-dim bias).
+    configs.append(
+        FusionTestConfig(
+            name="addmm.scalar_bias",
+            func=lambda x, w, s: x @ w + s,
+            args=(randn(16, 32), randn(32, 8), jnp.float32(0.5)),
+            expected_custom_calls={"mps.addmm": 0},
+        )
+    )
+
+    # Batched matmul with leading batch dims + bias on trailing output dim.
+    # Exercises the batching-dim branch of hasStandardMatmulLayout.
+    configs.append(
+        FusionTestConfig(
+            name="addmm.batched",
+            func=lambda x, w, b: jnp.einsum("bij,bjk->bik", x, w) + b,
+            args=(randn(4, 16, 32), randn(4, 32, 8), randn(8)),
+            expected_custom_calls={"mps.addmm": 1},
+        )
+    )
+
     # --- fuse_softmax: reduce_max/sub/exp/reduce_sum/divide -> mps.softmax ---
 
     # Trailing-axis softmax at several ranks & shapes.

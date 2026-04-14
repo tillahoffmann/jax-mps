@@ -87,7 +87,7 @@ To add a pattern:
 1. Add a new `populateXxxPatterns(mlir::RewritePatternSet&)` in `passes/xxx.{h,cc}`.
 2. Register it in `MpsFusionPass::runOnOperation`.
 3. Add a runtime branch in `HandleCustomCall` (`src/pjrt_plugin/ops/control_flow.cc`) that lowers the new `@mps.xxx` custom_call to the MLX kernel call.
-4. Append a `FusionTestConfig(...)` to `make_fusion_configs()` in `tests/configs/fusion.py`. The test harness verifies the expected custom_calls appear in dumped IR AND checks numerical equivalence against both unfused-MPS (tight tolerance) and CPU (loose).
+4. Append a `FusionTestConfig(...)` to `make_fusion_configs()` in `tests/configs/fusion.py`. The test harness verifies the expected custom_calls appear in dumped IR AND checks numerical equivalence against both unfused-MPS (tight tolerance) and CPU (loose). The fused-vs-unfused check uses `fusion_atol`/`fusion_rtol` (default 1e-6) — loosen these on the config if the pattern targets fp16/bf16 or a non-IEEE-associative rewrite.
 
 # Bugs and Issues
 

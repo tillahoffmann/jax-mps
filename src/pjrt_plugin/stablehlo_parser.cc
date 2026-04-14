@@ -9,6 +9,7 @@
 #include <system_error>
 #include <unordered_set>
 
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -61,11 +62,10 @@ void registerDialects(mlir::MLIRContext& context) {
 // Run StableHLO algebraic simplification passes (x*1 -> x, x+0 -> x, etc.)
 // Disable by setting JAX_MPS_NO_OPTIMIZE=1 if you encounter issues.
 bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
-    static const bool disabled = [] {
-        const char* env = std::getenv("JAX_MPS_NO_OPTIMIZE");
-        return env && std::string(env) == "1";
-    }();
-    if (disabled)
+    // Read every call so tests (and interactive bisection) can flip this
+    // mid-process without restarting the plugin.
+    const char* env = std::getenv("JAX_MPS_NO_OPTIMIZE");
+    if (env && std::string(env) == "1")
         return true;
 
     mlir::PassManager pm(&context);
@@ -170,11 +170,21 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
     if (const char* dumpPath = std::getenv("JAX_MPS_DUMP_OPTIMIZED_IR")) {
         static std::atomic<int> counter{0};
         int id = counter.fetch_add(1);
-        std::string filename = std::string(dumpPath) + "/module_" + std::to_string(id) + ".mlir";
         std::error_code ec;
-        llvm::raw_fd_ostream os(filename, ec);
-        if (!ec) {
-            module->print(os);
+        if (auto dirEc = llvm::sys::fs::create_directories(dumpPath)) {
+            MPS_LOG_WARN("JAX_MPS_DUMP_OPTIMIZED_IR: could not create %s: %s\n", dumpPath,
+                         dirEc.message().c_str());
+        } else {
+            std::string filename =
+                std::string(dumpPath) + "/module_" + std::to_string(id) + ".mlir";
+            llvm::raw_fd_ostream os(filename, ec);
+            if (ec) {
+                MPS_LOG_WARN("JAX_MPS_DUMP_OPTIMIZED_IR: could not open %s: %s\n", filename.c_str(),
+                             ec.message().c_str());
+            } else {
+                module->print(os);
+                os.flush();
+            }
         }
     }
 

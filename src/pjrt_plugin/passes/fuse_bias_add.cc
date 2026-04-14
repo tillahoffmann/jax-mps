@@ -55,8 +55,8 @@ bool hasStandardMatmulLayout(stablehlo::DotGeneralOp op) {
 Value findUnderlyingBias(Value v, int64_t trailingSize) {
     while (true) {
         auto type = mlir::dyn_cast<RankedTensorType>(v.getType());
-        if (!type)
-            return {};
+        if (!type || type.getRank() == 0)
+            return {};  // scalar / non-ranked: not a trailing-dim bias
         if (type.getRank() == 1) {
             return (type.getShape()[0] == trailingSize) ? v : Value{};
         }
@@ -85,6 +85,8 @@ Value matchTrailingBiasBroadcast(stablehlo::BroadcastInDimOp op,
     auto dims = op.getBroadcastDimensions();
     if (dims.size() != static_cast<size_t>(src.getRank()))
         return {};
+    if (dims.empty())
+        return {};  // scalar broadcast isn't a trailing-dim bias
     for (size_t i = 0; i < dims.size(); ++i) {
         int64_t srcDim = src.getShape()[i];
         int64_t targetDim = dims[i];

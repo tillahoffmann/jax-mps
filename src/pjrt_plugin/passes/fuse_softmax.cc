@@ -41,9 +41,22 @@ using mlir::PatternRewriter;
 using mlir::RankedTensorType;
 using mlir::Value;
 
-// Walk upward through reshape ops that only toggle size-1 dims.
+// Walk upward through reshape ops that only insert or remove size-1 dims
+// (i.e. the non-1 dim sequence is preserved). Reshapes that reorder or merge
+// non-trivial dims are NOT stripped — stripping them would change semantics.
 Value stripTrivialReshapes(Value v) {
     while (auto reshape = v.getDefiningOp<stablehlo::ReshapeOp>()) {
+        auto inType = mlir::cast<RankedTensorType>(reshape.getOperand().getType());
+        auto outType = mlir::cast<RankedTensorType>(reshape.getType());
+        auto nonOne = [](mlir::ArrayRef<int64_t> shape) {
+            llvm::SmallVector<int64_t, 4> out;
+            for (int64_t d : shape)
+                if (d != 1)
+                    out.push_back(d);
+            return out;
+        };
+        if (nonOne(inType.getShape()) != nonOne(outType.getShape()))
+            break;
         v = reshape.getOperand();
     }
     return v;
@@ -156,8 +169,8 @@ public:
             return mlir::failure();
 
         // RHS: broadcast(keepdims)(reduce_sum(exp, axis=k_sum)).
-        // We find k_sum first by inspecting the reduce, then verify the
-        // broadcast pattern uses that axis.
+        // First locate the reduce_sum through a broadcast+reshape chain, then
+        // verify the broadcast's layout is the keepdims form at that axis.
         auto sumBcast = divOp.getRhs().getDefiningOp<stablehlo::BroadcastInDimOp>();
         if (!sumBcast)
             return mlir::failure();
@@ -167,9 +180,7 @@ public:
             return mlir::failure();
         if (sumReduceInput != expOp.getResult())
             return mlir::failure();
-        Value sumBcastInput =
-            stripAxisKeepdimsBroadcast(divOp.getRhs(), resultType.getShape(), sumAxis);
-        if (!sumBcastInput)
+        if (!stripAxisKeepdimsBroadcast(divOp.getRhs(), resultType.getShape(), sumAxis))
             return mlir::failure();
 
         // shift = broadcast(keepdims)(strip-neg-inf(reduce_max(x, axis=k_max))).
@@ -180,13 +191,9 @@ public:
         auto [maxReduceInput, maxAxis] = matchSingleAxisReduce<stablehlo::MaxOp>(maxInner);
         if (!maxReduceInput || maxAxis < 0)
             return mlir::failure();
-        if (maxReduceInput != x)
+        if (maxReduceInput != x || maxAxis != sumAxis)
             return mlir::failure();
-        if (maxAxis != sumAxis)
-            return mlir::failure();
-        Value shiftBcastInput =
-            stripAxisKeepdimsBroadcast(subOp.getRhs(), resultType.getShape(), maxAxis);
-        if (!shiftBcastInput)
+        if (!stripAxisKeepdimsBroadcast(subOp.getRhs(), resultType.getShape(), maxAxis))
             return mlir::failure();
 
         // Encode the softmax axis in a minimal backend_config JSON. Use the

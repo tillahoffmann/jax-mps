@@ -62,6 +62,11 @@ def _run_mps(
         monkeypatch.setenv("JAX_MPS_NO_OPTIMIZE", "1")
     else:
         monkeypatch.delenv("JAX_MPS_NO_OPTIMIZE", raising=False)
+    # JAX caches compiled executables by (function, device, abstract args), so
+    # back-to-back calls with the same function would reuse the fused artifact
+    # regardless of our env vars. Clear the cache so the plugin actually
+    # re-parses under the current JAX_MPS_NO_OPTIMIZE setting.
+    jax.clear_caches()
     args = jax.device_put(config.make_args(), MPS_DEVICE)
     result = jax.jit(config.func)(*args)
     jax.block_until_ready(result)
