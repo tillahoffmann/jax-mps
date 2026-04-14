@@ -410,12 +410,14 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
             }
         }
 
-        // Collect external values from both cond and body regions
+        // Counted-loop path skips the cond region; only body captures are needed.
+        // For dynamic-cond loops, include cond-region captures as well.
         std::vector<void*> extKeys;
         std::vector<mlx::core::array> extArrays;
         std::unordered_set<void*> seen;
         CollectExternalValues(bodyRegion, values, extKeys, extArrays, &seen);
-        CollectExternalValues(condRegion, values, extKeys, extArrays, &seen);
+        if (tripCount < 0)
+            CollectExternalValues(condRegion, values, extKeys, extArrays, &seen);
 
         const size_t nExt = extKeys.size();
 

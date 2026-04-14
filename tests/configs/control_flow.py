@@ -492,10 +492,11 @@ def make_control_flow_op_configs():
             # ==================== lax.scan regression (issue #134) ====================
             # LSTM recurrence with grad: exercises the WhileLoopPrimitive
             # graph-bounding path. 10_000 timesteps triggers graph explosion
-            # on main (metal::malloc crash). We bake jax.grad into the test
+            # on main (metal::malloc crash). jax.grad is baked into the tested
             # function so the value test exercises the backward pass (the crash
-            # path) without comparing CPU vs MPS gradients at tight tolerance
-            # over 10k recurrent steps.
+            # path). In compare mode, the harness still does a strict allclose
+            # on the returned scalar; this config is primarily a regression
+            # smoke test for completing the backward pass without crashing.
             OperationTestConfig(
                 lambda params: jax.grad(_scan_lstm_loss)(params)[0].sum(),
                 lambda key: _make_lstm_params(key, 32, 64),
