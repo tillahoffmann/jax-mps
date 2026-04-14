@@ -861,12 +861,17 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto* x = RequireValue(values, op->getOperand(0), "mps.softmax");
         if (!x)
             return false;
-        int axis = static_cast<int>(x->ndim()) - 1;  // default = trailing
+        const int ndim = static_cast<int>(x->ndim());
+        int axis = ndim - 1;  // default = trailing
         auto bc = ParseBackendConfig(customCallOp);
         if (auto v = bc.getNumber("axis"))
             axis = static_cast<int>(*v);
         if (axis < 0)
-            axis += static_cast<int>(x->ndim());
+            axis += ndim;
+        if (axis < 0 || axis >= ndim) {
+            MPS_LOG_ERROR("mps.softmax: axis %d out of range for rank %d\n", axis, ndim);
+            return false;
+        }
         auto result = mlx::core::softmax(*x, std::vector<int>{axis}, /*precise=*/false);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;

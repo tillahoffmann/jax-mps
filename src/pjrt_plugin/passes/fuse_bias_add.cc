@@ -27,10 +27,14 @@ using mlir::RankedTensorType;
 using mlir::Value;
 
 // Standard matmul layout: contracting dim = last of lhs / first of rhs after
-// optional leading shared batch dims.
+// optional leading shared batch dims, with exactly ONE free (output) dim on
+// each side. This matches what `mlx::core::addmm` expects (batched 2-D matmul
+// `(..., M, K) @ (..., K, N) -> (..., M, N)`). We reject shapes with extra
+// free dims on either side because addmm isn't defined there.
 bool hasStandardMatmulLayout(stablehlo::DotGeneralOp op) {
     auto dims = op.getDotDimensionNumbers();
     auto lhs = mlir::cast<RankedTensorType>(op.getLhs().getType());
+    auto rhs = mlir::cast<RankedTensorType>(op.getRhs().getType());
     auto lhsContract = dims.getLhsContractingDimensions();
     auto rhsContract = dims.getRhsContractingDimensions();
     auto lhsBatch = dims.getLhsBatchingDimensions();
@@ -47,6 +51,18 @@ bool hasStandardMatmulLayout(stablehlo::DotGeneralOp op) {
         if (lhsBatch[i] != static_cast<int64_t>(i) || rhsBatch[i] != static_cast<int64_t>(i))
             return false;
     }
+    // rhs must be exactly batch + 1 contracting + 1 free dim (…, K, N) —
+    // anything else (e.g., a tensor contraction with multiple free dims on
+    // the right) is not representable as `mlx::core::addmm`. Lhs may have
+    // multiple free dims (…, ..., K), which is the common flax Linear
+    // lowering `(B, T, D) @ (D, V) -> (B, T, V)` — addmm handles this via
+    // matmul broadcast.
+    const int64_t rhsExpectedRank = static_cast<int64_t>(rhsBatch.size()) + 2;
+    if (rhs.getRank() != rhsExpectedRank)
+        return false;
+    // Lhs needs at least one free dim on top of batch + contract.
+    if (lhs.getRank() < static_cast<int64_t>(lhsBatch.size()) + 2)
+        return false;
     return true;
 }
 

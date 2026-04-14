@@ -139,6 +139,17 @@ def make_fusion_configs() -> list[FusionTestConfig]:
         )
     )
 
+    # dot_general with multiple free dims on rhs: `(M, K) @ (K, N1, N2) -> (M, N1, N2)`.
+    # Not a standard (batched) matmul; addmm can't represent this, so must NOT fuse.
+    configs.append(
+        FusionTestConfig(
+            name="addmm.rhs_multi_free_dims",
+            func=lambda x, w, b: jnp.einsum("mk,knp->mnp", x, w) + b,
+            args=(randn(16, 32), randn(32, 8, 4), randn(4)),
+            expected_custom_calls={"mps.addmm": 0},
+        )
+    )
+
     # --- fuse_softmax: reduce_max/sub/exp/reduce_sum/divide -> mps.softmax ---
 
     # Trailing-axis softmax at several ranks & shapes.

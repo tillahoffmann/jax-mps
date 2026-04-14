@@ -16,8 +16,9 @@ namespace mps {
 //
 //     stablehlo.custom_call @mps.softmax(x)
 //
-// which lowers to a single mlx::core::softmax kernel. Currently matches
-// trailing-axis softmax only (by far the common case).
+// which lowers to a single mlx::core::softmax kernel. Matches softmax over
+// any single reduction axis (trailing, leading, or middle; negative axes
+// are normalized in the runtime handler).
 void populateFuseSoftmaxPatterns(mlir::RewritePatternSet& patterns);
 
 }  // namespace mps
