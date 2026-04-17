@@ -49,6 +49,11 @@ const std::unordered_set<std::string>& getSupportedOps() {
 
 // Register all dialects needed for StableHLO parsing
 void registerDialects(mlir::MLIRContext& context) {
+    // Our StableHLO modules are tiny; MLIR's default per-context LLVM thread
+    // pool (hardware_concurrency workers) would otherwise leak ~8 worker
+    // threads per compile, since JAX caches the MlxExecutable — and thus its
+    // MLIRContext — for the lifetime of the process.
+    context.disableMultithreading();
     mlir::DialectRegistry registry;
     registry.insert<mlir::func::FuncDialect>();
     registry.insert<mlir::stablehlo::StablehloDialect>();
