@@ -3,6 +3,7 @@
 #include "pjrt_plugin/mlx_executable.h"
 
 #include <mlx/compile.h>
+#include <mlx/compile_impl.h>
 #include <mlx/memory.h>
 #include <mlx/mlx.h>
 
@@ -481,6 +482,16 @@ std::unique_ptr<MlxExecutable> MlxExecutable::Create(mps::ParsedModule parsed_mo
     return executable;
 }
 
+MlxExecutable::~MlxExecutable() {
+    // Drop the entry that compile(this) inserted into MLX's process-global
+    // compiler cache. Without this, the cache holds a CacheEntry — including
+    // the full traced tape and any captured constants — for the lifetime of
+    // the process, even after JAX evicts this executable.
+    if (compile_attempted_) {
+        mlx::core::detail::compile_erase(reinterpret_cast<std::uintptr_t>(this));
+    }
+}
+
 bool MlxExecutable::IsValid() const {
     return valid_;
 }
@@ -564,7 +575,13 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
             };
 
             try {
-                compiled_fn_ = mlx::core::compile(exec_fn);
+                // Use `this` as the fun_id so we can erase this executable's
+                // entry from MLX's global compiler cache in our destructor.
+                // The public compile() overload can't derive a stable id from a
+                // capturing lambda and would otherwise accumulate entries under
+                // id=0 that are never released.
+                compiled_fn_ =
+                    mlx::core::detail::compile(exec_fn, reinterpret_cast<std::uintptr_t>(this));
 
                 auto test_outputs = compiled_fn_(inputArrays);
                 if (!test_outputs.empty()) {

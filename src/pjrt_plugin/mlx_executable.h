@@ -34,7 +34,7 @@ public:
     // Factory method to create executable from parsed module
     static std::unique_ptr<MlxExecutable> Create(mps::ParsedModule parsed_module);
 
-    ~MlxExecutable() = default;
+    ~MlxExecutable();
 
     bool IsValid() const;
     std::string error() const;
