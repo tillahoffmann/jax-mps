@@ -8,6 +8,7 @@
 #include <mlx/mlx.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <stdexcept>
@@ -483,10 +484,10 @@ std::unique_ptr<MlxExecutable> MlxExecutable::Create(mps::ParsedModule parsed_mo
 }
 
 MlxExecutable::~MlxExecutable() {
-    // Drop the entry that compile(this) inserted into MLX's process-global
-    // compiler cache. Without this, the cache holds a CacheEntry — including
-    // the full traced tape and any captured constants — for the lifetime of
-    // the process, even after JAX evicts this executable.
+    // Drop the MLX process-global compiler-cache entry keyed by `this`. Without
+    // this, the cache holds a CacheEntry — including the full traced tape and
+    // any captured constants — for the lifetime of the process, even after JAX
+    // evicts this executable.
     if (compile_attempted_) {
         mlx::core::detail::compile_erase(reinterpret_cast<std::uintptr_t>(this));
     }
