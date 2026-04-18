@@ -4,6 +4,10 @@
 
 #include <mlx/mlx.h>
 
+#include <cstdlib>
+#include <exception>
+#include <string>
+
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/mlx_buffer.h"
 #include "pjrt_plugin/mlx_device.h"
@@ -19,7 +23,29 @@ MlxClient::MlxClient() {
     // Set MLX to use GPU (Metal) device
     mlx::core::set_default_device(mlx::core::Device::gpu);
 
-    MPS_LOG_DEBUG("MlxClient initialized with MLX GPU backend\n");
+    // Cap MLX's internal buffer cache. By default MLX sizes the cache at
+    // ~1.5x the recommended working set (tens of GB on Apple Silicon),
+    // which is fine for a long-running training script but causes the cache
+    // to grow without bound across thousands of unrelated JAX
+    // computations. The cached MTLBuffers stay in the residency set and,
+    // once the cache exceeds physical memory, are swapped to disk; we have
+    // observed 23 GB of swapped IOAccelerator memory after a full upstream
+    // JAX test run, alongside intermittent command-buffer hangs.
+    //
+    // 1 GiB is plenty to absorb hot allocations within a single
+    // computation while letting MLX evict and release MTLBuffers between
+    // unrelated computations. Override with JAX_MPS_CACHE_LIMIT_BYTES.
+    size_t cache_limit = 1ULL << 30;
+    if (const char* env = std::getenv("JAX_MPS_CACHE_LIMIT_BYTES")) {
+        try {
+            cache_limit = std::stoull(env);
+        } catch (const std::exception&) {
+            MPS_LOG_WARN("Invalid JAX_MPS_CACHE_LIMIT_BYTES=%s, using default\n", env);
+        }
+    }
+    mlx::core::set_cache_limit(cache_limit);
+
+    MPS_LOG_DEBUG("MlxClient initialized with MLX GPU backend (cache_limit=%zu)\n", cache_limit);
 }
 
 MlxClient::~MlxClient() = default;
