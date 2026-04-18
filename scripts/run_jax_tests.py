@@ -124,6 +124,19 @@ def main():
         default=60,
         help="Per-test timeout in seconds (default: 60)",
     )
+    parser.add_argument(
+        "--memory-csv",
+        default=None,
+        help="If set, record per-test RSS memory to this CSV path.",
+    )
+    parser.add_argument(
+        "--current-test-file",
+        default=None,
+        help=(
+            "If set, write the nodeid of the currently running test to this "
+            "file before each test starts. Useful for diagnosing hangs."
+        ),
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
@@ -168,7 +181,19 @@ def main():
         f"--timeout={args.timeout}",
         "--continue-on-collection-errors",
     ]
+    if args.memory_csv or args.current_test_file:
+        cmd += ["-p", "_pytest_memory_plugin"]
+    if args.memory_csv:
+        cmd += [f"--memory-csv={args.memory_csv}"]
+    if args.current_test_file:
+        cmd += [f"--current-test-file={args.current_test_file}"]
     env = {**os.environ, "JAX_PLATFORMS": "mps"}
+    if args.memory_csv or args.current_test_file:
+        # Make the local plugin importable from the scripts/ directory.
+        scripts_dir = str(Path(__file__).resolve().parent)
+        env["PYTHONPATH"] = (
+            scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+        ).rstrip(os.pathsep)
     print(f"\nRunning: pytest {tests_dir} ...\n")
     subprocess.run(cmd, cwd=project_root, env=env)
 
