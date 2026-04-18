@@ -37,10 +37,22 @@ MlxClient::MlxClient() {
     // unrelated computations. Override with JAX_MPS_CACHE_LIMIT_BYTES.
     size_t cache_limit = 1ULL << 30;
     if (const char* env = std::getenv("JAX_MPS_CACHE_LIMIT_BYTES")) {
-        try {
-            cache_limit = std::stoull(env);
-        } catch (const std::exception&) {
+        // std::stoull accepts a leading '-' (wraps to a huge unsigned) and
+        // silently stops at trailing junk like "1024abc". Validate
+        // explicitly so a typo doesn't accidentally disable the cap.
+        std::string s(env);
+        size_t pos = 0;
+        bool ok = !s.empty() && s.find('-') == std::string::npos;
+        if (ok) {
+            try {
+                cache_limit = std::stoull(s, &pos);
+            } catch (const std::exception&) {
+                ok = false;
+            }
+        }
+        if (!ok || pos != s.size()) {
             MPS_LOG_WARN("Invalid JAX_MPS_CACHE_LIMIT_BYTES=%s, using default\n", env);
+            cache_limit = 1ULL << 30;
         }
     }
     mlx::core::set_cache_limit(cache_limit);

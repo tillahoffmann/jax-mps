@@ -1,7 +1,17 @@
 """Pytest plugin that records RSS memory before/after each test to a CSV.
 
-Enable by passing ``-p scripts._pytest_memory_plugin --memory-csv=PATH``.
-The CSV has columns: nodeid, rss_before_mb, rss_after_mb, delta_mb, peak_rss_mb.
+Enable by passing ``-p _pytest_memory_plugin --memory-csv=PATH`` (with the
+``scripts/`` directory on ``PYTHONPATH``; ``scripts/run_jax_tests.py`` does
+this automatically when its ``--memory-csv`` flag is given).
+
+CSV columns:
+    nodeid             test node id
+    rss_before_mb      RSS just before the test runs
+    rss_after_mb       RSS just after the test finishes
+    delta_mb           rss_after_mb - rss_before_mb
+    max_after_rss_mb   running maximum of rss_after_mb across all tests so
+                       far (NOT a true mid-test peak — RSS spikes that
+                       drop before the test finishes are not captured)
 
 If ``--current-test-file=PATH`` is also given, the plugin writes the nodeid of
 each test *before* it runs (overwriting the file each time) and clears it after.
@@ -19,7 +29,7 @@ import psutil
 import pytest
 
 _PROC = psutil.Process(os.getpid())
-_PEAK = 0
+_MAX_AFTER_RSS_MB = 0.0
 
 
 def _rss_mb() -> float:
@@ -53,11 +63,10 @@ def pytest_configure(config):
         fh = open(p, "w", newline="")
         writer = csv.writer(fh)
         writer.writerow(
-            ["nodeid", "rss_before_mb", "rss_after_mb", "delta_mb", "peak_rss_mb"]
+            ["nodeid", "rss_before_mb", "rss_after_mb", "delta_mb", "max_after_rss_mb"]
         )
         config._memory_fh = fh
         config._memory_writer = writer
-        config._memory_before = None
 
     cur = config.getoption("--current-test-file")
     if cur:
@@ -106,9 +115,9 @@ def pytest_runtest_protocol(item, nextitem):
     yield
     after = _rss_mb()
 
-    global _PEAK
-    if after > _PEAK:
-        _PEAK = after
+    global _MAX_AFTER_RSS_MB
+    if after > _MAX_AFTER_RSS_MB:
+        _MAX_AFTER_RSS_MB = after
 
     writer.writerow(
         [
@@ -116,7 +125,7 @@ def pytest_runtest_protocol(item, nextitem):
             f"{before:.2f}",
             f"{after:.2f}",
             f"{after - before:+.2f}",
-            f"{_PEAK:.2f}",
+            f"{_MAX_AFTER_RSS_MB:.2f}",
         ]
     )
     config._memory_fh.flush()
