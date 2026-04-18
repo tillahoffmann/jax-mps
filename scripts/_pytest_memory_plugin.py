@@ -22,18 +22,14 @@ prevents pytest from completing the test (and thus from writing a CSV row).
 from __future__ import annotations
 
 import csv
-import os
 from pathlib import Path
 
-import psutil
 import pytest
 
-_PROC = psutil.Process(os.getpid())
+# psutil is imported lazily inside pytest_configure when --memory-csv is set,
+# so --current-test-file works without it.
+
 _MAX_AFTER_RSS_MB = 0.0
-
-
-def _rss_mb() -> float:
-    return _PROC.memory_info().rss / (1024 * 1024)
 
 
 def pytest_addoption(parser):
@@ -58,6 +54,13 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     path = config.getoption("--memory-csv")
     if path:
+        try:
+            import psutil
+        except ImportError as e:
+            raise pytest.UsageError(
+                "--memory-csv requires the 'psutil' package; install it via "
+                "`uv pip install psutil` or `pip install psutil`"
+            ) from e
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         fh = open(p, "w", newline="")
@@ -67,13 +70,13 @@ def pytest_configure(config):
         )
         config._memory_fh = fh
         config._memory_writer = writer
+        config._memory_proc = psutil.Process()
 
     cur = config.getoption("--current-test-file")
     if cur:
         cp = Path(cur)
         cp.parent.mkdir(parents=True, exist_ok=True)
         cp.write_text("")
-        config._current_test_path = cp
         global _CURRENT_TEST_PATH
         _CURRENT_TEST_PATH = cp
 
@@ -111,9 +114,14 @@ def pytest_runtest_protocol(item, nextitem):
         yield
         return
 
-    before = _rss_mb()
+    proc = config._memory_proc
+
+    def rss_mb() -> float:
+        return proc.memory_info().rss / (1024 * 1024)
+
+    before = rss_mb()
     yield
-    after = _rss_mb()
+    after = rss_mb()
 
     global _MAX_AFTER_RSS_MB
     if after > _MAX_AFTER_RSS_MB:
