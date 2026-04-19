@@ -2,14 +2,20 @@
 // optimization_barrier).
 
 #include <mlx/compile.h>
+#include <mlx/compile_impl.h>
 #include <mlx/fast.h>
 #include <mlx/linalg.h>
+#include <mlx/primitives.h>
 #include <mlx/random.h>
 #include <mlx/transforms.h>
 
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -91,6 +97,200 @@ bool HandleStablehloReturn(mlir::Operation* op, ValueMap& values,
     return CollectReturnValues(op, values, outputs, "stablehlo.return");
 }
 
+// Collect arrays referenced inside a region but defined outside it.
+// These must be passed as explicit inputs to mx::compile to avoid
+// the "uncaptured inputs" error. An optional `seen` set enables
+// deduplication across multiple regions (e.g., body + cond).
+//
+// Uses region.walk() to recursively traverse nested sub-regions (e.g.
+// reduce bodies, case branches) so external values used at any nesting
+// depth are captured. The isAncestor guard filters out block arguments
+// and SSA values defined inside the region at any level.
+void CollectExternalValues(mlir::Region& region, const ValueMap& values, std::vector<void*>& keys,
+                           std::vector<mlx::core::array>& arrays,
+                           std::unordered_set<void*>* seen = nullptr) {
+    std::unordered_set<void*> localSeen;
+    auto& seenRef = seen ? *seen : localSeen;
+
+    region.walk([&](mlir::Operation* op) {
+        for (auto operand : op->getOperands()) {
+            auto* key = ToKey(operand);
+            if (seenRef.count(key))
+                continue;
+
+            // Skip values defined inside this region (at any nesting level).
+            // For block arguments, check their parent region.
+            // For SSA values, check their defining op's parent region.
+            if (auto* defOp = operand.getDefiningOp()) {
+                if (region.isAncestor(defOp->getParentRegion()))
+                    continue;
+            } else {
+                // Block argument — skip if it belongs to this region or a
+                // nested sub-region (e.g. reduce body accumulators).
+                if (region.isAncestor(operand.getParentRegion()))
+                    continue;
+            }
+
+            auto it = values.find(key);
+            if (it != values.end()) {
+                seenRef.insert(key);
+                keys.push_back(key);
+                arrays.push_back(it->second);
+            }
+        }
+    });
+}
+
+// Custom MLX primitive that encapsulates a while-loop with compiled body
+// and per-step eval. This is opaque to mx::compile (won't be fused) but
+// doesn't prevent outer compilation. When eval is called on the compiled
+// graph, this primitive runs the loop with per-step eval internally.
+//
+// Stream placement: This primitive MUST run on the CPU stream, but this does
+// NOT move computation to CPU. The compiled body (compiledBody_) internally
+// dispatches GPU kernels via MLX's default GPU stream — the CPU side only
+// orchestrates the loop: call body → async_eval() to flush GPU work → update
+// loop vars → repeat. This is the same pattern as MLX's own eval() scheduler.
+//
+// Why not the GPU stream: eval()/async_eval() synchronize the GPU command
+// queue. Calling them from within a GPU stream eval callback would re-enter
+// the GPU scheduler, causing a deadlock. The CPU stream avoids this.
+
+class WhileLoopPrimitive : public mlx::core::Primitive {
+public:
+    using BodyFn =
+        std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>;
+    using CondFn =
+        std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>;
+    using CompiledFn =
+        std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>;
+
+    // condFn: evaluates the loop condition (for the initial check).
+    // bodyCondFn: evaluates body THEN cond, returns [condScalar, bodyResult0, ...].
+    //   This combined function lets us eval() the full body+cond graph
+    //   synchronously each iteration, bounding graph depth to one iteration
+    //   and avoiding async_eval deadlocks with nested WhileLoopPrimitives.
+    WhileLoopPrimitive(mlx::core::Stream stream, CondFn condFn, BodyFn bodyCondFn, size_t nLoopVars,
+                       size_t nExt)
+        : Primitive(stream),
+          cacheGuard_(std::make_shared<CacheGuard>()),
+          nLoopVars_(nLoopVars),
+          nExt_(nExt) {
+        if (stream.device != mlx::core::Device::cpu) {
+            throw std::runtime_error(
+                "WhileLoopPrimitive must be on the CPU stream \u2014 GPU stream "
+                "placement would deadlock on internal eval() calls");
+        }
+        cacheGuard_->bodyCondId = nextFnId();
+        cacheGuard_->condId = nextFnId();
+        compiledBodyCond_ =
+            mlx::core::detail::compile(std::move(bodyCondFn), cacheGuard_->bodyCondId);
+        compiledCond_ = mlx::core::detail::compile(std::move(condFn), cacheGuard_->condId);
+    }
+
+    void eval_cpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override {
+        eval_impl(inputs, outputs);
+    }
+
+    void eval_gpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override {
+        eval_impl(inputs, outputs);
+    }
+
+    const char* name() const override {
+        return "WhileLoop";
+    }
+
+    bool is_equivalent(const mlx::core::Primitive& other) const override {
+        return false;
+    }
+
+    std::vector<mlx::core::Shape> output_shapes(
+        const std::vector<mlx::core::array>& inputs) override {
+        std::vector<mlx::core::Shape> shapes;
+        shapes.reserve(nLoopVars_);
+        for (size_t i = 0; i < nLoopVars_; ++i)
+            shapes.push_back(inputs[i].shape());
+        return shapes;
+    }
+
+private:
+    void eval_impl(const std::vector<mlx::core::array>& inputs,
+                   std::vector<mlx::core::array>& outputs) {
+        // inputs = loopVars (nLoopVars_) + external values (nExt_)
+        std::vector<mlx::core::array> current(inputs.begin(), inputs.end());
+
+        // Validate input arity: loop vars + external captures.
+        if (current.size() != nLoopVars_ + nExt_)
+            throw std::runtime_error("WhileLoopPrimitive: expected " +
+                                     std::to_string(nLoopVars_ + nExt_) + " inputs, got " +
+                                     std::to_string(current.size()));
+
+        // Initial condition check (before first body execution).
+        auto initCond = compiledCond_(current);
+        if (initCond.size() != 1 || initCond[0].size() != 1)
+            throw std::runtime_error("WhileLoopPrimitive: cond must return a single scalar");
+        mlx::core::eval(initCond[0]);
+        bool condTrue = initCond[0].item<bool>();
+
+        // Loop: body+cond combined per iteration.
+        while (condTrue) {
+            auto combined = compiledBodyCond_(current);
+            if (combined.size() != 1 + nLoopVars_)
+                throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
+                                         std::to_string(combined.size()) + " results, expected " +
+                                         std::to_string(1 + nLoopVars_));
+            // Synchronous eval — bounded graph, no accumulation, safe
+            // re-entry for nested WhileLoopPrimitives.
+            mlx::core::eval(combined);
+
+            // Update loop vars from combined[1..nLoopVars]
+            for (size_t j = 0; j < nLoopVars_; ++j)
+                current[j] = std::move(combined[1 + j]);
+            // Check condition from combined[0]
+            condTrue = combined[0].item<bool>();
+        }
+
+        // Synchronize final results
+        using Diff = std::vector<mlx::core::array>::difference_type;
+        std::vector<mlx::core::array> finalVars(current.begin(),
+                                                current.begin() + static_cast<Diff>(nLoopVars_));
+        mlx::core::eval(finalVars);
+
+        for (size_t i = 0; i < nLoopVars_; ++i)
+            outputs[i].copy_shared_buffer(current[i]);
+    }
+
+    CompiledFn compiledBodyCond_;  // returns [cond, body...]
+    CompiledFn compiledCond_;      // initial check only
+    size_t nLoopVars_;
+    size_t nExt_;
+
+    static std::uintptr_t nextFnId() {
+        static std::atomic<std::uintptr_t> counter{0x7F00'0000'0000'0000ULL};
+        return counter.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // CacheGuard: shared_ptr-based ref-counted cleanup.
+    // compile_erase is called only when the LAST copy of the primitive
+    // is destroyed — safe across copy/move during graph building.
+    // Skips cleanup during process shutdown to avoid SIGSEGV on
+    // already-destroyed CompilerCache.
+    struct CacheGuard {
+        std::uintptr_t bodyCondId = 0;
+        std::uintptr_t condId = 0;
+        ~CacheGuard() {
+            if (IsProcessShuttingDown())
+                return;
+            if (bodyCondId)
+                mlx::core::detail::compile_erase(bodyCondId);
+            if (condId)
+                mlx::core::detail::compile_erase(condId);
+        }
+    };
+    std::shared_ptr<CacheGuard> cacheGuard_;
+};
 // Handler for stablehlo.while
 bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                  ExecContext& ctx) {
@@ -98,8 +298,144 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
     if (!whileOp)
         return false;
 
+    if (ctx.inside_compile && ctx.allow_while_primitive) {
+        // --- Custom primitive approach ---
+        // Instead of throwing CompileIncompatibleError, we create a
+        // WhileLoopPrimitive that is opaque to mx::compile but runs the
+        // loop with compiled body + per-step eval when eval'd.
+
+        std::vector<mlx::core::array> loopVars;
+        for (auto operand : op->getOperands()) {
+            auto* val = RequireValue(values, operand, "stablehlo.while");
+            if (!val)
+                return false;
+            loopVars.push_back(*val);
+        }
+
+        auto& condRegion = whileOp.getCond();
+        auto& bodyRegion = whileOp.getBody();
+        const size_t nLoopVars = loopVars.size();
+
+        // Collect external values referenced by body and cond regions.
+        std::vector<void*> extKeys;
+        std::vector<mlx::core::array> extArrays;
+        std::unordered_set<void*> seen;
+        CollectExternalValues(bodyRegion, values, extKeys, extArrays, &seen);
+        CollectExternalValues(condRegion, values, extKeys, extArrays, &seen);
+
+        const size_t nExt = extKeys.size();
+        auto module = ctx.module;
+
+        // Build primitive inputs: loopVars + external values
+        std::vector<mlx::core::array> primInputs = loopVars;
+        primInputs.insert(primInputs.end(), extArrays.begin(), extArrays.end());
+
+        // Build output shapes/dtypes (same as loopVars)
+        std::vector<mlx::core::Shape> outShapes;
+        outShapes.reserve(nLoopVars);
+        std::vector<mlx::core::Dtype> outDtypes;
+        outDtypes.reserve(nLoopVars);
+        for (size_t i = 0; i < nLoopVars; ++i) {
+            outShapes.push_back(loopVars[i].shape());
+            outDtypes.push_back(loopVars[i].dtype());
+        }
+
+        // Build condFn for initial condition check
+        auto condFn =
+            [&condRegion, module, extKeys, nLoopVars,
+             nExt](const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+            using Diff = std::vector<mlx::core::array>::difference_type;
+            auto args = std::vector<mlx::core::array>(
+                inputs.begin(), inputs.begin() + static_cast<Diff>(nLoopVars));
+            ValueMap parentVals;
+            for (size_t i = 0; i < nExt; ++i)
+                parentVals.emplace(extKeys[i], inputs[nLoopVars + i]);
+            std::vector<mlx::core::array> results;
+            ExecContext compileCtx;
+            compileCtx.module = module;
+            compileCtx.inside_compile = true;
+            compileCtx.allow_while_primitive = true;
+            if (!ExecuteRegion(condRegion, args, results, compileCtx, &parentVals))
+                throw std::runtime_error("WhileLoopPrimitive: cond region execution failed");
+            return results;
+        };
+
+        // Build combined body+cond function.
+        // Executes body region, then cond region on the body outputs.
+        // Returns [condScalar, bodyResult0, bodyResult1, ...].
+        // This lets eval_impl call eval() synchronously each iteration,
+        // bounding graph depth and avoiding async_eval deadlocks.
+        auto bodyCondFn =
+            [&bodyRegion, &condRegion, module, extKeys, nLoopVars,
+             nExt](const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+            using Diff = std::vector<mlx::core::array>::difference_type;
+            auto args = std::vector<mlx::core::array>(
+                inputs.begin(), inputs.begin() + static_cast<Diff>(nLoopVars));
+            ValueMap parentVals;
+            for (size_t i = 0; i < nExt; ++i)
+                parentVals.emplace(extKeys[i], inputs[nLoopVars + i]);
+
+            // Execute body
+            std::vector<mlx::core::array> bodyResults;
+            ExecContext bodyCtx;
+            bodyCtx.module = module;
+            bodyCtx.inside_compile = true;
+            bodyCtx.allow_while_primitive = true;
+            if (!ExecuteRegion(bodyRegion, args, bodyResults, bodyCtx, &parentVals))
+                throw std::runtime_error("WhileLoopPrimitive: body region failed");
+
+            // Execute cond on body results (new loop vars)
+            ValueMap condParentVals;
+            for (size_t i = 0; i < nExt; ++i)
+                condParentVals.emplace(extKeys[i], inputs[nLoopVars + i]);
+            std::vector<mlx::core::array> condResults;
+            ExecContext condCtx;
+            condCtx.module = module;
+            condCtx.inside_compile = true;
+            condCtx.allow_while_primitive = true;
+            if (!ExecuteRegion(condRegion, bodyResults, condResults, condCtx, &condParentVals))
+                throw std::runtime_error("WhileLoopPrimitive: cond region failed");
+            if (condResults.size() != 1 || condResults[0].size() != 1)
+                throw std::runtime_error("WhileLoopPrimitive: cond must return a single scalar");
+
+            // Return [condScalar, bodyResult0, bodyResult1, ...]
+            std::vector<mlx::core::array> combined;
+            combined.reserve(1 + bodyResults.size());
+            combined.push_back(condResults[0]);
+            combined.insert(combined.end(), bodyResults.begin(), bodyResults.end());
+            return combined;
+        };
+
+        // CPU stream for orchestration only — the compiled body dispatches GPU
+        // kernels internally. eval()/async_eval() calls inside the loop would
+        // deadlock on a GPU stream (see WhileLoopPrimitive class comment).
+        auto cpuStream = mlx::core::default_stream(mlx::core::Device::cpu);
+        auto prim = std::make_shared<WhileLoopPrimitive>(cpuStream, std::move(condFn),
+                                                         std::move(bodyCondFn), nLoopVars, nExt);
+
+        auto outputArrays =
+            mlx::core::array::make_arrays(std::move(outShapes), outDtypes, prim, primInputs);
+        for (size_t i = 0; i < nLoopVars; ++i)
+            values.emplace(ToKey(op->getResult(i)), std::move(outputArrays[i]));
+        return true;
+    }
+
+    // inside_compile == true but allow_while_primitive == false:
+    // This only happens for nested while-loops inside the *eager* (non-JIT)
+    // path's mx::compile optimization probe (lines below). That probe
+    // captures &values by reference, so a WhileLoopPrimitive created here
+    // would bake stale external values as constants → infinite loop.
+    //
+    // Under jax.jit(), the PJRT compile path (mlx_executable.cc) sets
+    // allow_while_primitive=true, so nested while-loops always take the
+    // WhileLoopPrimitive path above and never reach here.
+    //
+    // Throwing causes the probe to fail gracefully, falling back to the
+    // uncompiled ExecuteRegion loop for this outer while.
     if (ctx.inside_compile) {
-        throw CompileIncompatibleError("stablehlo.while requires eval()");
+        throw CompileIncompatibleError(
+            "stablehlo.while: nested while-loops are not supported in the "
+            "eager compile-probe path; falling back to uncompiled execution");
     }
 
     std::vector<mlx::core::array> loopVars;

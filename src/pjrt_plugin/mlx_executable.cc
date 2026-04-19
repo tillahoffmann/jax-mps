@@ -569,6 +569,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
                 ExecContext local_ctx;
                 local_ctx.module = *parsed_module_.module;
                 local_ctx.inside_compile = true;
+                local_ctx.allow_while_primitive = true;
                 if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
                     return {};
                 }
