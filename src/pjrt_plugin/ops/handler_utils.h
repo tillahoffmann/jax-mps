@@ -3,6 +3,8 @@
 
 #include <mlx/mlx.h>
 
+#include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -23,6 +25,26 @@
 
 namespace jax_mps {
 
+// Process-global shutdown flag. Guards compile_erase calls that may run
+// during process teardown — the MLX CompilerCache (a function-local static)
+// may already be destroyed, and calling compile_erase would SIGSEGV.
+// The atexit hook is registered at static-init time, before the CompilerCache
+// is first used, so it fires after the cache destructor in LIFO order.
+inline std::atomic<bool>& ProcessShutdownFlag() {
+    static std::atomic<bool> flag{false};
+    return flag;
+}
+
+inline const int kProcessShutdownHookInstalled = [] {
+    std::atexit([] { ProcessShutdownFlag().store(true, std::memory_order_relaxed); });
+    return 0;
+}();
+
+inline bool IsProcessShuttingDown() {
+    (void)kProcessShutdownHookInstalled;
+    return ProcessShutdownFlag().load(std::memory_order_relaxed);
+}
+
 // Value map type using void* as key (from mlir::Value's opaque pointer)
 using ValueMap = std::unordered_map<void*, mlx::core::array>;
 
@@ -30,6 +52,10 @@ using ValueMap = std::unordered_map<void*, mlx::core::array>;
 struct ExecContext {
     mlir::ModuleOp module;
     bool inside_compile = false;  // true when running inside mlx::core::compile()
+    // true only when external values are threaded as explicit function inputs
+    // (PJRT compile path, WhileLoopPrimitive body/cond lambdas). false in
+    // non-compile probe lambdas where &values is a closure capture.
+    bool allow_while_primitive = false;
 };
 
 // Exception thrown when an op is incompatible with mlx::core::compile() tracing.

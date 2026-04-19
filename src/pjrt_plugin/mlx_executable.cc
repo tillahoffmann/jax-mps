@@ -488,7 +488,10 @@ MlxExecutable::~MlxExecutable() {
     // this, the cache holds a CacheEntry — including the full traced tape and
     // any captured constants — for the lifetime of the process, even after JAX
     // evicts this executable.
-    if (compile_attempted_) {
+    //
+    // Skip during process shutdown: the static CompilerCache may already be
+    // destroyed, and calling compile_erase on it would SIGSEGV / double-free.
+    if (compile_attempted_ && !IsProcessShuttingDown()) {
         mlx::core::detail::compile_erase(reinterpret_cast<std::uintptr_t>(this));
     }
 }
@@ -569,6 +572,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
                 ExecContext local_ctx;
                 local_ctx.module = *parsed_module_.module;
                 local_ctx.inside_compile = true;
+                local_ctx.allow_while_primitive = true;
                 if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
                     return {};
                 }
