@@ -50,11 +50,16 @@ MlxClient::MlxClient() {
             }
         }
         if (!ok || pos != s.size()) {
-            MPS_LOG_WARN("Invalid JAX_MPS_CACHE_LIMIT_BYTES=%s, leaving MLX default\n", env);
-        } else {
-            mlx::core::set_cache_limit(cache_limit);
-            MPS_LOG_DEBUG("MlxClient cache_limit set to %zu\n", cache_limit);
+            // Caller meant to set a cap and got it wrong. Fall back to 1 GiB
+            // rather than the MLX default — a typo shouldn't silently
+            // re-enable unbounded residency growth in the scenarios that
+            // motivated this knob (long multi-computation processes).
+            cache_limit = 1ULL << 30;
+            MPS_LOG_WARN("Invalid JAX_MPS_CACHE_LIMIT_BYTES=%s, falling back to %zu\n", env,
+                         cache_limit);
         }
+        mlx::core::set_cache_limit(cache_limit);
+        MPS_LOG_DEBUG("MlxClient cache_limit set to %zu\n", cache_limit);
     }
 
     MPS_LOG_DEBUG("MlxClient initialized with MLX GPU backend\n");
