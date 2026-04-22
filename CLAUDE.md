@@ -78,6 +78,7 @@ uv run pytest -m benchmark --benchmark-only -n0
 
 - `JAX_MPS_NO_OPTIMIZE=1` disables the StableHLO simplification + MPS fusion passes. Useful for bisecting whether a regression comes from a fusion.
 - `JAX_MPS_DUMP_OPTIMIZED_IR=<dir>` writes each parsed+optimized module as `<dir>/module_<n>.mlir` (post-pass, so `@mps.*` custom_calls from fusion are visible). Used by `tests/test_fusion.py`; also handy for ad-hoc inspection.
+- `JAX_MPS_CACHE_LIMIT_BYTES=<n>` caps MLX's internal MTLBuffer cache (calls `mlx::core::set_cache_limit`). Unset by default — MLX picks ~1.5x the recommended working set. Set this when running many unrelated computations in one process (e.g. the upstream JAX suite via `scripts/run_jax_tests.py`, which sets 1 GiB) to prevent freed buffers from accumulating until the OS swaps them. Avoid for training/inference: a low cap forces per-iteration reallocation and regresses throughput on Max-class GPUs.
 
 # Adding New Fusion Patterns
 

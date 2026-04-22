@@ -187,7 +187,17 @@ def main():
         cmd += [f"--memory-csv={args.memory_csv}"]
     if args.current_test_file:
         cmd += [f"--current-test-file={args.current_test_file}"]
-    env = {**os.environ, "JAX_PLATFORMS": "mps"}
+    # Cap MLX's buffer cache for the test-suite scenario: thousands of
+    # unrelated computations in one process otherwise leave freed MTLBuffers
+    # resident until they swap (see #134, #139). Real workloads keep MLX's
+    # tuned default; only the test runner sets this.
+    env = {
+        **os.environ,
+        "JAX_PLATFORMS": "mps",
+        "JAX_MPS_CACHE_LIMIT_BYTES": os.environ.get(
+            "JAX_MPS_CACHE_LIMIT_BYTES", str(1 << 30)
+        ),
+    }
     if args.memory_csv or args.current_test_file:
         # Make the local plugin importable from the scripts/ directory.
         scripts_dir = str(Path(__file__).resolve().parent)
