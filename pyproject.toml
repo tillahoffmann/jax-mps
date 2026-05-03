@@ -1,13 +1,13 @@
 [project]
 name = "jax-mps"
-version = "0.9.14"
+version = "0.10.0"
 description = "JAX backend for Apple Metal Performance Shaders (MPS)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
-    "jax>=0.9.0,<0.10",
-    "jaxlib>=0.9.0,<0.10",
+    "jax>=0.10.0,<0.11",
+    "jaxlib>=0.10.0,<0.11",
 ]
 keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
 classifiers = [
@@ -50,6 +50,9 @@ before-all = "./scripts/setup_deps.sh"
 
 [tool.uv.sources]
 ctcache = { git = "https://github.com/matus-chochlik/ctcache.git" }
+# numpyro 0.21.0 imports xla_pmap_p eagerly, which JAX 0.10 removed. Pin to
+# the post-release fix until the next numpyro release picks it up.
+numpyro = { git = "https://github.com/pyro-ppl/numpyro.git", rev = "18c2cc135a524ae7ce4042c85f133048c57c6f92" }
 
 [dependency-groups]
 dev = [

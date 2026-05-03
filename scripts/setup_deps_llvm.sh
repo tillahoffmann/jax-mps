@@ -7,11 +7,11 @@
 # shellcheck source=setup_deps_common.sh
 source "$(dirname "$0")/setup_deps_common.sh" "$@"
 
-# Pin to versions matching jaxlib 0.9.0 for bytecode compatibility
-# These are extracted from XLA commit bb760b047bdbfeff962f0366ad5cc782c98657e0
-XLA_COMMIT="${XLA_COMMIT:-bb760b047bdbfeff962f0366ad5cc782c98657e0}"
-STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-127d2f238010589ac96f2f402a27afc9dccbb7ab}"
-LLVM_COMMIT="${LLVM_COMMIT:-f6d0a512972a74ef100723b9526a6a0ddb23f894}"
+# Pin to versions matching jaxlib 0.10.0 for bytecode compatibility
+# These are extracted from XLA commit b6f37ab7767f428fd6f993de5e211643d47d4deb
+XLA_COMMIT="${XLA_COMMIT:-b6f37ab7767f428fd6f993de5e211643d47d4deb}"
+STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-3a8886de8515f859875df37578b5caf33f6e52f3}"
+LLVM_COMMIT="${LLVM_COMMIT:-815edc3ff646392bfee2b381d37dd35e4b04f9c5}"
 
 echo "=== jax-mps LLVM/StableHLO setup ==="
 echo "Prefix:       $PREFIX"
@@ -32,7 +32,14 @@ fi
 if [ "$FORCE_REBUILD" = true ]; then
     rm -rf "$PREFIX/lib/cmake/mlir" "$PREFIX/lib/cmake/llvm"
     rm -f "$PREFIX/lib/libStablehloOps.a"
-    rm -f "$PREFIX/include/xla/pjrt/c/pjrt_c_api.h"
+    # Wipe MLIR/LLVM/StableHLO/XLA headers so a stale install can't leak into
+    # the include path during the rebuild (tblgen and the StableHLO sources
+    # both follow the install include first and would otherwise see old
+    # .td/.h files from a prior pin).
+    rm -rf "$PREFIX/include/llvm" "$PREFIX/include/llvm-c"
+    rm -rf "$PREFIX/include/mlir" "$PREFIX/include/mlir-c"
+    rm -rf "$PREFIX/include/stablehlo"
+    rm -rf "$PREFIX/include/xla"
     rm -f "$LLVM_STAMP"
     rm -rf "$BUILD_DIR/llvm-build" "$BUILD_DIR/stablehlo-build"
 fi

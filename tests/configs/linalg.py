@@ -410,13 +410,12 @@ def make_linalg_op_configs():
             name="qr_reconstruct_batched_2",
         )
 
-        # QR complete mode (full_matrices=True, tall input)
-        # JAX does not support QR gradient in complete mode (jax-ml/jax#23533).
+        # QR complete mode (full_matrices=True, tall input). JAX 0.10 added the
+        # gradient via jax-ml/jax#23533.
         yield OperationTestConfig(
             _qr_reconstruct_complete,
             lambda key: random.normal(key, (4, 2)),
             name="qr_reconstruct_complete_4x2",
-            grad_xfail="Unimplemented case of QR decomposition derivative",
         )
 
         # Large QR (at GPU kernel max: 64×64)
@@ -433,13 +432,12 @@ def make_linalg_op_configs():
             name="qr_reconstruct_64x32",
         )
 
-        # Non-square QR (wide: 8×16)
-        # JAX does not support QR gradient for wide matrices (jax-ml/jax#23533).
+        # Non-square QR (wide: 8×16). JAX 0.10 added the gradient via
+        # jax-ml/jax#23533.
         yield OperationTestConfig(
             _qr_reconstruct,
             lambda key: random.normal(key, (8, 16)),
             name="qr_reconstruct_8x16",
-            grad_xfail="Unimplemented case of QR decomposition derivative",
         )
 
         # --- Eigenvalue Decomposition ---

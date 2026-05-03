@@ -267,7 +267,7 @@ module @test {{
     exe = client.compile_and_load(stablehlo_text.encode(), device_list)
 
     x = numpy.array([0.0, 0.5, -0.5, 0.9], dtype=numpy.float32)
-    buf = client.buffer_from_pyval(x, devices[0])
+    buf = jax.device_put(x, devices[0])
     result = numpy.asarray(exe.execute([buf])[0])
     expected = expected_fn(x)
     numpy.testing.assert_allclose(result, expected, atol=1e-5, rtol=1e-5)

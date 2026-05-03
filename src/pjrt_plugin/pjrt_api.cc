@@ -90,6 +90,12 @@ void MPS_Error_Destroy(PJRT_Error_Destroy_Args* args);
 void MPS_Error_Message(PJRT_Error_Message_Args* args);
 PJRT_Error* MPS_Error_GetCode(PJRT_Error_GetCode_Args* args);
 
+// jax 0.10's PjrtErrorToStatus calls this to extract structured payloads from
+// errors. Our errors carry no payloads, so report success and skip iteration.
+static PJRT_Error* MPS_Error_ForEachPayload(PJRT_Error_ForEachPayload_Args* args) {
+    return nullptr;
+}
+
 // Plugin API (pjrt_client.cc)
 PJRT_Error* MPS_Plugin_Initialize(PJRT_Plugin_Initialize_Args* args);
 PJRT_Error* MPS_Plugin_Attributes(PJRT_Plugin_Attributes_Args* args);
@@ -205,6 +211,7 @@ PJRT_Error* MPS_CopyToDeviceStream_CurrentBytes(PJRT_CopyToDeviceStream_CurrentB
 
 // TopologyDescription API (pjrt_topology.cc)
 PJRT_Error* MPS_Client_TopologyDescription(PJRT_Client_TopologyDescription_Args* args);
+PJRT_Error* MPS_TopologyDescription_Fingerprint(PJRT_TopologyDescription_Fingerprint_Args* args);
 PJRT_Error* MPS_TopologyDescription_Create(PJRT_TopologyDescription_Create_Args* args);
 PJRT_Error* MPS_TopologyDescription_Destroy(PJRT_TopologyDescription_Destroy_Args* args);
 PJRT_Error* MPS_TopologyDescription_PlatformName(PJRT_TopologyDescription_PlatformName_Args* args);
@@ -376,6 +383,13 @@ static const PJRT_Api pjrt_api = {
     .PJRT_Buffer_DonateWithControlDependency = nullptr,
     .PJRT_Event_Create = nullptr,
     .PJRT_Event_Set = nullptr,
+    .PJRT_Device_GetAttributes = nullptr,
+    .PJRT_Client_Load = nullptr,
+    .PJRT_LoadedExecutable_AddressableDeviceLogicalIds = nullptr,
+    .PJRT_Buffer_Bitcast = nullptr,
+    .PJRT_Error_ForEachPayload = MPS_Error_ForEachPayload,
+    .PJRT_TopologyDescription_Fingerprint = MPS_TopologyDescription_Fingerprint,
+    .PJRT_Executable_ParameterMemoryKinds = nullptr,
 };
 
 extern "C" {

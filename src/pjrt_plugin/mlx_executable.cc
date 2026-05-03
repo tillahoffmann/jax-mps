@@ -137,20 +137,29 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     }
     size_t expectedSize = numElements * elemSize;
 
-    // MLIR stores i1 (boolean) data as bit-packed: 1 bit per element.
+    // MLIR's DenseElementsAttr stores i1 either bit-packed (1 bit per element,
+    // legacy / aggressively-folded constants) or byte-per-element (modern, what
+    // StableHLO 1.16 / the bytecode shipped with jaxlib 0.10 produces).
+    // Disambiguate by comparing the raw data size against both encodings.
     if (mlxDtype == mlx::core::bool_) {
-        size_t expectedBitPackedSize = (numElements + 7) / 8;
-        if (rawData.size() < expectedBitPackedSize) {
-            MPS_LOG_ERROR(
-                "Boolean constant data size mismatch: got %zu bytes, expected %zu (bit-packed for "
-                "%zu elements)\n",
-                rawData.size(), expectedBitPackedSize, numElements);
-            return std::nullopt;
-        }
+        const size_t bitPackedSize = (numElements + 7) / 8;
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(rawData.data());
         std::vector<uint8_t> unpacked(numElements);
-        const uint8_t* bits = reinterpret_cast<const uint8_t*>(rawData.data());
-        for (size_t i = 0; i < numElements; ++i) {
-            unpacked[i] = (bits[i / 8] >> (i % 8)) & 1;
+        if (rawData.size() >= numElements) {
+            // One byte per element — value is a non-zero byte for true.
+            for (size_t i = 0; i < numElements; ++i) {
+                unpacked[i] = bytes[i] != 0 ? 1 : 0;
+            }
+        } else if (rawData.size() >= bitPackedSize) {
+            for (size_t i = 0; i < numElements; ++i) {
+                unpacked[i] = (bytes[i / 8] >> (i % 8)) & 1;
+            }
+        } else {
+            MPS_LOG_ERROR(
+                "Boolean constant data size mismatch: got %zu bytes, expected %zu (bit-packed) or "
+                "%zu (byte-per-element) for %zu elements\n",
+                rawData.size(), bitPackedSize, numElements, numElements);
+            return std::nullopt;
         }
         auto arr = mlx::core::array(unpacked.data(), shape, mlx::core::uint8);
         return mlx::core::astype(arr, mlx::core::bool_);

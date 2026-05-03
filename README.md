@@ -34,7 +34,7 @@ pip install jax-mps
 
 The plugin registers itself with JAX automatically and is enabled by default. Set `JAX_PLATFORMS=mps` to select the MPS backend explicitly.
 
-jax-mps is built against the StableHLO bytecode format matching jaxlib 0.9.x. Using a different jaxlib version will likely cause deserialization failures at JIT compile time. See [Version Pinning](#version-pinning) for details.
+jax-mps is built against the StableHLO bytecode format matching jaxlib 0.10.x. Using a different jaxlib version will likely cause deserialization failures at JIT compile time. See [Version Pinning](#version-pinning) for details.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ This project implements a [PJRT plugin](https://openxla.org/xla/pjrt) that uses 
 
 ## Building
 
-1. Install build tools and build and install LLVM/MLIR & StableHLO. This is a one-time setup and takes about 30 minutes. See the `setup_deps.sh` script for further options, such as forced re-installation, installation location, etc. The script pins LLVM and StableHLO to specific commits matching jaxlib 0.9.0 for bytecode compatibility (see the section on [Version Pinning](#version-pinning)) for details.
+1. Install build tools and build and install LLVM/MLIR & StableHLO. This is a one-time setup and takes about 30 minutes. See the `setup_deps.sh` script for further options, such as forced re-installation, installation location, etc. The script pins LLVM and StableHLO to specific commits matching jaxlib 0.10.0 for bytecode compatibility (see the section on [Version Pinning](#version-pinning)) for details.
 
 ```bash
 $ brew install cmake ninja
@@ -61,12 +61,12 @@ $ uv pip install -e .
 
 ### Version Pinning
 
-The script pins LLVM and StableHLO to specific commits matching jaxlib 0.9.0 for bytecode compatibility. To update these versions for a different jaxlib release, trace the dependency chain:
+The script pins LLVM and StableHLO to specific commits matching jaxlib 0.10.0 for bytecode compatibility. To update these versions for a different jaxlib release, trace the dependency chain:
 
 ```bash
 # 1. Find XLA commit used by jaxlib
-curl -s https://raw.githubusercontent.com/jax-ml/jax/jax-v0.9.0/third_party/xla/revision.bzl
-# → XLA_COMMIT = "bb760b04..."
+curl -s https://raw.githubusercontent.com/jax-ml/jax/jax-v0.10.0/third_party/xla/revision.bzl
+# → XLA_COMMIT = "b6f37ab7..."
 
 # 2. Find LLVM commit used by that XLA version
 curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/llvm/workspace.bzl

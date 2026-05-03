@@ -60,3 +60,11 @@ PJRT_Error* MPS_TopologyDescription_Attributes(PJRT_TopologyDescription_Attribut
     args->num_attributes = 0;
     return nullptr;
 }
+
+PJRT_Error* MPS_TopologyDescription_Fingerprint(PJRT_TopologyDescription_Fingerprint_Args* args) {
+    // jax 0.10's compilation cache key derives a topology fingerprint via this
+    // entry point. Our topology is a single-process, single-MPS-device fixture,
+    // so a constant suffices.
+    args->fingerprint = 0x4D505300'00000001ULL;  // 'MPS\0' + version
+    return nullptr;
+}
