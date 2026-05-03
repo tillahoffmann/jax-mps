@@ -21,9 +21,12 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# Files excluded from the suite
+# Files / directories excluded from the suite
 EXCLUDED_FILES = {
     "x64_context_test.py",  # requires float64 -- MPS only supports float32
+    "pallas",  # Pallas kernel-authoring path is not implemented for MPS;
+    #          interpret-mode tests hang the runner without firing the
+    #          per-test --timeout (native-code stall).
 }
 
 
