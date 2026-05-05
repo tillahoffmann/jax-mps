@@ -176,7 +176,7 @@ public:
           cacheGuard_(std::make_shared<CacheGuard>()),
           nLoopVars_(nLoopVars),
           nExt_(nExt) {
-        if (stream.device != mlx::core::Device::cpu) {
+        if (stream.device.type != mlx::core::Device::cpu) {
             throw std::runtime_error(
                 "WhileLoopPrimitive must be on the CPU stream \u2014 GPU stream "
                 "placement would deadlock on internal eval() calls");
