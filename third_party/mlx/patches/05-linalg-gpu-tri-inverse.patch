@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index 2d25fee..d399e8e 100644
+index c190478..78a0c33 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -222,8 +222,117 @@ array ensure_row_contiguous(const array& src) {
+@@ -227,8 +227,120 @@ array ensure_row_contiguous(const array& src) {
    size_t elem_size = size_of(a.dtype());
  
    if (tri_) {
@@ -30,8 +30,11 @@ index 2d25fee..d399e8e 100644
 +    auto& s = stream();
 +    auto& d = metal::device(s.device);
 +
-+    d.end_encoding(s.index);
-+    auto* cb = d.get_command_buffer(s.index);
++    auto& enc = metal::get_command_encoder(s);
++
++
++    enc.end_encoding();
++    auto* cb = enc.get_command_buffer();
 +    id<MTLCommandBuffer> cmd_buf =
 +        (__bridge id<MTLCommandBuffer>)cb;
 +    id<MTLDevice> mtl_dev =
@@ -87,8 +90,8 @@ index 2d25fee..d399e8e 100644
 +    }
 +
 +    // Keep temporaries alive until GPU work completes.
-+    d.add_temporary(std::move(a_temp), s.index);
-+    d.add_temporary(std::move(identity_temp), s.index);
++    enc.add_temporary(std::move(a_temp));
++    enc.add_temporary(std::move(identity_temp));
 +
 +    // Zero out the other triangle (MPS solve may leave garbage there).
 +    // This runs in a completion handler after the command buffer finishes.

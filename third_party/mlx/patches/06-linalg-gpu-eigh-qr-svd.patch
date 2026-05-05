@@ -3,7 +3,7 @@ index d399e8e..e1ac0d4 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
 @@ -456,4 +456,813 @@ array ensure_row_contiguous(const array& src) {
-   d.add_temporary(std::move(identity_temp), s.index);
+   enc.add_temporary(std::move(identity_temp));
  }
  
 +// ---------------------------------------------------------------------------
@@ -299,7 +299,7 @@ index d399e8e..e1ac0d4 100644
 +
 +    // Use MLX's managed compute encoder (ensures proper ordering with
 +    // prior work that produced the input arrays).
-+    auto& compute_encoder = d.get_command_encoder(s.index);
++    auto& compute_encoder = metal::get_command_encoder(s);
 +    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
 +    compute_encoder.set_input_array(a_contig, 0);
 +    compute_encoder.set_output_array(values, 1);
@@ -317,9 +317,9 @@ index d399e8e..e1ac0d4 100644
 +    // Sorting is done in the Metal kernel (in shared memory before writing).
 +
 +    if (!compute_eigenvectors_) {
-+        d.add_temporary(std::move(vectors), s.index);
++        compute_encoder.add_temporary(std::move(vectors));
 +    }
-+    d.add_temporary(std::move(a_contig), s.index);
++    compute_encoder.add_temporary(std::move(a_contig));
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ index d399e8e..e1ac0d4 100644
 +        0u
 +    };
 +
-+    auto& compute_encoder = d.get_command_encoder(s.index);
++    auto& compute_encoder = metal::get_command_encoder(s);
 +    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
 +    compute_encoder.set_input_array(a_contig, 0);
 +    compute_encoder.set_output_array(q, 1);
@@ -521,7 +521,7 @@ index d399e8e..e1ac0d4 100644
 +        MTL::Size(num_matrices, 1, 1),
 +        MTL::Size(tg_size, 1, 1));
 +
-+    d.add_temporary(std::move(a_contig), s.index);
++    compute_encoder.add_temporary(std::move(a_contig));
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -785,7 +785,7 @@ index d399e8e..e1ac0d4 100644
 +    float tol = 1e-7f;
 +    uint32_t max_sweeps = (K <= 8) ? 30 : (K <= 16 ? 50 : 100);
 +
-+    auto& compute_encoder = d.get_command_encoder(s.index);
++    auto& compute_encoder = metal::get_command_encoder(s);
 +    compute_encoder.set_compute_pipeline_state((__bridge MTL::ComputePipelineState*)pso);
 +    compute_encoder.set_input_array(a_contig, 0);
 +
@@ -812,7 +812,7 @@ index d399e8e..e1ac0d4 100644
 +
 +    // Sorting is done in the Metal kernel (in shared memory before writing).
 +
-+    d.add_temporary(std::move(a_contig), s.index);
++    compute_encoder.add_temporary(std::move(a_contig));
 +}
 +
  } // namespace mlx::core

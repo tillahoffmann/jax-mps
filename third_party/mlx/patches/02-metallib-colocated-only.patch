@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index 15824d6..15d4826 100644
+index d678461..c79c46d 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -134,9 +134,9 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
+@@ -161,9 +161,9 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
  }
  
  MTL::Library* load_default_library(MTL::Device* device) {
@@ -14,7 +14,7 @@ index 15824d6..15d4826 100644
    std::tie(lib, error[0]) = load_colocated_library(device, "mlx");
    if (lib) {
      return lib;
-@@ -147,32 +147,16 @@ MTL::Library* load_default_library(MTL::Device* device) {
+@@ -174,32 +174,16 @@ MTL::Library* load_default_library(MTL::Device* device) {
      return lib;
    }
  

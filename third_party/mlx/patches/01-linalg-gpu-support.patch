@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
-index 11197570..658e1226 100644
+index bbb0813..53830f3 100644
 --- a/mlx/backend/metal/CMakeLists.txt
 +++ b/mlx/backend/metal/CMakeLists.txt
-@@ -99,6 +99,7 @@ target_sources(
+@@ -118,6 +118,7 @@ target_sources(
            ${CMAKE_CURRENT_SOURCE_DIR}/fft.cpp
            ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.cpp
            ${CMAKE_CURRENT_SOURCE_DIR}/indexing.cpp
@@ -12,10 +12,10 @@ index 11197570..658e1226 100644
            ${CMAKE_CURRENT_SOURCE_DIR}/scaled_dot_product_attention.cpp
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
 new file mode 100644
-index 00000000..b791d82d
+index 0000000..9e35e82
 --- /dev/null
 +++ b/mlx/backend/metal/linalg.mm
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,80 @@
 +// GPU implementation of Cholesky using Metal Performance Shaders.
 +
 +#include "mlx/backend/gpu/copy.h"
@@ -52,8 +52,10 @@ index 00000000..b791d82d
 +
 +  // End the current compute encoder so we can encode MPS operations
 +  // directly on the command buffer.
-+  d.end_encoding(s.index);
-+  auto* cb = d.get_command_buffer(s.index);
++  auto& enc = metal::get_command_encoder(s);
++
++  enc.end_encoding();
++  auto* cb = enc.get_command_buffer();
 +  id<MTLCommandBuffer> cmd_buf =
 +      (__bridge id<MTLCommandBuffer>)cb;
 +  id<MTLDevice> mtl_dev =
@@ -95,7 +97,7 @@ index 00000000..b791d82d
 +
 +} // namespace mlx::core
 diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
-index 5f6376c5..1969adab 100644
+index d5bbf79..43e8ada 100644
 --- a/mlx/backend/metal/primitives.cpp
 +++ b/mlx/backend/metal/primitives.cpp
 @@ -216,10 +216,7 @@ void Inverse::eval_gpu(const std::vector<array>& inputs, array& output) {
@@ -111,10 +113,10 @@ index 5f6376c5..1969adab 100644
  void Eig::eval_gpu(
      const std::vector<array>& inputs,
 diff --git a/mlx/linalg.cpp b/mlx/linalg.cpp
-index afa8e447..6a61d1cf 100644
+index 7ac080d..7130a40 100644
 --- a/mlx/linalg.cpp
 +++ b/mlx/linalg.cpp
-@@ -329,7 +329,6 @@ array cholesky(
+@@ -331,7 +331,6 @@ array cholesky(
      const array& a,
      bool upper /* = false */,
      StreamOrDevice s /* = {} */) {

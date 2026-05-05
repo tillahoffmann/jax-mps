@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index 81176d3..f51a617 100644
+index de33027..c190478 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -203,4 +203,147 @@ array ensure_row_contiguous(const array& src) {
+@@ -209,4 +209,150 @@ array ensure_row_contiguous(const array& src) {
        }));
  }
  
@@ -61,8 +61,11 @@ index 81176d3..f51a617 100644
 +  auto& s = stream();
 +  auto& d = metal::device(s.device);
 +
-+  d.end_encoding(s.index);
-+  auto* cb = d.get_command_buffer(s.index);
++  auto& enc = metal::get_command_encoder(s);
++
++
++  enc.end_encoding();
++  auto* cb = enc.get_command_buffer();
 +  id<MTLCommandBuffer> cmd_buf =
 +      (__bridge id<MTLCommandBuffer>)cb;
 +  id<MTLDevice> mtl_dev =
@@ -144,14 +147,14 @@ index 81176d3..f51a617 100644
 +  }
 +
 +  // Keep temporaries alive until GPU work completes.
-+  d.add_temporary(std::move(lu_temp), s.index);
-+  d.add_temporary(std::move(piv_temp), s.index);
-+  d.add_temporary(std::move(identity_temp), s.index);
++  enc.add_temporary(std::move(lu_temp));
++  enc.add_temporary(std::move(piv_temp));
++  enc.add_temporary(std::move(identity_temp));
 +}
 +
  } // namespace mlx::core
 diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
-index bdea469..5764ddd 100644
+index 9f1b189..fc9766e 100644
 --- a/mlx/backend/metal/primitives.cpp
 +++ b/mlx/backend/metal/primitives.cpp
 @@ -212,9 +212,7 @@ void SVD::eval_gpu(
