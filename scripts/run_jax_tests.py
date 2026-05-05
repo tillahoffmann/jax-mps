@@ -42,11 +42,35 @@ def get_jax_version() -> str:
 
 def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
     tests_dir = clone_dir / "tests"
-    if keep and tests_dir.is_dir():
-        print(f"Reusing existing clone at {clone_dir}")
-        return tests_dir
-
     tag = f"jax-v{version}"
+
+    if keep and tests_dir.is_dir():
+        local = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=clone_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        remote = (
+            subprocess.run(
+                ["git", "ls-remote", "origin", f"refs/tags/{tag}"],
+                cwd=clone_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            .stdout.split("\t", 1)[0]
+            .strip()
+        )
+        if local and remote and local == remote:
+            print(f"Reusing existing clone at {clone_dir} (HEAD={local[:7]} == {tag})")
+            return tests_dir
+        print(
+            f"Existing clone at {clone_dir} is out of date "
+            f"(HEAD={local[:7] or '?'}, remote {tag}={remote[:7] or '?'}); re-cloning."
+        )
+
     print(f"Cloning JAX {tag} tests to {clone_dir} ...")
 
     if clone_dir.exists():
