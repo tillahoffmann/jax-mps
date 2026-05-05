@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index d399e8e..e1ac0d4 100644
+index 0c3333d..108ace6 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -456,4 +456,813 @@ array ensure_row_contiguous(const array& src) {
+@@ -460,4 +460,813 @@ array ensure_row_contiguous(const array& src) {
    enc.add_temporary(std::move(identity_temp));
  }
  
@@ -817,7 +817,7 @@ index d399e8e..e1ac0d4 100644
 +
  } // namespace mlx::core
 diff --git a/mlx/backend/metal/primitives.cpp b/mlx/backend/metal/primitives.cpp
-index 5764ddd..b2c82c5 100644
+index fc9766e..837db89 100644
 --- a/mlx/backend/metal/primitives.cpp
 +++ b/mlx/backend/metal/primitives.cpp
 @@ -200,17 +200,9 @@ void RandomBits::eval_gpu(const std::vector<array>& inputs, array& out) {

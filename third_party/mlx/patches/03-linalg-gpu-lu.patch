@@ -1,5 +1,5 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index 9e35e82..de33027 100644
+index 2ca569d..acb65f5 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
 @@ -1,5 +1,6 @@
@@ -18,7 +18,7 @@ index 9e35e82..de33027 100644
 +
 +// Return a row-contiguous copy of `src`, or `src` itself if already contiguous.
 +// When a copy is made, the caller must keep the returned array alive (e.g. via
-+// d.add_temporary) until GPU work that references it has completed.
++// CommandEncoder::add_temporary) until GPU work that references it has completed.
 +array ensure_row_contiguous(const array& src) {
 +  if (src.flags().row_contiguous) {
 +    return src;
@@ -33,7 +33,7 @@ index 9e35e82..de33027 100644
  void Cholesky::eval_gpu(const std::vector<array>& inputs, array& out) {
    const auto& a = inputs[0];
  
-@@ -77,4 +94,119 @@
+@@ -76,4 +93,117 @@
    }
  }
  
@@ -74,8 +74,6 @@ index 9e35e82..de33027 100644
 +  auto& d = metal::device(s.device);
 +
 +  auto& enc = metal::get_command_encoder(s);
-+
-+
 +  enc.end_encoding();
 +  auto* cb = enc.get_command_buffer();
 +  id<MTLCommandBuffer> cmd_buf =

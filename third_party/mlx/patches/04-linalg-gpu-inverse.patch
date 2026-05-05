@@ -1,8 +1,8 @@
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
-index de33027..c190478 100644
+index acb65f5..bfcf51d 100644
 --- a/mlx/backend/metal/linalg.mm
 +++ b/mlx/backend/metal/linalg.mm
-@@ -209,4 +209,150 @@ array ensure_row_contiguous(const array& src) {
+@@ -206,4 +206,148 @@ array ensure_row_contiguous(const array& src) {
        }));
  }
  
@@ -62,8 +62,6 @@ index de33027..c190478 100644
 +  auto& d = metal::device(s.device);
 +
 +  auto& enc = metal::get_command_encoder(s);
-+
-+
 +  enc.end_encoding();
 +  auto* cb = enc.get_command_buffer();
 +  id<MTLCommandBuffer> cmd_buf =

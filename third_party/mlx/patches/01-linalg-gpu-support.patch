@@ -12,10 +12,10 @@ index bbb0813..53830f3 100644
            ${CMAKE_CURRENT_SOURCE_DIR}/scaled_dot_product_attention.cpp
 diff --git a/mlx/backend/metal/linalg.mm b/mlx/backend/metal/linalg.mm
 new file mode 100644
-index 0000000..9e35e82
+index 0000000..2ca569d
 --- /dev/null
 +++ b/mlx/backend/metal/linalg.mm
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,79 @@
 +// GPU implementation of Cholesky using Metal Performance Shaders.
 +
 +#include "mlx/backend/gpu/copy.h"
@@ -53,7 +53,6 @@ index 0000000..9e35e82
 +  // End the current compute encoder so we can encode MPS operations
 +  // directly on the command buffer.
 +  auto& enc = metal::get_command_encoder(s);
-+
 +  enc.end_encoding();
 +  auto* cb = enc.get_command_buffer();
 +  id<MTLCommandBuffer> cmd_buf =
