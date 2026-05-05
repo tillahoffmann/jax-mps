@@ -70,14 +70,14 @@ curl -s https://raw.githubusercontent.com/jax-ml/jax/jax-v0.10.0/third_party/xla
 
 # 2. Find LLVM commit used by that XLA version
 curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/llvm/workspace.bzl
-# → LLVM_COMMIT = "f6d0a512..."
+# → LLVM_COMMIT = "815edc3f..."
 
 # 3. Find StableHLO commit used by that XLA version
 curl -s https://raw.githubusercontent.com/openxla/xla/<XLA_COMMIT>/third_party/stablehlo/workspace.bzl
-# → STABLEHLO_COMMIT = "127d2f23..."
+# → STABLEHLO_COMMIT = "3a8886de..."
 ```
 
-Then update the `STABLEHLO_COMMIT` and `LLVM_COMMIT_OVERRIDE` variables in `setup_deps.sh`.
+Then update the `XLA_COMMIT`, `LLVM_COMMIT`, and `STABLEHLO_COMMIT` variables at the top of `scripts/setup_deps_llvm.sh`.
 
 ## Project Structure
 
