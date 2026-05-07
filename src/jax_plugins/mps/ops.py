@@ -600,6 +600,25 @@ def _qr_lowering(ctx, operand, *, full_matrices, **kwargs):
     ).results
 
 
+def _svd_via_transpose(operand, *, full_matrices, compute_uv):
+    """Compute SVD of a wide matrix (M < N) by reducing to the tall case.
+
+    For A with shape (..., M, N) and M < N:  A = (Aᵀ)ᵀ = (Û Σ V̂ᵀ)ᵀ = V̂ Σ Ûᵀ,
+    where Û Σ V̂ᵀ is the SVD of Aᵀ. So U = V̂ = (V̂ᵀ)ᵀ, Vᵀ = Ûᵀ.
+    """
+    operand_t = jnp.swapaxes(operand, -1, -2)
+    if compute_uv:
+        u_hat, s, vt_hat = lax_linalg.svd(
+            operand_t, full_matrices=full_matrices, compute_uv=True
+        )
+        u = jnp.swapaxes(vt_hat, -1, -2)
+        vt = jnp.swapaxes(u_hat, -1, -2)
+        # svd_p abstract eval order is (s, u, vt) — match that here so
+        # mlir.lower_fun lines up the results with ctx.avals_out.
+        return s, u, vt
+    return lax_linalg.svd(operand_t, full_matrices=full_matrices, compute_uv=False)
+
+
 def _svd_lowering(
     ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm
 ):
@@ -611,10 +630,15 @@ def _svd_lowering(
     operand_aval = ctx.avals_in[0]
     m, n = operand_aval.shape[-2], operand_aval.shape[-1]
     if m < n:
-        raise NotImplementedError(
-            f"MPS SVD does not yet support wide matrices (M < N). "
-            f"Got {m}×{n}. Transpose the input first."
-        )
+        # MPS SVD kernel only handles tall matrices (M >= N). Reduce to the
+        # tall case by transposing; the recursive lax_linalg.svd call lowers
+        # again through this rule with the dimensions swapped.
+        return mlir.lower_fun(
+            lambda x: _svd_via_transpose(
+                x, full_matrices=full_matrices, compute_uv=compute_uv
+            ),
+            multiple_results=compute_uv,
+        )(ctx, operand)
     fm = "true" if full_matrices else "false"
     if compute_uv:
         # JAX svd_p abstract eval returns (s, u, vt) – note s first!
