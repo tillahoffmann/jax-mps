@@ -121,6 +121,38 @@ def make_conv_op_configs():
                 lambda key: random.uniform(key, (3, 3, 4), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-1d-stride2-dilated",
             ),
+            # lhs_dilation + negative padding on the same axis.
+            # StableHLO semantics dilate first then pad; MLX's conv slices for
+            # negative padding before applying input_dilation, so the two
+            # conventions diverge here. The handler must bridge them.
+            OperationTestConfig(
+                lambda x, kernel: lax.conv_general_dilated(
+                    x,
+                    kernel,
+                    window_strides=(1, 1),
+                    padding=((0, -1), (0, 0)),
+                    lhs_dilation=(2, 1),
+                    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+                ),
+                lambda key: random.uniform(key, (1, 6, 7, 4), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (1, 2, 4, 2), minval=-1.0, maxval=1.0),
+                name="lax.conv_general_dilated-lhs_dilation-neg_padding",
+            ),
+            # lhs_dilation alone (no negative padding) should already work and
+            # serves as a regression guard for the bridging code.
+            OperationTestConfig(
+                lambda x, kernel: lax.conv_general_dilated(
+                    x,
+                    kernel,
+                    window_strides=(1, 1),
+                    padding=((0, 0), (0, 0)),
+                    lhs_dilation=(2, 1),
+                    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+                ),
+                lambda key: random.uniform(key, (1, 6, 7, 4), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (1, 2, 4, 2), minval=-1.0, maxval=1.0),
+                name="lax.conv_general_dilated-lhs_dilation-only",
+            ),
             # Large-kernel conv where kernel_size >= input_size with SAME padding.
             # This can false-positive match the weight-gradient VJP heuristic
             # (kH >= 2*out_H) since the output is small relative to the kernel.

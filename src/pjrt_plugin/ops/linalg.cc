@@ -387,6 +387,31 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
     if (useWeightGradVJP) {
         convResult = vjpResult;
     } else {
+        // StableHLO conv semantics dilate the LHS first, then apply padding.
+        // MLX's conv_general slices the input for negative padding before
+        // applying input_dilation (mlx/ops.cpp:conv_general). The two orders
+        // agree everywhere except on axes where input_dilation > 1 and the
+        // padding is negative; on those axes, materialize the dilated input
+        // here and pass input_dilation=1 so MLX applies the negative padding
+        // to the already-dilated tensor.
+        for (int i = 0; i < numSpatialDims; ++i) {
+            if (inputDilation[i] <= 1)
+                continue;
+            if (paddingLow[i] >= 0 && paddingHigh[i] >= 0)
+                continue;
+            int axis = 1 + i;  // inputT layout is [N, spatial..., C_in].
+            int L = inputT.shape(axis);
+            if (L <= 0)
+                continue;
+            auto dilatedShape = inputT.shape();
+            dilatedShape[axis] = (L - 1) * inputDilation[i] + 1;
+            mlx::core::Shape starts(inputT.ndim(), 0);
+            mlx::core::Shape striding(inputT.ndim(), 1);
+            striding[axis] = inputDilation[i];
+            auto zeros = mlx::core::zeros(dilatedShape, inputT.dtype());
+            inputT = mlx::core::slice_update(zeros, inputT, starts, dilatedShape, striding);
+            inputDilation[i] = 1;
+        }
         convResult =
             mlx::core::conv_general(inputT, kernelT, strides, paddingLow, paddingHigh,
                                     kernelDilation, inputDilation, featureGroupCount, false);
