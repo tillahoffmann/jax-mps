@@ -2,14 +2,12 @@
 // optimization_barrier).
 
 #include <mlx/compile.h>
-#include <mlx/compile_impl.h>
 #include <mlx/fast.h>
 #include <mlx/linalg.h>
 #include <mlx/primitives.h>
 #include <mlx/random.h>
 #include <mlx/transforms.h>
 
-#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -173,7 +171,8 @@ public:
     WhileLoopPrimitive(mlx::core::Stream stream, CondFn condFn, BodyFn bodyCondFn, size_t nLoopVars,
                        size_t nExt)
         : Primitive(stream),
-          cacheGuard_(std::make_shared<CacheGuard>()),
+          compiledBodyCond_(mlx::core::compile(std::move(bodyCondFn))),
+          compiledCond_(mlx::core::compile(std::move(condFn))),
           nLoopVars_(nLoopVars),
           nExt_(nExt) {
         if (stream.device.type != mlx::core::Device::cpu) {
@@ -181,11 +180,6 @@ public:
                 "WhileLoopPrimitive must be on the CPU stream \u2014 GPU stream "
                 "placement would deadlock on internal eval() calls");
         }
-        cacheGuard_->bodyCondId = nextFnId();
-        cacheGuard_->condId = nextFnId();
-        compiledBodyCond_ =
-            mlx::core::detail::compile(std::move(bodyCondFn), cacheGuard_->bodyCondId);
-        compiledCond_ = mlx::core::detail::compile(std::move(condFn), cacheGuard_->condId);
     }
 
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
@@ -262,34 +256,13 @@ private:
             outputs[i].copy_shared_buffer(current[i]);
     }
 
+    // Public mlx::core::compile() returns a std::function whose internal
+    // shared_ptr deleter calls compile_erase when the last copy dies. Cache
+    // eviction is tied to this primitive's lifetime — no manual erase needed.
     CompiledFn compiledBodyCond_;  // returns [cond, body...]
     CompiledFn compiledCond_;      // initial check only
     size_t nLoopVars_;
     size_t nExt_;
-
-    static std::uintptr_t nextFnId() {
-        static std::atomic<std::uintptr_t> counter{0x7F00'0000'0000'0000ULL};
-        return counter.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    // CacheGuard: shared_ptr-based ref-counted cleanup.
-    // compile_erase is called only when the LAST copy of the primitive
-    // is destroyed — safe across copy/move during graph building.
-    // Skips cleanup during process shutdown to avoid SIGSEGV on
-    // already-destroyed CompilerCache.
-    struct CacheGuard {
-        std::uintptr_t bodyCondId = 0;
-        std::uintptr_t condId = 0;
-        ~CacheGuard() {
-            if (IsProcessShuttingDown())
-                return;
-            if (bodyCondId)
-                mlx::core::detail::compile_erase(bodyCondId);
-            if (condId)
-                mlx::core::detail::compile_erase(condId);
-        }
-    };
-    std::shared_ptr<CacheGuard> cacheGuard_;
 };
 // Handler for stablehlo.while
 bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
