@@ -38,6 +38,7 @@ INPUT_DIM = 64
 def init_gru_params(key, input_dim, hidden_dim, output_dim):
     """Initialize GRU + linear readout parameters."""
     keys = random.split(key, 8)
+
     def scale(shape):
         return 1.0 / jnp.sqrt(shape[-1])
 

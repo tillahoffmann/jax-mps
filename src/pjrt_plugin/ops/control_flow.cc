@@ -145,14 +145,15 @@ void CollectExternalValues(mlir::Region& region, const ValueMap& values, std::ve
 // graph, this primitive runs the loop with per-step eval internally.
 //
 // Stream placement: This primitive MUST run on the CPU stream, but this does
-// NOT move computation to CPU. The compiled body (compiledBody_) internally
-// dispatches GPU kernels via MLX's default GPU stream — the CPU side only
-// orchestrates the loop: call body → async_eval() to flush GPU work → update
-// loop vars → repeat. This is the same pattern as MLX's own eval() scheduler.
+// NOT move computation to CPU. The compiled body+cond function
+// (compiledBodyCond_) internally dispatches GPU kernels via MLX's default GPU
+// stream — the CPU side only orchestrates the loop: call body+cond →
+// mlx::core::eval() to flush + sync GPU work → read scalar cond → update loop
+// vars → repeat.
 //
-// Why not the GPU stream: eval()/async_eval() synchronize the GPU command
-// queue. Calling them from within a GPU stream eval callback would re-enter
-// the GPU scheduler, causing a deadlock. The CPU stream avoids this.
+// Why not the GPU stream: eval() synchronizes the GPU command queue. Calling
+// it from within a GPU stream eval callback would re-enter the GPU scheduler,
+// causing a deadlock. The CPU stream avoids this.
 
 class WhileLoopPrimitive : public mlx::core::Primitive {
 public:

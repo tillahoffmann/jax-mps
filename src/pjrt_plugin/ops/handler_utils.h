@@ -3,7 +3,6 @@
 
 #include <mlx/mlx.h>
 
-#include <cstdlib>
 #include <functional>
 #include <optional>
 #include <stdexcept>
