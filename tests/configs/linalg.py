@@ -323,16 +323,23 @@ def make_linalg_op_configs():
             lambda key: random.normal(key, (4, 2)),
             name="svd_values_4x2",
         )
-        # Wide SVD (M < N) rejected at lowering (github.com/tillahoffmann/jax-mps#119)
-        yield pytest.param(
-            OperationTestConfig(
-                _svd_values,
-                lambda key: random.normal(key, (2, 4)),
-                name="svd_values_2x4",
-            ),
-            marks=[
-                xfail_match("does not yet support wide matrices|not yet support wide")
-            ],
+        # Wide SVD (M < N) — handled by transposing the operand and
+        # remapping outputs.
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (2, 4)),
+            name="svd_values_2x4",
+        )
+        yield OperationTestConfig(
+            _svd_reconstruct,
+            lambda key: random.normal(key, (2, 4)),
+            name="svd_reconstruct_2x4",
+        )
+        yield OperationTestConfig(
+            _svd_reconstruct_full,
+            lambda key: random.normal(key, (2, 4)),
+            name="svd_reconstruct_full_2x4",
+            grad_xfail="Singular value decomposition JVP not implemented for full matrices",
         )
 
         # Batched SVD
@@ -558,17 +565,11 @@ def make_linalg_op_configs():
             marks=[_xfail_large],
         )
 
-        # Wide SVD (M < N) rejected at lowering time (github.com/tillahoffmann/jax-mps#119)
-        _xfail_wide_svd = xfail_match(
-            "does not yet support wide matrices|not yet support wide"
-        )
-        yield pytest.param(
-            OperationTestConfig(
-                _svd_values,
-                lambda key: random.normal(key, (4, 8)),
-                name="svd_values_4x8_wide",
-            ),
-            marks=[_xfail_wide_svd],
+        # Wide SVD (M < N) — handled by transposing the operand.
+        yield OperationTestConfig(
+            _svd_values,
+            lambda key: random.normal(key, (4, 8)),
+            name="svd_values_4x8_wide",
         )
 
         # --- LU Decomposition ---
