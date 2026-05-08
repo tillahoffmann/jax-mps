@@ -46,9 +46,19 @@ std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array&
     auto input = mlx::core::contiguous(input_);
     int axis = static_cast<int>(input.ndim()) - 1;
     int axisSize = input.shape(axis);
+
+    // k == 1: argmax is the cheapest path and preserves lowest-original-index ties.
+    if (k == 1) {
+        auto indices = mlx::core::argmax(input, axis, /*keepdims=*/true);
+        auto topValues = mlx::core::take_along_axis(input, indices, axis);
+        return {topValues, mlx::core::astype(indices, mlx::core::int32)};
+    }
+
     auto key = DescendingKey(input);
 
-    mlx::core::array partitionedIndices = (k > 0 && k < axisSize)
+    // k >= axisSize (or k == 0): argpartition rejects kth >= axis_size, fall back to
+    // a full argsort. argsort is stable so ties resolve to ascending original index.
+    mlx::core::array partitionedIndices = (k > 1 && k < axisSize)
                                               ? mlx::core::argpartition(key, k - 1, axis)
                                               : mlx::core::argsort(key, axis);
 

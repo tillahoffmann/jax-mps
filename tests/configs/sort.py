@@ -393,6 +393,16 @@ def make_sort_op_configs():
             )
         )
 
+        # top_k k=1 with ties: exercises the argmax fast path, must return
+        # the lowest original index among tied maxima.
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.top_k(x, 1),
+                jnp.array([3.0, 1.0, 3.0, 2.0, 3.0]),
+                name="lax.top_k.ties.k1",
+            )
+        )
+
         # top_k with integer input (exercises bitwise-NOT descending key)
         configs.append(
             OperationTestConfig(
