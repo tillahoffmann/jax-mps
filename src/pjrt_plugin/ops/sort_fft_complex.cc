@@ -36,22 +36,40 @@ mlx::core::array DescendingKey(const mlx::core::array& input) {
 }
 
 // Compute top-k values and indices along the last axis.
-// Uses a descending sort key + ascending argsort + take-first-k to preserve stable
-// tie ordering (equal values keep lowest-index-first).
+//
+// Uses argpartition (O(n) partial sort) to isolate the k smallest descending-key
+// elements, then a stable argsort restricted to those k entries to emit them in
+// descending-by-value order with ties broken by ascending original index. This
+// is asymptotically faster than a full argsort+slice when k << axis size while
+// preserving the same tie semantics callers rely on.
 std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array& input_, int k) {
-    // argsort requires contiguous input; handle it here so callers don't have to.
     auto input = mlx::core::contiguous(input_);
     int axis = static_cast<int>(input.ndim()) - 1;
+    int axisSize = input.shape(axis);
     auto key = DescendingKey(input);
-    auto allIndices = mlx::core::argsort(key, axis);
 
-    mlx::core::Shape starts(allIndices.ndim(), 0);
-    mlx::core::Shape stops(allIndices.shape().begin(), allIndices.shape().end());
+    mlx::core::array partitionedIndices = (k > 0 && k < axisSize)
+                                              ? mlx::core::argpartition(key, k - 1, axis)
+                                              : mlx::core::argsort(key, axis);
+
+    mlx::core::Shape starts(partitionedIndices.ndim(), 0);
+    mlx::core::Shape stops(partitionedIndices.shape().begin(), partitionedIndices.shape().end());
     stops[axis] = k;
-    auto indices = mlx::core::slice(allIndices, starts, stops);
+    partitionedIndices = mlx::core::slice(partitionedIndices, starts, stops);
 
-    auto topValues = mlx::core::take_along_axis(input, indices, axis);
-    return {topValues, mlx::core::astype(indices, mlx::core::int32)};
+    if (k > 1 && k < axisSize) {
+        // argpartition does not guarantee stable order within the selected slot, so
+        // re-sort the k chosen indices by key. The stable argsort breaks ties by the
+        // current index position; pre-sorting the partitioned indices ascending lines
+        // those positions up with ascending original indices.
+        partitionedIndices = mlx::core::sort(partitionedIndices, axis);
+        auto partitionedKeys = mlx::core::take_along_axis(key, partitionedIndices, axis);
+        auto order = mlx::core::argsort(partitionedKeys, axis);
+        partitionedIndices = mlx::core::take_along_axis(partitionedIndices, order, axis);
+    }
+
+    auto topValues = mlx::core::take_along_axis(input, partitionedIndices, axis);
+    return {topValues, mlx::core::astype(partitionedIndices, mlx::core::int32)};
 }
 
 // Analyze a sort comparator to determine sort direction.
