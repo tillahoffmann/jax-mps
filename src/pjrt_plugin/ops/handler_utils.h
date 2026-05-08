@@ -30,6 +30,10 @@ using ValueMap = std::unordered_map<void*, mlx::core::array>;
 struct ExecContext {
     mlir::ModuleOp module;
     bool inside_compile = false;  // true when running inside mlx::core::compile()
+    // true only when external values are threaded as explicit function inputs
+    // (PJRT compile path, WhileLoopPrimitive body/cond lambdas). false in
+    // non-compile probe lambdas where &values is a closure capture.
+    bool allow_while_primitive = false;
 };
 
 // Exception thrown when an op is incompatible with mlx::core::compile() tracing.

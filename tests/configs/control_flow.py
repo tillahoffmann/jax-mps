@@ -21,6 +21,20 @@ def _func_call_with_scan(x):
     return jax.jit(_inner_fn_with_scan)(x).sum()
 
 
+def _long_scan_grad(xs, alpha):
+    """Long scan + grad — regression for issue #134 (unbounded graph growth on
+    reverse-mode AD through lax.scan caused metal::malloc to exhaust at large
+    iteration counts). WhileLoopPrimitive bounds graph depth via per-iter eval.
+    """
+
+    def body(carry, x_t):
+        new = carry * jnp.float32(0.99) + x_t * alpha
+        return new, new
+
+    _, ys = lax.scan(body, jnp.float32(0.0), xs)
+    return ys.sum()
+
+
 @jax.checkpoint
 def _checkpointed_fn(x):
     """Checkpointed function that generates optimization_barrier in StableHLO."""
@@ -35,6 +49,13 @@ def make_control_flow_op_configs():
                 _func_call_with_scan,
                 lambda key: random.normal(key, (8,)),
                 name="func_call.scan",
+            ),
+            # ==================== long scan + grad (issue #134) ====================
+            OperationTestConfig(
+                _long_scan_grad,
+                lambda key: random.normal(key, (2000,)),
+                numpy.float32(0.5),
+                name="lax.scan.long_grad",
             ),
             # ==================== jax.checkpoint / optimization_barrier (issue #91) ====================
             OperationTestConfig(
