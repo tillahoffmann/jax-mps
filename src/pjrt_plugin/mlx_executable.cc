@@ -356,8 +356,6 @@ bool DispatchOp(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
             return result;
         }
         return it->second(op, values, outputs, ctx);
-    } catch (const CompileIncompatibleError&) {
-        throw;  // Propagate without logging — compile() will catch and fall back
     } catch (const std::exception& e) {
         MPS_LOG_ERROR("Exception dispatching %s: %s\n", opName.c_str(), e.what());
         return false;
@@ -569,7 +567,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
                 ExecContext local_ctx;
                 local_ctx.module = *parsed_module_.module;
                 local_ctx.inside_compile = true;
-                local_ctx.allow_while_primitive = true;
+
                 if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
                     return {};
                 }

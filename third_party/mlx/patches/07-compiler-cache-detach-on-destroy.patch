@@ -1,0 +1,38 @@
+diff --git a/mlx/compile.cpp b/mlx/compile.cpp
+index 6f3d89c..8e013f0 100644
+--- a/mlx/compile.cpp
++++ b/mlx/compile.cpp
+@@ -372,7 +372,16 @@ class CompilerCache {
+   }
+ 
+   void clear() {
+-    cache_.clear();
++    // Detach entries before destroying them. CacheEntry destructors can
++    // transitively call compile_erase() — for example via the shared_ptr
++    // deleter wired up by the public compile(std::function) overload —
++    // which re-enters cache_.erase(). If we let cache_.clear() walk the
++    // live map, that reentrant erase reads __bucket_list_ pointers into
++    // nodes already deallocated by the in-progress walk (use-after-free).
++    // Moving first leaves cache_ empty, so reentrant erases hit an empty
++    // map and are no-ops while the detached map drains safely.
++    auto detached = std::move(cache_);
++    (void)detached;
+   }
+ 
+   bool empty() {
+@@ -386,6 +395,15 @@ class CompilerCache {
+     allocator::allocator();
+   }
+ 
++  ~CompilerCache() {
++    // Drain via a detached map for the same reason as clear(). Without
++    // this, ~unordered_map at thread exit walks live entries whose
++    // destructors may re-enter cache_.erase(), hitting UAF on bucket
++    // pointers to already-freed nodes.
++    auto detached = std::move(cache_);
++    (void)detached;
++  }
++
+   friend CompilerCache& compiler_cache();
+   std::unordered_map<std::uintptr_t, std::vector<CacheEntry>> cache_;
+ };
