@@ -1,0 +1,26 @@
+Disable MLX's jaccl (Thunderbolt-RDMA collective comms) backend on macOS
+SDK >= 26.2. We only use single-device MPS, so the distributed code path
+is dead weight. More importantly, MLX's CMake config exports
+`jaccl::jaccl` as an IMPORTED target in `MLXTargets.cmake` but installs
+no `jacclConfig.cmake`, so downstream `find_package(MLX)` fails when the
+jaccl branch is taken (SDK >= 26.2).
+
+Forcing `no_jaccl.cpp` makes the build behavior identical across SDK
+versions and avoids a fragile downstream CMake shim. Drop this patch
+when MLX exposes a `MLX_BUILD_DISTRIBUTED=OFF` option (or equivalent) or
+ships a proper jacclConfig.cmake.
+
+diff --git a/mlx/distributed/jaccl/CMakeLists.txt b/mlx/distributed/jaccl/CMakeLists.txt
+index 0000000..0000000 100644
+--- a/mlx/distributed/jaccl/CMakeLists.txt
++++ b/mlx/distributed/jaccl/CMakeLists.txt
+@@ -1,8 +1 @@
+-if(MLX_BUILD_CPU
+-   AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin"
+-   AND MACOS_SDK_VERSION GREATER_EQUAL 26.2)
+-  target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/jaccl.cpp)
+-  target_link_libraries(mlx PRIVATE jaccl)
+-else()
+-  target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/no_jaccl.cpp)
+-endif()
++target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/no_jaccl.cpp)
