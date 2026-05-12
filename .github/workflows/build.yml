@@ -14,7 +14,7 @@ jobs:
   # no longer forces an LLVM rebuild (~1h).
   setup-llvm:
     name: Setup LLVM/StableHLO
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -45,7 +45,7 @@ jobs:
 
   setup-protobuf:
     name: Setup Protobuf
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -76,7 +76,7 @@ jobs:
 
   setup-mlx:
     name: Setup MLX
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -108,7 +108,7 @@ jobs:
   build:
     name: Build wheel
     needs: [setup-llvm, setup-protobuf, setup-mlx]
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -155,7 +155,7 @@ jobs:
   lint-cpp:
     name: Lint C++
     needs: [setup-llvm, setup-protobuf, setup-mlx]
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -206,7 +206,7 @@ jobs:
   lint-python:
     name: Lint Python
     needs: build
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -238,7 +238,7 @@ jobs:
   build-dev:
     name: Build dev wheel
     needs: [setup-llvm, setup-protobuf, setup-mlx]
-    runs-on: macos-14
+    runs-on: macos-26
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v6
@@ -288,7 +288,7 @@ jobs:
   test:
     name: Test
     needs: build
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
