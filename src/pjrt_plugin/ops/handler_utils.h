@@ -30,6 +30,11 @@ using ValueMap = std::unordered_map<void*, mlx::core::array>;
 struct ExecContext {
     mlir::ModuleOp module;
     bool inside_compile = false;  // true when running inside mlx::core::compile()
+    // First underlying exception message seen during dispatch (e.g. MLX's
+    // "Only float32 is supported on Metal"). Empty if no failure or if the
+    // failure was a plain handler `return false` with no exception. The
+    // dispatcher writes only when empty so the first error wins.
+    std::string error_message;
 };
 
 // Op handler function type

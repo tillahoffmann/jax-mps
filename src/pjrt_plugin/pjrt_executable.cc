@@ -215,8 +215,12 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     // Check for execution errors - validate output count matches expected
     size_t expected_outputs = mlx_executable->num_outputs();
     if (result.buffers.size() != expected_outputs) {
-        return MakeError("Output count mismatch: expected " + std::to_string(expected_outputs) +
-                         ", got " + std::to_string(result.buffers.size()));
+        std::string msg = "Output count mismatch: expected " + std::to_string(expected_outputs) +
+                          ", got " + std::to_string(result.buffers.size());
+        if (!result.error_message.empty()) {
+            msg += " (" + result.error_message + ")";
+        }
+        return MakeError(msg);
     }
 
     // Allocate output buffer array
