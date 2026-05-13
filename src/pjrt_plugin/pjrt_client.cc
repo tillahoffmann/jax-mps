@@ -273,9 +273,17 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
         return MakeError("Cannot create buffer: null data pointer provided");
     }
 
-    auto mps_buffer = client->client->BufferFromHostBuffer(
-        args->data, static_cast<int>(args->type), dims, byte_strides,
-        args->device ? args->device->device : nullptr);
+    std::unique_ptr<jax_mps::MlxBuffer> mps_buffer;
+    try {
+        mps_buffer = client->client->BufferFromHostBuffer(
+            args->data, static_cast<int>(args->type), dims, byte_strides,
+            args->device ? args->device->device : nullptr);
+    } catch (const std::exception& e) {
+        // PjrtDtypeToMlx throws on unsupported dtypes (notably F64); surface the
+        // message as a clean PJRT error so JAX sees the real cause instead of
+        // an uncaught exception across the C boundary.
+        return MakeError(std::string("BufferFromHostBuffer failed: ") + e.what());
+    }
 
     if (!mps_buffer) {
         return MakeError("Failed to create Metal buffer. GPU memory may be exhausted.");

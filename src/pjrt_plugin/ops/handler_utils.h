@@ -30,6 +30,12 @@ using ValueMap = std::unordered_map<void*, mlx::core::array>;
 struct ExecContext {
     mlir::ModuleOp module;
     bool inside_compile = false;  // true when running inside mlx::core::compile()
+    // First underlying failure reason seen during dispatch. Populated by the
+    // dispatcher with the MLX/handler exception text on a caught throw, or
+    // with a synthesized "<op fingerprint>: handler returned false" string on
+    // a silent return-false. Empty only if no failure occurred. The
+    // dispatcher writes only when empty so the first error wins.
+    std::string error_message;
 };
 
 // Op handler function type

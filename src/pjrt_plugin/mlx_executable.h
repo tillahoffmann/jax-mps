@@ -21,6 +21,10 @@ class MlxBuffer;
 
 struct MlxExecuteResult {
     std::vector<std::unique_ptr<MlxBuffer>> buffers;
+    // Underlying reason if execution failed (handler exception, MLX eval
+    // failure, etc.). Surfaced into the PJRT error message so Python sees
+    // the real cause instead of just "Output count mismatch".
+    std::string error_message;
 };
 
 // Output metadata for a single output

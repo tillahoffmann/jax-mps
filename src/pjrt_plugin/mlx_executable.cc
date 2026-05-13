@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -333,6 +334,39 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
     return handlers;
 }
 
+// Build a one-line fingerprint of an op for diagnostics: opName, identifying
+// attributes (e.g. `stablehlo.custom_call`'s `call_target_name`, which is the
+// only thing distinguishing ApproxTopK from Householder etc.), plus operand
+// and result MLIR types. Used when a handler returns false without throwing —
+// most such failures are dtype/shape rejections, and the fingerprint usually
+// tells you what wasn't handled.
+std::string FormatOpFingerprint(mlir::Operation* op) {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << op->getName().getStringRef();
+    if (auto targetAttr = op->getAttrOfType<mlir::StringAttr>("call_target_name")) {
+        os << "[" << targetAttr.getValue() << "]";
+    }
+    os << "(";
+    bool first = true;
+    for (auto operand : op->getOperands()) {
+        if (!first)
+            os << ", ";
+        first = false;
+        operand.getType().print(os);
+    }
+    os << ") -> (";
+    first = true;
+    for (auto resType : op->getResultTypes()) {
+        if (!first)
+            os << ", ";
+        first = false;
+        resType.print(os);
+    }
+    os << ")";
+    return out;
+}
+
 // Dispatch a single operation using the handler table
 bool DispatchOp(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                 ExecContext& ctx) {
@@ -347,19 +381,30 @@ bool DispatchOp(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         return false;
     }
 
+    bool result;
     try {
         if (IsProfilingEnabled()) {
             auto start = Clock::now();
-            bool result = it->second(op, values, outputs, ctx);
+            result = it->second(op, values, outputs, ctx);
             auto end = Clock::now();
             GetProfilingState().RecordOp(opName, Duration(end - start).count());
-            return result;
+        } else {
+            result = it->second(op, values, outputs, ctx);
         }
-        return it->second(op, values, outputs, ctx);
     } catch (const std::exception& e) {
         MPS_LOG_ERROR("Exception dispatching %s: %s\n", opName.c_str(), e.what());
+        if (ctx.error_message.empty()) {
+            ctx.error_message = FormatOpFingerprint(op) + ": " + e.what();
+        }
         return false;
     }
+    if (!result && ctx.error_message.empty()) {
+        // Handler returned false without setting a reason (validation reject,
+        // unsupported dtype/shape combo, etc.). Synthesize a fingerprint from
+        // the op's operand and result types so the failure is greppable.
+        ctx.error_message = FormatOpFingerprint(op) + ": handler returned false";
+    }
+    return result;
 }
 
 }  // namespace
@@ -600,6 +645,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     } else if (outputs.empty()) {
         if (!ExecuteFunction(parsed_module_.entry_func, inputArrays, outputs, ctx)) {
             MPS_LOG_ERROR("Failed to execute entry function\n");
+            result.error_message = std::move(ctx.error_message);
             return result;
         }
     }
@@ -611,6 +657,9 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     if (outputs.size() != num_outputs_) {
         MPS_LOG_ERROR("Output count mismatch: expected %zu, got %zu\n", num_outputs_,
                       outputs.size());
+        if (result.error_message.empty()) {
+            result.error_message = std::move(ctx.error_message);
+        }
         return result;
     }
 
@@ -622,6 +671,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
             mlx::core::eval(outputs);
         } catch (const std::exception& e) {
             MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
+            result.error_message = std::string("eval: ") + e.what();
             return result;
         }
     }

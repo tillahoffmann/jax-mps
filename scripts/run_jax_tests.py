@@ -203,6 +203,8 @@ def main():
         "no:faulthandler",
         "-p",
         "no:benchmark",
+        "-p",
+        "_pytest_skip_unsupported_plugin",
         "--tb=no",
         "-q",
         f"--timeout={args.timeout}",
@@ -225,12 +227,12 @@ def main():
             "JAX_MPS_CACHE_LIMIT_BYTES", str(1 << 30)
         ),
     }
-    if args.memory_csv or args.current_test_file:
-        # Make the local plugin importable from the scripts/ directory.
-        scripts_dir = str(Path(__file__).resolve().parent)
-        env["PYTHONPATH"] = (
-            scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
-        ).rstrip(os.pathsep)
+    # Make scripts/ plugins (_pytest_skip_unsupported_plugin and the optional
+    # _pytest_memory_plugin) importable.
+    scripts_dir = str(Path(__file__).resolve().parent)
+    env["PYTHONPATH"] = (scripts_dir + os.pathsep + env.get("PYTHONPATH", "")).rstrip(
+        os.pathsep
+    )
     print(f"\nRunning: pytest {tests_dir} ...\n")
     subprocess.run(cmd, cwd=project_root, env=env)
 
