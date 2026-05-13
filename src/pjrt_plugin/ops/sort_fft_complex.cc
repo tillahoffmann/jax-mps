@@ -184,11 +184,23 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         if (!keys)
             return false;
 
-        const auto argsortInput =
-            keys->dtype() == mlx::core::bool_ ? mlx::core::astype(*keys, mlx::core::int8) : *keys;
-        auto indices = mlx::core::argsort(argsortInput, dimension);
-        if (!ascending) {
-            indices = ReverseAxis(indices, dimension);
+        const bool keysAreBool = keys->dtype() == mlx::core::bool_;
+        const auto argsortInput = keysAreBool ? mlx::core::astype(*keys, mlx::core::int8) : *keys;
+        mlx::core::array indices = mlx::core::array(0);
+        if (!ascending && keysAreBool) {
+            // Bool inputs are tie-heavy. A `cast → argsort → reverse` would
+            // flip the tie order within the equal-True and equal-False
+            // groups and violate JAX's stable-descending semantics. Sort the
+            // flipped key (1 - x) ascending instead — argsort is stable, so
+            // ties resolve to ascending original index in either direction.
+            auto descKey =
+                mlx::core::subtract(mlx::core::array(static_cast<int8_t>(1)), argsortInput);
+            indices = mlx::core::argsort(descKey, dimension);
+        } else {
+            indices = mlx::core::argsort(argsortInput, dimension);
+            if (!ascending) {
+                indices = ReverseAxis(indices, dimension);
+            }
         }
 
         for (size_t i = 0; i < numInputs; ++i) {
