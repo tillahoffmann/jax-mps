@@ -312,8 +312,8 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     }
 
     if (reduceType != ReduceType::Max && reduceType != ReduceType::Sum &&
-        reduceType != ReduceType::Min) {
-        MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum/min only\n");
+        reduceType != ReduceType::Min && reduceType != ReduceType::Prod) {
+        MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum/min/prod only\n");
         return false;
     }
 
@@ -377,6 +377,8 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
             return mlx::core::max(windowed, reduceAxes);
         if (reduceType == ReduceType::Min)
             return mlx::core::min(windowed, reduceAxes);
+        if (reduceType == ReduceType::Prod)
+            return mlx::core::prod(windowed, reduceAxes);
         return mlx::core::sum(windowed, reduceAxes);
     }();
 
