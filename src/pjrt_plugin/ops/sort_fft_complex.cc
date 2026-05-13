@@ -164,18 +164,29 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         auto* input = RequireValue(values, sortOp.getInputs()[0], "stablehlo.sort");
         if (!input)
             return false;
-        auto result = mlx::core::sort(*input, dimension);
+        // MLX's Metal block_sort kernel has no bool variant
+        // (`ncarg_block_sort_bool__uint32_*` is not loaded). Cast to int8
+        // around the sort and cast the result back to bool.
+        const bool inputIsBool = input->dtype() == mlx::core::bool_;
+        const auto sortInput = inputIsBool ? mlx::core::astype(*input, mlx::core::int8) : *input;
+        auto result = mlx::core::sort(sortInput, dimension);
         if (!ascending) {
             result = ReverseAxis(result, dimension);
         }
+        if (inputIsBool) {
+            result = mlx::core::astype(result, mlx::core::bool_);
+        }
         values.emplace(ToKey(op->getResult(0)), std::move(result));
     } else {
-        // Sort-by-key
+        // Sort-by-key. Only the keys need int8 casting — take_along_axis on
+        // bool values is supported by MLX's gather kernel.
         auto* keys = RequireValue(values, sortOp.getInputs()[0], "stablehlo.sort");
         if (!keys)
             return false;
 
-        auto indices = mlx::core::argsort(*keys, dimension);
+        const auto argsortInput =
+            keys->dtype() == mlx::core::bool_ ? mlx::core::astype(*keys, mlx::core::int8) : *keys;
+        auto indices = mlx::core::argsort(argsortInput, dimension);
         if (!ascending) {
             indices = ReverseAxis(indices, dimension);
         }

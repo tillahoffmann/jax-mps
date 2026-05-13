@@ -423,4 +423,38 @@ def make_sort_op_configs():
             )
         )
 
+        # =============================================================
+        # bool sort — MLX's Metal block_sort kernel has no bool variant
+        # (Unable to load kernel ncarg_block_sort_bool__uint32_*). The
+        # handler casts bool → int8 around the sort. Exercised by
+        # jnp.compress / jnp.extract via lax.sort, plus argsort/lexsort.
+        # =============================================================
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.sort(x),
+                jnp.array([True, False, True, True, False, False, True]),
+                differentiable_argnums=(),
+                name="jnp.sort.bool.1d",
+            )
+        )
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.argsort(x),
+                jnp.array([[True, False, True], [False, True, False]]),
+                differentiable_argnums=(),
+                name="jnp.argsort.bool.2d",
+            )
+        )
+        # sort-by-key with bool keys exercises the multi-input path
+        # (argsort over a bool tensor + take_along_axis on values).
+        configs.append(
+            OperationTestConfig(
+                lambda keys, vals: lax.sort_key_val(keys, vals, dimension=0),
+                jnp.array([True, False, True, False, True]),
+                jnp.arange(5, dtype=jnp.float32),
+                differentiable_argnums=(1,),
+                name="lax.sort_key_val.bool_keys",
+            )
+        )
+
         return configs
