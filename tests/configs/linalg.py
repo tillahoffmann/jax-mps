@@ -27,6 +27,22 @@ def _svd_values(A):
     return jnp.linalg.svd(A, compute_uv=False)
 
 
+def _svd_via_primitive_no_algorithm(A):
+    """Call lax.linalg.svd_p directly without the ``algorithm`` kwarg.
+
+    Matches the call shape used by `jax/_src/internal_test_util/test_harnesses.py`
+    for the SVD harness (which omits `algorithm`). Exercises the MPS lowering
+    path where `algorithm` is absent from the primitive's params dict — a
+    signature regression we shipped briefly when JAX added the kwarg.
+    """
+    from jax import lax
+
+    (s,) = lax.linalg.svd_p.bind(
+        A, full_matrices=False, compute_uv=False, subset_by_index=None
+    )
+    return s
+
+
 def _svd_reconstruct(A):
     """Reconstruct A from its SVD to verify correctness without sign issues."""
     U, S, Vh = jnp.linalg.svd(A, full_matrices=False)
@@ -340,6 +356,17 @@ def make_linalg_op_configs():
             lambda key: random.normal(key, (2, 4)),
             name="svd_reconstruct_full_2x4",
             grad_xfail="Singular value decomposition JVP not implemented for full matrices",
+        )
+
+        # Direct svd_p.bind without `algorithm` kwarg — matches the upstream
+        # test_harnesses.py shape, which is the path that triggered the
+        # `_svd_lowering() missing 1 required keyword-only argument:
+        # 'algorithm'` regression. The public jnp.linalg.svd always passes
+        # `algorithm`, so this only fires through the primitive directly.
+        yield OperationTestConfig(
+            _svd_via_primitive_no_algorithm,
+            lambda key: random.normal(key, (3, 3)),
+            name="svd_via_primitive_no_algorithm",
         )
 
         # Batched SVD
