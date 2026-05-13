@@ -164,20 +164,43 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         auto* input = RequireValue(values, sortOp.getInputs()[0], "stablehlo.sort");
         if (!input)
             return false;
-        auto result = mlx::core::sort(*input, dimension);
+        // MLX's Metal block_sort kernel has no bool variant
+        // (`ncarg_block_sort_bool__uint32_*` is not loaded). Cast to int8
+        // around the sort and cast the result back to bool.
+        const bool inputIsBool = input->dtype() == mlx::core::bool_;
+        const auto sortInput = inputIsBool ? mlx::core::astype(*input, mlx::core::int8) : *input;
+        auto result = mlx::core::sort(sortInput, dimension);
         if (!ascending) {
             result = ReverseAxis(result, dimension);
         }
+        if (inputIsBool) {
+            result = mlx::core::astype(result, mlx::core::bool_);
+        }
         values.emplace(ToKey(op->getResult(0)), std::move(result));
     } else {
-        // Sort-by-key
+        // Sort-by-key. Only the keys need int8 casting — take_along_axis on
+        // bool values is supported by MLX's gather kernel.
         auto* keys = RequireValue(values, sortOp.getInputs()[0], "stablehlo.sort");
         if (!keys)
             return false;
 
-        auto indices = mlx::core::argsort(*keys, dimension);
-        if (!ascending) {
-            indices = ReverseAxis(indices, dimension);
+        const bool keysAreBool = keys->dtype() == mlx::core::bool_;
+        const auto argsortInput = keysAreBool ? mlx::core::astype(*keys, mlx::core::int8) : *keys;
+        mlx::core::array indices = mlx::core::array(0);
+        if (!ascending && keysAreBool) {
+            // Bool inputs are tie-heavy. A `cast → argsort → reverse` would
+            // flip the tie order within the equal-True and equal-False
+            // groups and violate JAX's stable-descending semantics. Sort the
+            // flipped key (1 - x) ascending instead — argsort is stable, so
+            // ties resolve to ascending original index in either direction.
+            auto descKey =
+                mlx::core::subtract(mlx::core::array(static_cast<int8_t>(1)), argsortInput);
+            indices = mlx::core::argsort(descKey, dimension);
+        } else {
+            indices = mlx::core::argsort(argsortInput, dimension);
+            if (!ascending) {
+                indices = ReverseAxis(indices, dimension);
+            }
         }
 
         for (size_t i = 0; i < numInputs; ++i) {

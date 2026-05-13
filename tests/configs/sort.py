@@ -423,4 +423,71 @@ def make_sort_op_configs():
             )
         )
 
+        # =============================================================
+        # bool sort — MLX's Metal block_sort kernel has no bool variant
+        # (Unable to load kernel ncarg_block_sort_bool__uint32_*). The
+        # handler casts bool → int8 around the sort. Exercised by
+        # jnp.compress / jnp.extract via lax.sort, plus argsort/lexsort.
+        # =============================================================
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.sort(x),
+                jnp.array([True, False, True, True, False, False, True]),
+                differentiable_argnums=(),
+                name="jnp.sort.bool.1d",
+            )
+        )
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.argsort(x),
+                jnp.array([[True, False, True], [False, True, False]]),
+                differentiable_argnums=(),
+                name="jnp.argsort.bool.2d",
+            )
+        )
+        # sort-by-key with bool keys exercises the multi-input path
+        # (argsort over a bool tensor + take_along_axis on values).
+        configs.append(
+            OperationTestConfig(
+                lambda keys, vals: lax.sort_key_val(keys, vals, dimension=0),
+                jnp.array([True, False, True, False, True]),
+                jnp.arange(5, dtype=jnp.float32),
+                differentiable_argnums=(1,),
+                name="lax.sort_key_val.bool_keys",
+            )
+        )
+        # Descending bool sort — exercises the `descending=True` branch.
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.sort(x, descending=True),
+                jnp.array([True, False, True, True, False, False, True]),
+                differentiable_argnums=(),
+                name="jnp.sort.bool.descending",
+            )
+        )
+        # Stable descending argsort with tie-heavy bool keys: a naive
+        # cast→argsort ascending→reverse would invert tie order within the
+        # equal-True and equal-False groups; the handler sorts on a flipped
+        # key to preserve stable descending semantics.
+        configs.append(
+            OperationTestConfig(
+                lambda x: jnp.argsort(x, descending=True, stable=True),
+                jnp.array([True, False, True, False, True]),
+                differentiable_argnums=(),
+                name="jnp.argsort.bool.descending_stable",
+            )
+        )
+        # sort_key_val with bool values + numeric keys — exercises the
+        # take_along_axis-on-bool branch where bool values pass through
+        # without casting.
+        configs.append(
+            OperationTestConfig(
+                lambda keys, vals: lax.sort_key_val(keys, vals, dimension=0),
+                jnp.arange(5, dtype=jnp.float32),
+                jnp.array([True, False, True, False, True]),
+                differentiable_argnums=(0,),
+                name="lax.sort_key_val.bool_values",
+            )
+        )
+
         return configs
