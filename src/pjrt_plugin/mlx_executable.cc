@@ -334,15 +334,20 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
     return handlers;
 }
 
-// Build a one-line fingerprint of an op for diagnostics: opName plus operand
-// and result MLIR types (which include dtype + shape, e.g.
-// "tensor<3x4xcomplex<f32>>"). Used when a handler returns false without
-// throwing — most such failures are dtype/shape rejections, and the
-// fingerprint usually tells you what wasn't handled.
+// Build a one-line fingerprint of an op for diagnostics: opName, identifying
+// attributes (e.g. `stablehlo.custom_call`'s `call_target_name`, which is the
+// only thing distinguishing ApproxTopK from Householder etc.), plus operand
+// and result MLIR types. Used when a handler returns false without throwing —
+// most such failures are dtype/shape rejections, and the fingerprint usually
+// tells you what wasn't handled.
 std::string FormatOpFingerprint(mlir::Operation* op) {
     std::string out;
     llvm::raw_string_ostream os(out);
-    os << op->getName().getStringRef() << "(";
+    os << op->getName().getStringRef();
+    if (auto targetAttr = op->getAttrOfType<mlir::StringAttr>("call_target_name")) {
+        os << "[" << targetAttr.getValue() << "]";
+    }
+    os << "(";
     bool first = true;
     for (auto operand : op->getOperands()) {
         if (!first)

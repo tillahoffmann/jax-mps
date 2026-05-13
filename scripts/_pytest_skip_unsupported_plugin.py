@@ -44,13 +44,10 @@ def pytest_runtest_makereport(item, call):
     if report.when != "call" or not report.failed:
         return
 
-    haystack_parts = []
-    if report.longrepr is not None:
-        haystack_parts.append(str(report.longrepr))
-    for _, content in report.sections:
-        if content:
-            haystack_parts.append(content)
-    haystack = "\n".join(haystack_parts)
+    # Match only against the failure traceback/exception text, NOT captured
+    # stdout/stderr sections. An unrelated test that logged a float64 message
+    # earlier and then failed for some other reason must NOT be skipped.
+    haystack = str(report.longrepr) if report.longrepr is not None else ""
 
     if _matches_f64_rejection(haystack):
         report.outcome = "skipped"

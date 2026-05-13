@@ -212,9 +212,12 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     // Execute
     auto result = mlx_executable->Execute(inputs);
 
-    // Check for execution errors - validate output count matches expected
+    // Check for execution errors. A non-empty error_message always indicates a
+    // failure inside Execute() (handler exception, silent return-false, or MLX
+    // eval failure) — surface it even when the output count happens to match
+    // (e.g. a zero-output executable whose handler still failed).
     size_t expected_outputs = mlx_executable->num_outputs();
-    if (result.buffers.size() != expected_outputs) {
+    if (result.buffers.size() != expected_outputs || !result.error_message.empty()) {
         std::string msg = "Output count mismatch: expected " + std::to_string(expected_outputs) +
                           ", got " + std::to_string(result.buffers.size());
         if (!result.error_message.empty()) {
