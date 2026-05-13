@@ -125,6 +125,19 @@ def make_reduction_op_configs():
                 name="prodpool2d-valid",
                 differentiable_argnums=(),
             ),
+            # Prod pool with SAME padding — exercises the padded prod branch.
+            # MLX's pad fills boundary slots with the init value (1, the
+            # multiplicative identity) so out-of-bounds slots don't change
+            # the product. Required to confirm the validation logic accepts
+            # this path.
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 1.0, lax.mul, (1, 3, 3, 1), (1, 1, 1, 1), "same"
+                ),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=0.5, maxval=1.5),
+                name="prodpool2d-same",
+                differentiable_argnums=(),
+            ),
             # Max pool 2D SAME padding: window=(1,3,3,1), stride=(1,1,1,1)
             OperationTestConfig(
                 lambda x: lax.reduce_window(

@@ -317,6 +317,44 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         return false;
     }
 
+    // For Prod, the StableHLO reduction semantics include the init value as a
+    // factor in every window (and as the value of any padded slots when the
+    // window crosses the padding region). The handler emits a plain
+    // `prod(windowed)` and uses the init only as the pad value, so the result
+    // is correct exactly when init is the multiplicative identity (1). Reject
+    // non-identity init rather than silently dropping the factor.
+    if (reduceType == ReduceType::Prod) {
+        bool initIsOne = false;
+        // Compile-time fast path: the init is a stablehlo.constant.
+        if (auto initConst = rwOp.getInitValues()[0].getDefiningOp<mlir::stablehlo::ConstantOp>()) {
+            if (auto attr = mlir::dyn_cast<mlir::DenseElementsAttr>(initConst.getValue())) {
+                if (attr.isSplat()) {
+                    if (mlir::isa<mlir::FloatType>(attr.getElementType())) {
+                        initIsOne = attr.getSplatValue<llvm::APFloat>().convertToDouble() == 1.0;
+                    } else if (mlir::isa<mlir::IntegerType>(attr.getElementType())) {
+                        initIsOne = attr.getSplatValue<llvm::APInt>().getSExtValue() == 1;
+                    }
+                }
+            }
+        } else if (auto* initArr =
+                       RequireValue(values, rwOp.getInitValues()[0], "stablehlo.reduce_window")) {
+            // Eager mode threads the init as a function argument; check the
+            // runtime mlx::core::array against scalar 1. eval() is necessary
+            // because the value may still be lazy, but the init array is
+            // 0-dim so the sync is trivial.
+            auto cmp =
+                mlx::core::all(mlx::core::equal(*initArr, mlx::core::ones({}, initArr->dtype())));
+            cmp.eval();
+            initIsOne = cmp.item<bool>();
+        }
+        if (!initIsOne) {
+            MPS_LOG_ERROR(
+                "stablehlo.reduce_window: prod requires init=1 (multiplicative "
+                "identity); non-identity init is not supported\n");
+            return false;
+        }
+    }
+
     // Pad input if needed.
     mlx::core::array padded = *input;
     bool needsPad = false;
