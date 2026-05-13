@@ -620,7 +620,7 @@ def _svd_via_transpose(operand, *, full_matrices, compute_uv):
 
 
 def _svd_lowering(
-    ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm
+    ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm=None
 ):
     """MPS lowering for svd: emit a custom_call @mps.svd."""
     if subset_by_index is not None:
