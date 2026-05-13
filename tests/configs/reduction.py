@@ -56,6 +56,14 @@ def make_reduction_op_configs():
                 lambda key: random.uniform(key, (3, 5), minval=0.5, maxval=1.5),
                 name="cumprod-axis1",
             ),
+            # 1-element axis: cumulative detection skips axes where
+            # windowDims[i]==1, so this falls through to the pooling tier
+            # — which must accept Prod for the lowering to succeed.
+            OperationTestConfig(
+                lambda x: jnp.cumprod(x, axis=0),
+                lambda key: random.uniform(key, (1,), minval=0.5, maxval=1.5),
+                name="cumprod-axis0-size1",
+            ),
             OperationTestConfig(
                 lambda x: lax.cummax(x, axis=1),
                 lambda key: random.normal(key, (3, 5)),
@@ -102,6 +110,33 @@ def make_reduction_op_configs():
                 ),
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="sumpool2d-valid",
+            ),
+            # Prod pool 2D: same pattern as sum, but with mul reduction. The
+            # JAX upstream tests (testCumSumProd, testSphHarmY) lower
+            # cumulative-prod to reduce_window when the cumulative pattern
+            # isn't detected, so the pooling tier must support Prod too.
+            # JAX itself doesn't define a reverse-mode VJP for prod
+            # reduce_window, so this config exercises the forward path only.
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 1.0, lax.mul, (1, 2, 2, 1), (1, 2, 2, 1), "valid"
+                ),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=0.5, maxval=1.5),
+                name="prodpool2d-valid",
+                differentiable_argnums=(),
+            ),
+            # Prod pool with SAME padding — exercises the padded prod branch.
+            # MLX's pad fills boundary slots with the init value (1, the
+            # multiplicative identity) so out-of-bounds slots don't change
+            # the product. Required to confirm the validation logic accepts
+            # this path.
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 1.0, lax.mul, (1, 3, 3, 1), (1, 1, 1, 1), "same"
+                ),
+                lambda key: random.uniform(key, (2, 8, 8, 3), minval=0.5, maxval=1.5),
+                name="prodpool2d-same",
+                differentiable_argnums=(),
             ),
             # Max pool 2D SAME padding: window=(1,3,3,1), stride=(1,1,1,1)
             OperationTestConfig(
