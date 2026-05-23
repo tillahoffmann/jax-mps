@@ -97,6 +97,14 @@ def make_slice_op_configs():
                 lambda key: jnp.full((2, 4, 4, 4), 1.0, dtype=jnp.float32),
                 name="mixed_point_window_scatter_add_rank4",
             ),
+            # Multi-axis window scatter Mul: window extent > 1 on more
+            # than one axis, no inserted dims.
+            OperationTestConfig(
+                lambda x, u: x.at[1:3, 0:2].mul(u),
+                lambda key: jnp.ones((5, 5), dtype=jnp.float32),
+                lambda key: jnp.full((2, 2), 0.5, dtype=jnp.float32),
+                name="multi_axis_window_scatter_mul_rank2",
+            ),
             # Non-zero indices
             OperationTestConfig(
                 lambda x, val: x.at[1, 1, 1].set(val),
