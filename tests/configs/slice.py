@@ -81,6 +81,22 @@ def make_slice_op_configs():
                 lambda key: jnp.array(1.0, dtype=jnp.float32),
                 name="full_index_scatter_rank4",
             ),
+            # Multi-axis slice scatter on rank-4
+            OperationTestConfig(
+                lambda x, mask: x.at[:, :, 0:1, :].mul(mask),
+                lambda key: jnp.ones((2, 3, 4, 4), dtype=jnp.float32),
+                lambda key: jnp.full((2, 3, 1, 4), 0.5, dtype=jnp.float32),
+                name="multi_axis_slice_scatter_mul_rank4",
+            ),
+            # Mixed point-and-window scatter: integer index on dim 0 (collapsed
+            # via inserted_window_dims) plus static slices on the trailing dims
+            # (window-extent > 1).
+            OperationTestConfig(
+                lambda x, u: x.at[jnp.array([1, 3]), 1:5, 1:5, 1:5].add(u),
+                lambda key: jnp.zeros((5, 8, 8, 8), dtype=jnp.float32),
+                lambda key: jnp.full((2, 4, 4, 4), 1.0, dtype=jnp.float32),
+                name="mixed_point_window_scatter_add_rank4",
+            ),
             # Non-zero indices
             OperationTestConfig(
                 lambda x, val: x.at[1, 1, 1].set(val),
