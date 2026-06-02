@@ -354,7 +354,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     bool hasIdxVecDim = indexVectorDim < scatterIndices->ndim();
 
     // ===== Window scatter path: scatter axes with window extent > 1 =====
-    if (hasWindowScatter) {
+    // Mixed point-and-window scatter (non-empty insertedWindowDims plus
+    // window-extent > 1 on other scatter axes).
+    if (hasWindowScatter && insertedWindowDims.empty()) {
         // For multi-axis window scatter, use slice_update loop.
         if (scatterDimsToOperandDims.size() > 1) {
             if (!inputBatchingDims.empty()) {
@@ -456,11 +458,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
                         break;
                     case ScatterType::Add: {
-                        if (!insertedWindowDims.empty() ||
-                            static_cast<int>(updateVal.ndim()) != operand->ndim()) {
+                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
                             MPS_LOG_ERROR(
                                 "stablehlo.scatter: multi-dim window scatter Add requires "
-                                "empty insertedWindowDims and operand-rank updates\n");
+                                "operand-rank updates\n");
                             return false;
                         }
                         mlx::core::Shape sliceSizes(operand->shape());
@@ -470,6 +471,22 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
                         result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
                                                          startArr, axes);
+                        break;
+                    }
+                    case ScatterType::Mul: {
+                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
+                            MPS_LOG_ERROR(
+                                "stablehlo.scatter: multi-dim window scatter Mul requires "
+                                "operand-rank updates\n");
+                            return false;
+                        }
+                        mlx::core::Shape sliceSizes(operand->shape());
+                        for (int axis : axes) {
+                            sliceSizes[axis] = updateVal.shape(axis);
+                        }
+                        auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
+                        result = mlx::core::slice_update(
+                            result, mlx::core::multiply(current, updateVal), startArr, axes);
                         break;
                     }
                     default:
@@ -650,21 +667,17 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     }
     auto tShape = transposedUpdates.shape();
 
-    std::set<int> coveredDims;
-    for (auto d : insertedWindowDims)
-        coveredDims.insert(static_cast<int>(d));
-    for (auto d : inputBatchingDims)
-        coveredDims.insert(static_cast<int>(d));
-    for (auto d : scatterDimsToOperandDims)
-        coveredDims.insert(static_cast<int>(d));
-
     mlx::core::Shape newShape;
     for (int i = 0; i < numIdxDims; ++i) {
         newShape.push_back(tShape[i]);
     }
     int windowIdx = 0;
     for (int d = 0; d < operand->ndim(); ++d) {
-        if (coveredDims.count(d)) {
+        // Inserted / input-batching operand dims are collapsed in updates
+        // (no slot in tShape) — emit a size-1 entry. Every other operand dim
+        // (window dim, whether or not it is also a scatter axis) has a real
+        // entry in the transposed-updates shape that must be consumed.
+        if (insertedSet.count(d) || batchingSet.count(d)) {
             newShape.push_back(1);
         } else {
             newShape.push_back(tShape[numIdxDims + windowIdx++]);
