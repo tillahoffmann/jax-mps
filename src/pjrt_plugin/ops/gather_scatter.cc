@@ -458,11 +458,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
                         break;
                     case ScatterType::Add: {
-                        if (!insertedWindowDims.empty() ||
-                            static_cast<int>(updateVal.ndim()) != operand->ndim()) {
+                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
                             MPS_LOG_ERROR(
                                 "stablehlo.scatter: multi-dim window scatter Add requires "
-                                "empty insertedWindowDims and operand-rank updates\n");
+                                "operand-rank updates\n");
                             return false;
                         }
                         mlx::core::Shape sliceSizes(operand->shape());
@@ -475,11 +474,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         break;
                     }
                     case ScatterType::Mul: {
-                        if (!insertedWindowDims.empty() ||
-                            static_cast<int>(updateVal.ndim()) != operand->ndim()) {
+                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
                             MPS_LOG_ERROR(
                                 "stablehlo.scatter: multi-dim window scatter Mul requires "
-                                "empty insertedWindowDims and operand-rank updates\n");
+                                "operand-rank updates\n");
                             return false;
                         }
                         mlx::core::Shape sliceSizes(operand->shape());
