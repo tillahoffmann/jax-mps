@@ -331,6 +331,40 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_TEST_MODE: cpu
 
+  test-jax-latest:
+    name: Test (jax/jaxlib latest)
+    needs: build
+    runs-on: macos-26
+    # Canary: install the newest jax/jaxlib allowed by pyproject so we learn
+    # about upstream-breaking patch releases (e.g. #162) before users do.
+    # Informational only — does not block PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Download wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel
+          path: dist/
+
+      - name: Install wheel and test dependencies (jax/jaxlib upgraded)
+        run: |
+          uv sync --all-groups --no-install-project --upgrade-package jax --upgrade-package jaxlib
+          uv pip install dist/*.whl
+          .venv/bin/python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
+
+      - name: Run tests on CPU
+        run: .venv/bin/pytest tests/ -v
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_TEST_MODE: cpu
+
   release:
     name: Release
     needs: [test, lint-cpp, lint-python]
