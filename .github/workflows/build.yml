@@ -339,6 +339,10 @@ jobs:
     # about upstream-breaking patch releases (e.g. #162) before users do.
     # Informational only — does not block PRs.
     continue-on-error: true
+    # Disabled until an MPS-capable runner is available: the affected
+    # lowerings register only for platform="mps", so a CPU-only run would
+    # not actually exercise them. Re-enable by removing this `if: false`.
+    if: false
     steps:
       - uses: actions/checkout@v6
 
