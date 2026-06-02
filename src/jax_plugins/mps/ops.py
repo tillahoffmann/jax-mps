@@ -18,6 +18,18 @@ from jax._src.interpreters import mlir
 from jax._src.lax import lax as lax_lax
 from jax._src.lax import linalg as lax_linalg
 from jax._src.lax import special as lax_special
+from jax._src.lib.mlir import ir  # pyright: ignore[reportPrivateImportUsage]
+
+
+def _aval_to_ir_type(aval: core.ShapedArray) -> ir.Type:
+    """Construct an MLIR ranked-tensor type for a ShapedArray.
+
+    Avoids ``mlir.aval_to_ir_type`` whose signature is unstable across jax
+    patch releases (see issue #162); ``mlir.dtype_to_ir_type`` has been
+    signature-stable.
+    """
+    return ir.RankedTensorType.get(aval.shape, mlir.dtype_to_ir_type(aval.dtype))
+
 
 # ---------------------------------------------------------------------------
 # Scaled Dot-Product Attention (mps.sdpa)
@@ -48,7 +60,7 @@ _sdpa_p.def_impl(_sdpa_impl)
 
 
 def _sdpa_lowering(ctx, q, k, v, mask, *, scale):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.sdpa",
         result_types=[result_type],
@@ -79,7 +91,7 @@ _sdpa_causal_p.def_impl(_sdpa_causal_impl)
 
 
 def _sdpa_causal_lowering(ctx, q, k, v, *, scale):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.sdpa_causal",
         result_types=[result_type],
@@ -148,7 +160,7 @@ def _sdpa_bwd_lowering(ctx, q, k, v, mask, g, *, scale):
     avals = ctx.avals_out
     return mlir.custom_call(
         call_target_name="mps.sdpa_bwd",
-        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        result_types=[_aval_to_ir_type(a) for a in avals],
         operands=[q, k, v, mask, g],
         backend_config=f'{{"scale": {scale}}}',
     ).results
@@ -158,7 +170,7 @@ def _sdpa_causal_bwd_lowering(ctx, q, k, v, g, *, scale):
     avals = ctx.avals_out
     return mlir.custom_call(
         call_target_name="mps.sdpa_causal_bwd",
-        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        result_types=[_aval_to_ir_type(a) for a in avals],
         operands=[q, k, v, g],
         backend_config=f'{{"scale": {scale}}}',
     ).results
@@ -223,7 +235,7 @@ _rms_norm_p.def_impl(_rms_norm_impl)
 
 
 def _rms_norm_lowering(ctx, x, weight, *, eps):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.rms_norm",
         result_types=[result_type],
@@ -251,7 +263,7 @@ def _rms_norm_bwd_lowering(ctx, x, w, g, *, eps):
     avals = ctx.avals_out
     return mlir.custom_call(
         call_target_name="mps.rms_norm_bwd",
-        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        result_types=[_aval_to_ir_type(a) for a in avals],
         operands=[x, w, g],
         backend_config=f'{{"eps": {eps}}}',
     ).results
@@ -303,7 +315,7 @@ _layer_norm_p.def_impl(_layer_norm_impl)
 
 
 def _layer_norm_lowering(ctx, x, weight, bias, *, eps):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.layer_norm",
         result_types=[result_type],
@@ -332,7 +344,7 @@ def _layer_norm_bwd_lowering(ctx, x, w, b, g, *, eps):
     avals = ctx.avals_out
     return mlir.custom_call(
         call_target_name="mps.layer_norm_bwd",
-        result_types=[mlir.aval_to_ir_type(a) for a in avals],
+        result_types=[_aval_to_ir_type(a) for a in avals],
         operands=[x, w, b, g],
         backend_config=f'{{"eps": {eps}}}',
     ).results
@@ -398,7 +410,7 @@ _rope_p.def_impl(_rope_impl)
 
 
 def _rope_lowering(ctx, x, offset, *, dims, traditional, base, rope_scale):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     traditional_str = "true" if traditional else "false"
     return mlir.custom_call(
         call_target_name="mps.rope",
@@ -434,7 +446,7 @@ _rope_bwd_p.def_impl(
 
 
 def _rope_bwd_lowering(ctx, x, offset, g, *, dims, traditional, base, rope_scale):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     traditional_str = "true" if traditional else "false"
     return mlir.custom_call(
         call_target_name="mps.rope_bwd",
@@ -510,7 +522,7 @@ _gelu_p.def_impl(_gelu_impl_dispatch)
 
 
 def _gelu_lowering(ctx, x):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.gelu",
         result_types=[result_type],
@@ -526,7 +538,7 @@ _gelu_bwd_p.def_impl(lambda x, g: jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1
 
 
 def _gelu_bwd_lowering(ctx, x, g):
-    result_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+    result_type = _aval_to_ir_type(ctx.avals_out[0])
     return mlir.custom_call(
         call_target_name="mps.gelu_bwd",
         result_types=[result_type],
@@ -575,8 +587,8 @@ def _eigh_lowering(
         raise NotImplementedError("algorithm selection not supported on MPS")
     del sort_eigenvalues  # kernel always sorts ascending
     v_aval, w_aval = ctx.avals_out
-    v_type = mlir.aval_to_ir_type(v_aval)
-    w_type = mlir.aval_to_ir_type(w_aval)
+    v_type = _aval_to_ir_type(v_aval)
+    w_type = _aval_to_ir_type(w_aval)
     return mlir.custom_call(
         call_target_name="mps.eigh",
         result_types=[v_type, w_type],
@@ -590,8 +602,8 @@ def _qr_lowering(ctx, operand, *, full_matrices, **kwargs):
     del kwargs  # pivoting, use_magma — not applicable on MPS
     # Result types from ctx.avals_out already reflect full_matrices setting.
     q_aval, r_aval = ctx.avals_out
-    q_type = mlir.aval_to_ir_type(q_aval)
-    r_type = mlir.aval_to_ir_type(r_aval)
+    q_type = _aval_to_ir_type(q_aval)
+    r_type = _aval_to_ir_type(r_aval)
     return mlir.custom_call(
         call_target_name="mps.qr",
         result_types=[q_type, r_type],
@@ -646,9 +658,9 @@ def _svd_lowering(
         return mlir.custom_call(
             call_target_name="mps.svd",
             result_types=[
-                mlir.aval_to_ir_type(s_aval),
-                mlir.aval_to_ir_type(u_aval),
-                mlir.aval_to_ir_type(vt_aval),
+                _aval_to_ir_type(s_aval),
+                _aval_to_ir_type(u_aval),
+                _aval_to_ir_type(vt_aval),
             ],
             operands=[operand],
             backend_config=f'{{"compute_uv": true, "full_matrices": {fm}}}',
@@ -657,7 +669,7 @@ def _svd_lowering(
         (s_aval,) = ctx.avals_out
         return mlir.custom_call(
             call_target_name="mps.svd",
-            result_types=[mlir.aval_to_ir_type(s_aval)],
+            result_types=[_aval_to_ir_type(s_aval)],
             operands=[operand],
             backend_config=f'{{"compute_uv": false, "full_matrices": {fm}}}',
         ).results
@@ -673,7 +685,7 @@ def _make_native_unary_lowering(call_target_name):
         (aval_out,) = ctx.avals_out
         return mlir.custom_call(
             call_target_name=call_target_name,
-            result_types=[mlir.aval_to_ir_type(aval_out)],
+            result_types=[_aval_to_ir_type(aval_out)],
             operands=[x],
             backend_config="",
         ).results
