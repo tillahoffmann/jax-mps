@@ -27,13 +27,13 @@ repos:
         entry: bash -c 'uv run pyright'
         language: system
         pass_filenames: false
-        always_run: true
+        exclude: ^\.github/workflows/
       - id: build
         name: build
         entry: bash -c 'uv pip install -e . -q'
         language: system
         pass_filenames: false
-        always_run: true
+        exclude: ^\.github/workflows/
       - id: clang-tidy
         name: clang-tidy
         entry: |
@@ -52,4 +52,4 @@ repos:
         entry: bash -c 'CI=true uv run pytest -q'
         language: system
         pass_filenames: false
-        always_run: true
+        exclude: ^\.github/workflows/
