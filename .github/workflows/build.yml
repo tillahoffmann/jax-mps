@@ -150,6 +150,11 @@ jobs:
       - name: Build wheel
         run: uv build --wheel
         env:
+          # Pin the wheel's platform tag (macosx_13_0_arm64) to the deployment
+          # target instead of letting scikit-build-core track the runner OS.
+          # Without this, the macos-26 runner tags wheels macosx_26_0, locking
+          # out older macOS. Keep in sync with CMAKE_OSX_DEPLOYMENT_TARGET.
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
           CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload wheel
@@ -283,6 +288,8 @@ jobs:
           sed -i '' "s/^version = \".*\"/version = \"$DEV_VERSION\"/" pyproject.toml
           uv build --wheel
         env:
+          # See "Build wheel" above: pin platform tag to the deployment target.
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
           CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload dev wheel
