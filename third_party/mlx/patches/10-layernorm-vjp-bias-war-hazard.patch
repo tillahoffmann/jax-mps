@@ -1,0 +1,27 @@
+Fix an intermittent wrong bias gradient from fast::layer_norm on Metal.
+
+LayerNormVJP::eval_gpu reduces the cotangent `g` into the bias gradient `gb`
+and then dispatches the vjp kernel, which overwrites `g`'s buffer in place when
+the cotangent is donated (gx or gw_temp alias g). The gb reduction reads g and
+the kernel writes that same buffer — a write-after-read hazard. The Metal
+CommandEncoder only auto-inserts barriers for read-after-write, so the two
+dispatches race and gb is intermittently wrong (~5-15%, off by ~100%). The x and
+weight gradients are unaffected. Insert an explicit barrier after the gb
+reduction. Reproduces on MLX v0.31.2 and main; report upstream.
+
+diff --git a/mlx/backend/metal/normalization.cpp b/mlx/backend/metal/normalization.cpp
+index 9a222cd..98c2257 100644
+--- a/mlx/backend/metal/normalization.cpp
++++ b/mlx/backend/metal/normalization.cpp
+@@ -367,6 +367,11 @@ void LayerNormVJP::eval_gpu(
+         ReductionOpType::ContiguousStridedReduce, {n_rows}, {axis_size});
+     strided_reduce_general_dispatch(
+         g, gb, "sum", plan, {0}, compute_encoder, d, s);
++    // The gb reduction reads `g`. The vjp kernel below overwrites `g`'s buffer
++    // when the cotangent is donated (gx or gw_temp may alias g). That is a
++    // write-after-read hazard, which the command encoder's automatic barrier
++    // logic (read-after-write only) does not cover, so insert one explicitly.
++    compute_encoder.barrier();
+   }
+ 
+   int simd_size = 32;
