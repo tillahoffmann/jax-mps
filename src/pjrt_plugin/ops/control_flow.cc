@@ -1429,7 +1429,19 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             lower = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
-        auto [eigenvalues, eigenvectors] = mlx::core::linalg::eigh(a_contig, lower ? "L" : "U");
+        // Run eigh on the CPU (LAPACK). The vendored Metal Jacobi kernel
+        // intermittently races under MLX's untracked-resource model AND is
+        // 10-90x slower than CPU eigh across all sizes; upstream MLX has no GPU
+        // eigh either. MLX handles the GPU<->CPU data movement and cross-stream
+        // synchronization for the result.
+        //
+        // UPLO is inverted vs the GPU path: MLX arrays are row-major but LAPACK
+        // is column-major, so reading the "upper" triangle of a row-major array
+        // means passing "L" to MLX's CPU eigh (and vice versa). This only
+        // matters when the unused triangle holds non-symmetric data; for
+        // genuinely symmetric inputs both choices are equivalent.
+        auto [eigenvalues, eigenvectors] =
+            mlx::core::linalg::eigh(a_contig, lower ? "U" : "L", mlx::core::Device::cpu);
         values.emplace(ToKey(op->getResult(0)), std::move(eigenvectors));
         values.emplace(ToKey(op->getResult(1)), std::move(eigenvalues));
         return true;
@@ -1451,7 +1463,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             full_matrices = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
-        auto [Q, R] = mlx::core::linalg::qr(a_contig);
+        // Run QR on the CPU (same rationale as eigh): the vendored Metal kernel
+        // races under MLX's untracked-resource model and is slower than LAPACK;
+        // upstream MLX has no GPU QR. MLX handles GPU<->CPU movement + sync.
+        auto [Q, R] = mlx::core::linalg::qr(a_contig, mlx::core::Device::cpu);
 
         if (full_matrices) {
             // MLX QR returns thin: Q is M×K, R is K×N (K=min(M,N)).
@@ -1513,7 +1528,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             full_matrices = *v;
 
         auto a_contig = mlx::core::contiguous(*a);
-        auto results = mlx::core::linalg::svd(a_contig, compute_uv, {});
+        // Run SVD on the CPU (same rationale as eigh/qr).
+        auto results = mlx::core::linalg::svd(a_contig, compute_uv, mlx::core::Device::cpu);
 
         if (compute_uv) {
             if (results.size() != 3) {

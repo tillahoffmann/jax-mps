@@ -92,6 +92,7 @@ class OperationTestConfig:
         static_argnums: Sequence[int] | None = None,
         grad_transform: Callable | None = None,
         grad_xfail: str | None = None,
+        grad_xfail_strict: bool = True,
         name: str | None = None,
         seed: int = 42,
         **kwargs: Any,
@@ -101,6 +102,9 @@ class OperationTestConfig:
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
         self.grad_xfail = grad_xfail
+        # When False, the grad xfail is non-strict: the test may pass (xpass) or
+        # fail (xfail) without erroring. Use for intermittent/flaky failures.
+        self.grad_xfail_strict = grad_xfail_strict
         self.seed = seed
         # Wrap non-callables in lambdas that accept (and ignore) key
         self.args = [

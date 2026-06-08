@@ -520,7 +520,10 @@ bool HandleCholesky(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
         return false;
 
     bool lower = cholOp.getLower();
-    auto result = mlx::core::linalg::cholesky(*a, /*upper=*/!lower);
+    // Run cholesky on the CPU (LAPACK). The vendored MPS path is racy under
+    // MLX's untracked-resource model (intermittently corrupts itself and nearby
+    // ops) and 10-300x slower than CPU; triangular_solve already runs on CPU.
+    auto result = mlx::core::linalg::cholesky(*a, /*upper=*/!lower, mlx::core::Device::cpu);
     values.emplace(ToKey(op->getResult(0)), std::move(result));
     return true;
 }

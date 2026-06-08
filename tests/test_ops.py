@@ -129,7 +129,7 @@ def test_op_grad(
             pytest.mark.xfail(  # type: ignore[call-overload]
                 reason=op_config.grad_xfail,
                 match=op_config.grad_xfail,
-                strict=True,
+                strict=op_config.grad_xfail_strict,
             )
         )
 
