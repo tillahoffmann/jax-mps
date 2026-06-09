@@ -10,22 +10,12 @@ def make_reduction_op_configs():
             "reduction-complex" if complex else "reduction-real"
         ):
             for reduction in [jnp.sum, jnp.mean, jnp.var, jnp.std]:
-                # std's fused VJP intermittently miscompiles under MLX's
-                # untracked-resource model (a resource-level race in compile(),
-                # tracked in github.com/tillahoffmann/jax-mps#170). Non-strict
-                # xfail so the test may pass (xpass) or fail (xfail) cleanly.
-                std_xfail = (
-                    {"grad_xfail": "Values are not close", "grad_xfail_strict": False}
-                    if reduction is jnp.std
-                    else {}
-                )
                 yield from [
                     OperationTestConfig(
                         reduction,
                         lambda key, complex=complex: complex_standard_normal(
                             key, (4, 8), complex
                         ),
-                        **std_xfail,
                     ),
                     # Explicit argument because capture doesn't work.
                     OperationTestConfig(

@@ -15,6 +15,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Bytecode/BytecodeReader.h"
+#include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -25,6 +26,7 @@
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/ops/registry.h"
 #include "pjrt_plugin/passes/mps_fusion_pass.h"
+#include "pjrt_plugin/passes/stablehlo_inliner_interface.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/Serialization.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -59,8 +61,15 @@ void registerDialects(mlir::MLIRContext& context) {
     registry.insert<mlir::stablehlo::StablehloDialect>();
     registry.insert<mlir::vhlo::VhloDialect>();
     registry.insert<mlir::chlo::ChloDialect>();
+    // The func dialect's inliner interface (which makes func.call inlinable) lives
+    // in a separate extension; without it MLIR's inliner cannot inline any call.
+    mlir::func::registerInlinerExtension(registry);
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
+    // Teach the inliner that StableHLO/CHLO ops are inlinable too, so it can
+    // inline func.call ops whose bodies are those ops (jnp.std/var/numpyro lower
+    // their guard `where` to func.call @_where).
+    registerStablehloInlinerInterfaces(context);
     // Allow unknown dialects (e.g., sdy/Shardy for sharding) to pass through
     context.allowUnregisteredDialects();
 }
@@ -93,21 +102,30 @@ bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
     return true;
 }
 
-// Run the inliner pass to inline all func.call operations
+// Inline func.call operations with MLIR's stock inliner. Two interfaces enable
+// this (both registered in registerDialects): the func dialect's inliner
+// extension makes func.call inlinable, and registerStablehloInlinerInterfaces
+// makes StableHLO/CHLO ops inlinable. Together they let the inliner inline the
+// guard `where` that jnp.std/var/numpyro lower to a func.call @_where; non-finite
+// guard constants are materialized safely (see MaybeBitcastNonFiniteFloat) so the
+// inlined grads compile correctly (jax-mps#170). Any call the inliner leaves in
+// place is detected in finalizeModule and routed to the eager path.
 bool runInlinerPass(mlir::MLIRContext& context, mlir::ModuleOp module) {
-    // Mark all non-main functions as private so they can be inlined
-    // The MLIR inliner only inlines private functions by default
+    // The inliner only inlines (and then dead-function-eliminates) private
+    // callees; jaxlib emits the helpers as public, so mark them private first.
     module.walk([&](mlir::func::FuncOp funcOp) {
         if (funcOp.getName() != "main" && funcOp.isPublic()) {
             funcOp.setPrivate();
         }
     });
 
-    // Run a single inliner pass - we handle remaining func.call at runtime
     mlir::PassManager pm(&context);
     pm.addPass(mlir::createInlinerPass());
+    // Drop now-dead private callees so the has_uninlined_call scan in
+    // finalizeModule only sees func.calls that are actually reachable (a
+    // func.call left in a dead function would otherwise needlessly force eager).
+    pm.addPass(mlir::createSymbolDCEPass());
 
-    // If inliner fails, log but continue - we handle func.call at runtime
     if (mlir::failed(pm.run(module))) {
         MPS_LOG_DEBUG("Inliner pass failed, func.call ops will be handled at runtime\n");
     }
@@ -205,6 +223,16 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
 
     // Check for unsupported operations across ALL functions in the module
     result.unsupported_ops = checkUnsupportedOps(*module);
+
+    // Detect any func.call that survived inlining (a multi-block callee the
+    // inliner could not clone). Flag it so the executable uses the eager path as
+    // a safety net rather than compile() (jax-mps#170).
+    module->walk([&](mlir::func::CallOp) { result.has_uninlined_call = true; });
+    if (result.has_uninlined_call) {
+        MPS_LOG_WARN(
+            "func.call survived inlining; forcing eager path (no compile) to "
+            "avoid jax-mps#170 miscompile\n");
+    }
 
     // Transfer ownership
     result.context = std::move(context);

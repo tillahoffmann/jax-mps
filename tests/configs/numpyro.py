@@ -40,9 +40,6 @@ def make_numpyro_op_configs():
                     dists.Gamma,
                     lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
                     lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),
-                    # Intermittent fused-reduction grad race, tracked in #170.
-                    grad_xfail="Values are not close",
-                    grad_xfail_strict=False,
                 ),
                 NumpyroDistributionTestConfig(
                     dists.Exponential,
@@ -137,9 +134,6 @@ def make_numpyro_op_configs():
                         key, 5.0, bs
                     ),  # concentration
                     differentiable_argnums=(1, 2),
-                    # Intermittent fused-reduction grad race, tracked in #170.
-                    grad_xfail="Values are not close",
-                    grad_xfail_strict=False,
                 ),
                 NumpyroDistributionTestConfig(
                     dists.MultinomialProbs,
@@ -181,9 +175,6 @@ def make_numpyro_op_configs():
                         key, 5.0, bs
                     ),  # concentration
                     lambda key, bs=batch_shape: random.gamma(key, 5.0, bs),  # rate
-                    # Same digamma-based fused-reduction grad race as Gamma (#170).
-                    grad_xfail="Values are not close",
-                    grad_xfail_strict=False,
                 ),
                 NumpyroDistributionTestConfig(
                     dists.VonMises,

@@ -22,6 +22,14 @@ struct ParsedModule {
     // List of unsupported operations encountered during parsing
     std::vector<std::string> unsupported_ops;
 
+    // True if a reachable func.call survived inlining (e.g. a recursive or
+    // otherwise non-inlinable callee). Such calls run via HandleCall, whose
+    // compile() lowering is unsafe (jax-mps#170), so the executable falls back to
+    // the eager path for them. Usually false: MLIR's inliner inlines the helper
+    // calls jaxlib emits (jnp.std/var/numpyro @_where, ...) and SymbolDCE drops
+    // the dead callees, so this flag flips true only for the rare residual call.
+    bool has_uninlined_call = false;
+
     // Check if parsing was successful
     bool ok() const {
         return context && module && entry_func;

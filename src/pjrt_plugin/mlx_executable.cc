@@ -9,9 +9,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -103,6 +105,55 @@ std::optional<mlx::core::array> CreateArrayWithTypedPtr(const void* data,
     }
 }
 
+// jax-mps#170: a non-finite float constant (the NaN/inf guard that jnp.std/var
+// and numpyro grads bake in) materialized as a plain leaf array becomes a
+// never-written buffer under mlx::core::compile(), so the compiled kernel reads
+// garbage (intermittent zero / wrong gradients). Materialize such constants
+// instead via a bitcast of their integer bit-pattern: that is a *computed* value
+// (written by a kernel before it is read) and compiles correctly. Returns
+// nullopt for finite values / non-float dtypes so callers use the normal copy
+// path. `numElements` is the number of float elements addressable at `data`
+// (1 for a splat). `data` (DenseElementsAttr::getRawData()) is byte-oriented and
+// not guaranteed to be element-aligned, so the bytes are memcpy'd into aligned
+// storage before being read as integers.
+std::optional<mlx::core::array> MaybeBitcastNonFiniteFloat(const void* data,
+                                                           const mlx::core::Shape& shape,
+                                                           mlx::core::Dtype dtype,
+                                                           size_t numElements) {
+    // Non-finite (inf/nan) iff the exponent field is all ones.
+    if (dtype == mlx::core::float32) {
+        std::vector<uint32_t> bits(numElements);
+        std::memcpy(bits.data(), data, numElements * sizeof(uint32_t));
+        bool nonFinite = false;
+        for (uint32_t b : bits) {
+            if ((b & 0x7F800000U) == 0x7F800000U) {
+                nonFinite = true;
+                break;
+            }
+        }
+        if (!nonFinite)
+            return std::nullopt;
+        return mlx::core::view(mlx::core::array(bits.data(), shape, mlx::core::uint32),
+                               mlx::core::float32);
+    }
+    if (dtype == mlx::core::float16 || dtype == mlx::core::bfloat16) {
+        const uint16_t expMask = dtype == mlx::core::float16 ? 0x7C00U : 0x7F80U;
+        std::vector<uint16_t> bits(numElements);
+        std::memcpy(bits.data(), data, numElements * sizeof(uint16_t));
+        bool nonFinite = false;
+        for (uint16_t b : bits) {
+            if ((b & expMask) == expMask) {
+                nonFinite = true;
+                break;
+            }
+        }
+        if (!nonFinite)
+            return std::nullopt;
+        return mlx::core::view(mlx::core::array(bits.data(), shape, mlx::core::uint16), dtype);
+    }
+    return std::nullopt;
+}
+
 std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr attr) {
     auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(attr.getType());
     if (!tensorType) {
@@ -117,7 +168,10 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
 
     // Handle splat constants (single value broadcast to shape)
     if (attr.isSplat()) {
-        auto scalar_opt = CreateArrayWithTypedPtr(rawData.data(), {}, mlxDtype);
+        // jax-mps#170: route non-finite floats through a bitcast (computed value).
+        auto scalar_opt = MaybeBitcastNonFiniteFloat(rawData.data(), {}, mlxDtype, 1);
+        if (!scalar_opt)
+            scalar_opt = CreateArrayWithTypedPtr(rawData.data(), {}, mlxDtype);
         if (!scalar_opt) {
             MPS_LOG_ERROR("Unsupported dtype %d for splat constant\n",
                           static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
@@ -171,7 +225,10 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
         return std::nullopt;
     }
 
-    auto result = CreateArrayWithTypedPtr(rawData.data(), shape, mlxDtype);
+    // jax-mps#170: route non-finite floats through a bitcast (computed value).
+    auto result = MaybeBitcastNonFiniteFloat(rawData.data(), shape, mlxDtype, numElements);
+    if (!result)
+        result = CreateArrayWithTypedPtr(rawData.data(), shape, mlxDtype);
     if (!result) {
         MPS_LOG_ERROR("Unsupported dtype %d for constant\n",
                       static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
@@ -602,7 +659,10 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
 
     static bool disable_compile = std::getenv("MPS_NO_COMPILE") != nullptr;
     {
-        if (!compile_attempted_ && !disable_compile) {
+        // Safety net: if a func.call survived inlining (a multi-block / control-
+        // flow callee the inliner can't clone), use the eager path instead of
+        // compile() (jax-mps#170). Single-block callees are inlined and compile.
+        if (!compile_attempted_ && !disable_compile && !parsed_module_.has_uninlined_call) {
             compile_attempted_ = true;
 
             auto exec_fn =
