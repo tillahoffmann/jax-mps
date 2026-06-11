@@ -514,7 +514,8 @@ void RegisterArithmeticHandlers(std::unordered_map<std::string, OpHandler>& hand
     handlers.insert({"stablehlo.cosine", MakeUnaryHandler("stablehlo.cosine", mlx::core::cos)});
     handlers.insert({"stablehlo.tanh", MakeUnaryHandler("stablehlo.tanh", mlx::core::tanh)});
     handlers.insert({"stablehlo.tan", MakeUnaryHandler("stablehlo.tan", mlx::core::tan)});
-    handlers.insert({"stablehlo.logistic", MakeUnaryHandler("stablehlo.logistic", mlx::core::sigmoid)});
+    handlers.insert(
+        {"stablehlo.logistic", MakeUnaryHandler("stablehlo.logistic", mlx::core::sigmoid)});
     handlers.insert({"stablehlo.sign", HandleSign});
     handlers.insert(
         {"stablehlo.log_plus_one", MakeUnaryHandler("stablehlo.log_plus_one", mlx::core::log1p)});
