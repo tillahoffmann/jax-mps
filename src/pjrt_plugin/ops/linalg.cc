@@ -320,43 +320,33 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
     auto featureGroupCount = static_cast<int>(convOp.getFeatureGroupCount());
     auto batchGroupCount = static_cast<int>(convOp.getBatchGroupCount());
 
-    // batch_group_count > 1: split the input batch and the kernel
-    // output_feature dim into G groups, convolve each pair independently,
-    // and concat outputs along the output feature dim. JAX vmap'd conv
-    // emits this whenever the vmapped axis is the batch axis. After this
-    // helper runs (only when G>1), the downstream code sees G=1 with the
-    // sliced operands and proceeds as usual.
-    auto convolveGroup = [&](mlx::core::array lhs,
-                             mlx::core::array rhs) -> std::optional<mlx::core::array> {
-        for (int i = 0; i < numSpatialDims; ++i) {
-            if (inputDilation[i] <= 1)
-                continue;
-            if (paddingLow[i] >= 0 && paddingHigh[i] >= 0)
-                continue;
-            int axis = 1 + i;  // canonical [N, spatial..., C_in].
-            int L = lhs.shape(axis);
-            if (L <= 0)
-                continue;
-            auto dilatedShape = lhs.shape();
-            dilatedShape[axis] = (L - 1) * inputDilation[i] + 1;
-            mlx::core::Shape starts(lhs.ndim(), 0);
-            mlx::core::Shape striding(lhs.ndim(), 1);
-            striding[axis] = inputDilation[i];
-            auto zeros = mlx::core::zeros(dilatedShape, lhs.dtype());
-            lhs = mlx::core::slice_update(zeros, lhs, starts, dilatedShape, striding);
-        }
-        std::vector<int> perGroupDilation = inputDilation;
-        for (int i = 0; i < numSpatialDims; ++i) {
-            if (paddingLow[i] < 0 || paddingHigh[i] < 0)
-                perGroupDilation[i] = 1;
-        }
-        return mlx::core::conv_general(lhs, rhs, strides, paddingLow, paddingHigh, kernelDilation,
-                                       perGroupDilation, featureGroupCount, false);
-    };
-
     if (batchGroupCount > 1) {
+        // batch_group_count > 1 arises in JAX's weight-gradient VJP for vmapped
+        // convolutions. G groups each own Nper input samples and Oper output
+        // filters. The naive loop (G iterations × one conv each) is O(G) MLX
+        // dispatches; with G = batch_size this is prohibitively slow.
+        //
+        // Instead, fold the G axis into the channel axis of the input:
+        //   input  (G*Nper, *spatial, C_in)  ->  (Nper, *spatial, G*C_in)
+        //   kernel (G*Oper, *spatial_k, C_in) stays as-is
+        // then call conv_general once with feature_group_count=G. Group g
+        // sees input channels [g*C_in, (g+1)*C_in) and produces output
+        // channels [g*Oper, (g+1)*Oper), which matches the concatenated
+        // result of the original loop.
+        // The fold below repurposes conv_general's feature_group_count to carry
+        // the batch groups, so it cannot also express a real feature_group_count.
+        // XLA forbids both being >1 in one convolution, so this is unreachable in
+        // practice; guard anyway to fail loudly rather than silently miscompute.
+        if (featureGroupCount > 1) {
+            MPS_LOG_ERROR(
+                "stablehlo.convolution: batch_group_count %d and feature_group_count %d "
+                "cannot both be > 1\n",
+                batchGroupCount, featureGroupCount);
+            return false;
+        }
         int N = inputT.shape(0);
         int O = kernelT.shape(0);
+        int C_in = inputT.shape(static_cast<int>(inputT.ndim()) - 1);
         if (N % batchGroupCount != 0 || O % batchGroupCount != 0) {
             MPS_LOG_ERROR(
                 "stablehlo.convolution: batch_group_count %d does not divide "
@@ -364,40 +354,75 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
                 batchGroupCount, N, O);
             return false;
         }
-        int Nper = N / batchGroupCount;
-        int Oper = O / batchGroupCount;
-        std::vector<mlx::core::array> groupOutputs;
-        groupOutputs.reserve(batchGroupCount);
-        for (int g = 0; g < batchGroupCount; ++g) {
-            mlx::core::Shape lhsStart(inputT.ndim(), 0);
-            mlx::core::Shape lhsStop(inputT.shape().begin(), inputT.shape().end());
-            lhsStart[0] = g * Nper;
-            lhsStop[0] = (g + 1) * Nper;
-            auto lhsGroup = mlx::core::slice(inputT, lhsStart, lhsStop);
+        int G = batchGroupCount;
+        int Nper = N / G;
 
-            mlx::core::Shape rhsStart(kernelT.ndim(), 0);
-            mlx::core::Shape rhsStop(kernelT.shape().begin(), kernelT.shape().end());
-            rhsStart[0] = g * Oper;
-            rhsStop[0] = (g + 1) * Oper;
-            auto rhsGroup = mlx::core::slice(kernelT, rhsStart, rhsStop);
+        // Reshape (G*Nper, *spatial, C_in) -> (Nper, *spatial, G*C_in):
+        //   step 1: reshape -> (G, Nper, *spatial, C_in)
+        //   step 2: transpose -> (Nper, *spatial, G, C_in)
+        //   step 3: reshape -> (Nper, *spatial, G*C_in)
+        {
+            mlx::core::Shape s1;
+            s1.push_back(G);
+            s1.push_back(Nper);
+            for (int i = 1; i < static_cast<int>(inputT.ndim()); ++i)
+                s1.push_back(inputT.shape(i));
+            auto t1 = mlx::core::reshape(inputT, s1);
 
-            auto groupOut = convolveGroup(lhsGroup, rhsGroup);
-            if (!groupOut)
-                return false;
-            groupOutputs.push_back(std::move(*groupOut));
+            int nd = static_cast<int>(t1.ndim());  // numSpatialDims + 3
+            std::vector<int> perm;
+            perm.push_back(1);  // Nper  -> axis 0
+            for (int i = 2; i < nd - 1; ++i)
+                perm.push_back(i);   // spatial
+            perm.push_back(0);       // G     -> axis numSpatialDims+1
+            perm.push_back(nd - 1);  // C_in  -> axis numSpatialDims+2
+            auto t2 = mlx::core::transpose(t1, perm);
+
+            mlx::core::Shape s3;
+            for (int i = 0; i < static_cast<int>(t2.ndim()) - 2; ++i)
+                s3.push_back(t2.shape(i));
+            s3.push_back(G * C_in);
+            inputT = mlx::core::reshape(t2, s3);
         }
-        // canonical output layout is [N/G, *spatial_out, O/G]; concat groups
-        // along the trailing feature axis to recover [N/G, *spatial_out, O].
-        auto convResultLocal = mlx::core::concatenate(groupOutputs, numSpatialDims + 1);
-        std::vector<int> outputPerm(convResultLocal.ndim());
-        outputPerm[outputBatchDim] = 0;
+
+        // Apply input-dilation materialization for negative-padded axes
+        // (identical logic to the batchGroupCount==1 path below).
         for (int i = 0; i < numSpatialDims; ++i) {
-            outputPerm[outputSpatialDims[i]] = 1 + i;
+            if (inputDilation[i] <= 1)
+                continue;
+            if (paddingLow[i] >= 0 && paddingHigh[i] >= 0)
+                continue;
+            int axis = 1 + i;
+            int L = inputT.shape(axis);
+            if (L <= 0)
+                continue;
+            auto dilatedShape = inputT.shape();
+            dilatedShape[axis] = (L - 1) * inputDilation[i] + 1;
+            mlx::core::Shape starts(inputT.ndim(), 0);
+            mlx::core::Shape striding(inputT.ndim(), 1);
+            striding[axis] = inputDilation[i];
+            auto zeros = mlx::core::zeros(dilatedShape, inputT.dtype());
+            inputT = mlx::core::slice_update(zeros, inputT, starts, dilatedShape, striding);
+            inputDilation[i] = 1;
         }
-        outputPerm[outputFeatureDim] = 1 + numSpatialDims;
-        auto result = IsIdentityPermutation(outputPerm)
-                          ? convResultLocal
-                          : mlx::core::transpose(convResultLocal, outputPerm);
+        std::vector<int> perGroupDilation = inputDilation;
+        for (int i = 0; i < numSpatialDims; ++i) {
+            if (paddingLow[i] < 0 || paddingHigh[i] < 0)
+                perGroupDilation[i] = 1;
+        }
+
+        // Single conv: (Nper, *spatial, G*C_in) x (G*Oper, *spatial_k, C_in)
+        // with feature_group_count=G -> (Nper, *spatial_out, G*Oper)
+        auto groupOut = mlx::core::conv_general(inputT, kernelT, strides, paddingLow, paddingHigh,
+                                                kernelDilation, perGroupDilation, G, false);
+
+        std::vector<int> outPerm(groupOut.ndim());
+        outPerm[static_cast<int>(outputBatchDim)] = 0;
+        for (int i = 0; i < numSpatialDims; ++i)
+            outPerm[static_cast<int>(outputSpatialDims[i])] = 1 + i;
+        outPerm[static_cast<int>(outputFeatureDim)] = 1 + numSpatialDims;
+        auto result =
+            IsIdentityPermutation(outPerm) ? groupOut : mlx::core::transpose(groupOut, outPerm);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
         return true;
     }
