@@ -19,6 +19,7 @@ from jax._src.lax import lax as lax_lax
 from jax._src.lax import linalg as lax_linalg
 from jax._src.lax import special as lax_special
 from jax._src.lib.mlir import ir  # pyright: ignore[reportPrivateImportUsage]
+from jax._src.lib.mlir.dialects import hlo
 
 
 def _aval_to_ir_type(aval: core.ShapedArray) -> ir.Type:
@@ -693,6 +694,21 @@ def _make_native_unary_lowering(call_target_name):
     return _lowering
 
 
+def _logistic_lowering(ctx, x, *, accuracy=None):
+    """MPS lowering for logistic_p: emit a native stablehlo.logistic op.
+
+    Upstream JAX lowers logistic_p to the explicit 1/(1+exp(-x)) decomposition
+    because the HLO LogisticOp lowering had numerical issues on some backends
+    (see the commented-out registration in jax/_src/lax/lax.py). On MPS we route
+    stablehlo.logistic to mlx::core::sigmoid, which is numerically stable, so we
+    keep it as a single op instead of a four-op decomposition. The accuracy
+    attribute is irrelevant to the MLX kernel and is dropped (matching
+    logistic_impl).
+    """
+    del accuracy
+    return [hlo.logistic(x)]
+
+
 def register_fused_ops():
     """Register MPS MLIR lowerings for fused custom_calls and related ops.
 
@@ -747,6 +763,10 @@ def register_fused_ops():
         mlir.register_lowering(
             prim, _make_native_unary_lowering(target), platform="mps"
         )
+
+    # logistic_p decomposes to 1/(1+exp(-x)) upstream; on MPS keep it as a
+    # single stablehlo.logistic that dispatches to mlx::core::sigmoid.
+    mlir.register_lowering(lax_lax.logistic_p, _logistic_lowering, platform="mps")
 
     # Fallback lowerings for non-MPS platforms (CPU, GPU).
     mlir.register_lowering(

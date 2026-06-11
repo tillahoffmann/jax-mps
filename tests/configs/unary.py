@@ -1,5 +1,5 @@
 import numpy
-from jax import lax, random
+from jax import lax, nn, random
 from jax import numpy as jnp
 from jax.scipy import special
 
@@ -147,6 +147,10 @@ def make_unary_op_configs():
         ),
         OperationTestConfig(
             jnp.cbrt,
+            lambda key: random.normal(key, (16,)),
+        ),
+        OperationTestConfig(
+            nn.sigmoid,
             lambda key: random.normal(key, (16,)),
         ),
         OperationTestConfig(
