@@ -333,6 +333,17 @@ bool HandleConvolution(mlir::Operation* op, ValueMap& values,
         // sees input channels [g*C_in, (g+1)*C_in) and produces output
         // channels [g*Oper, (g+1)*Oper), which matches the concatenated
         // result of the original loop.
+        // The fold below repurposes conv_general's feature_group_count to carry
+        // the batch groups, so it cannot also express a real feature_group_count.
+        // XLA forbids both being >1 in one convolution, so this is unreachable in
+        // practice; guard anyway to fail loudly rather than silently miscompute.
+        if (featureGroupCount > 1) {
+            MPS_LOG_ERROR(
+                "stablehlo.convolution: batch_group_count %d and feature_group_count %d "
+                "cannot both be > 1\n",
+                batchGroupCount, featureGroupCount);
+            return false;
+        }
         int N = inputT.shape(0);
         int O = kernelT.shape(0);
         int C_in = inputT.shape(static_cast<int>(inputT.ndim()) - 1);

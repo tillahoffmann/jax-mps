@@ -203,4 +203,22 @@ def make_conv_op_configs():
                 lambda key: random.uniform(key, (1, 2, 4, 2), minval=-1.0, maxval=1.0),
                 name="lax.conv_general_dilated-batch_group_count_2-lhs_dilation-neg_padding",
             ),
+            # batch_group_count with multiple output filters per group
+            # (output_feature / G = 2) and C_in > 1. The other batch_group
+            # configs use one filter per group, which cannot distinguish the
+            # blocked-vs-interleaved output-feature ordering the fold assumes;
+            # this one pins that ordering.
+            OperationTestConfig(
+                lambda x, kernel: lax.conv_general_dilated(
+                    x,
+                    kernel,
+                    window_strides=(1, 1),
+                    padding=((1, 1), (1, 1)),
+                    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+                    batch_group_count=3,
+                ),
+                lambda key: random.uniform(key, (6, 5, 5, 2), minval=-1.0, maxval=1.0),
+                lambda key: random.uniform(key, (3, 3, 2, 6), minval=-1.0, maxval=1.0),
+                name="lax.conv_general_dilated-batch_group_count_3-multi_filter",
+            ),
         ]
