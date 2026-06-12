@@ -22,6 +22,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/ops/registry.h"
@@ -84,12 +85,27 @@ bool runOptimizationPasses(mlir::MLIRContext& context, mlir::ModuleOp module) {
         return true;
 
     mlir::PassManager pm(&context);
-    // Algebraic simplification: x*1 -> x, x+0 -> x, etc.
+    // Algebraic simplification: x*1 -> x, x+0 -> x, broadcast/reshape cleanup,
+    // constant-to-rhs canonicalization, etc.
     pm.addNestedPass<mlir::func::FuncOp>(
         mlir::stablehlo::createStablehloAggressiveSimplificationPass());
+    // Constant folding: evaluate constant subgraphs (2*3 -> 6, transpose/slice
+    // of constants, etc.) once at compile time instead of every Execute on the
+    // GPU. Simplification doesn't fold; this is the companion pass (together
+    // they make up StablehloTargetIndependentOptimization). Folding can also
+    // expose more fusion opportunities for the MPS pass below.
+    //
+    // optimizeFloat=false: skip folds that reassociate/perturb float arithmetic
+    // (they drift results by ~1 ULP, which trips the suite's 1e-5/1e-6
+    // tolerances). Integer/shape/index constant folding — the bulk of the
+    // per-step win and numerically exact — still runs.
+    mlir::stablehlo::StablehloAggressiveFolderPassOptions folderOpts;
+    folderOpts.optimizeFloat = false;
+    pm.addNestedPass<mlir::func::FuncOp>(mlir::stablehlo::createStablehloAggressiveFolderPass(
+        folderOpts, mlir::GreedyRewriteConfig()));
     // MPS-specific fusions (matmul+bias -> addmm, etc.). Run after upstream
-    // simplification so patterns like x+0 are already cleaned up before we
-    // try to match.
+    // simplification + folding so patterns like x+0 are already cleaned up
+    // before we try to match.
     pm.addNestedPass<mlir::func::FuncOp>(createMpsFusionPass());
 
     if (mlir::failed(pm.run(module))) {
