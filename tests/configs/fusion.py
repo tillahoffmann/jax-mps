@@ -304,4 +304,87 @@ def make_fusion_configs() -> list[FusionTestConfig]:
         )
     )
 
+    # --- fuse_rms_norm: RMSNorm decomposition -> mps.rms_norm ---
+
+    def _flax_rms_norm(use_scale=True):
+        layer = flax_nn.RMSNorm(use_scale=use_scale)
+
+        def f(x, *params):
+            variables = {"params": {}}
+            if use_scale:
+                variables["params"]["scale"] = params[0]
+            return layer.apply(variables, x)
+
+        return f
+
+    # Default flax RMSNorm (use_scale=True). Emits a `subtract(x, broadcast(0))`
+    # centering no-op that canonicalize_broadcast_identity folds before the
+    # matcher runs — must fuse.
+    for shape in [(4, 16), (2, 8, 16), (2, 3, 4, 32)]:
+        d = shape[-1]
+        configs.append(
+            FusionTestConfig(
+                name=f"rms_norm.scale.{'x'.join(map(str, shape))}",
+                func=_flax_rms_norm(),
+                args=(randn(*shape), randn(d)),
+                expected_custom_calls={"mps.rms_norm": 1},
+                fusion_atol=2e-4,
+                fusion_rtol=2e-4,
+                atol=2e-4,
+                rtol=2e-4,
+            )
+        )
+
+    # No scale (use_scale=False): no weight operand for the 2-arg kernel —
+    # must NOT fuse.
+    configs.append(
+        FusionTestConfig(
+            name="rms_norm.no_scale_no_fuse",
+            func=_flax_rms_norm(use_scale=False),
+            args=(randn(2, 8, 16),),
+            expected_custom_calls={"mps.rms_norm": 0},
+            atol=2e-4,
+            rtol=2e-4,
+        )
+    )
+
+    # RMSNorm over a non-trailing axis — must NOT match (kernel is last-axis).
+    def _rms_axis0(x, w):
+        ms = jnp.mean(x * x, axis=0, keepdims=True)
+        return x * jax.lax.rsqrt(ms + 1e-6) * w
+
+    configs.append(
+        FusionTestConfig(
+            name="rms_norm.non_trailing_axis_no_fuse",
+            func=_rms_axis0,
+            args=(randn(16, 8), randn(16, 1)),
+            expected_custom_calls={"mps.rms_norm": 0},
+        )
+    )
+
+    # --- canonicalize_broadcast_identity: must not change numerics ---
+
+    # x - broadcast(0) over the SAME shape folds to x (and stays numerically
+    # identical). Guards the safe case.
+    configs.append(
+        FusionTestConfig(
+            name="canon.sub_zero_same_shape",
+            func=lambda x: x - jnp.zeros_like(x),
+            args=(randn(4, 8),),
+            expected_custom_calls={},
+        )
+    )
+
+    # x - broadcast(0) where the zero is the BROADCAST-UP target (x is smaller):
+    # the subtract is a broadcast of x, NOT an identity. Must stay correct
+    # (numerical check vs CPU catches an unsafe fold that drops the broadcast).
+    configs.append(
+        FusionTestConfig(
+            name="canon.sub_zero_broadcasts_x",
+            func=lambda x: x - jnp.zeros((4, 8), dtype=x.dtype),
+            args=(randn(8),),
+            expected_custom_calls={},
+        )
+    )
+
     return configs
