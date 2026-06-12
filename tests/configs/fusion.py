@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+import jax
 import jax.nn as jnn
 import numpy
 from jax import numpy as jnp
@@ -214,6 +215,92 @@ def make_fusion_configs() -> list[FusionTestConfig]:
             func=lambda x, y: x / y,
             args=(randn(4, 8), randn(4, 8)),
             expected_custom_calls={"mps.softmax": 0},
+        )
+    )
+
+    # --- fuse_layer_norm: affine LayerNorm decomposition -> mps.layer_norm ---
+
+    import flax.linen as flax_nn
+
+    def _flax_layer_norm(use_scale=True, use_bias=True):
+        """A flax LayerNorm wrapped so its params are explicit fn args.
+
+        Returns (func, arg_factories). The trace produces the exact
+        E[x^2]-E[x]^2 + affine StableHLO the pass targets.
+        """
+        layer = flax_nn.LayerNorm(use_scale=use_scale, use_bias=use_bias)
+
+        def f(x, *params):
+            variables = {"params": {}}
+            if use_scale:
+                variables["params"]["scale"] = params[0]
+            if use_bias:
+                variables["params"]["bias"] = params[-1]
+            return layer.apply(variables, x)
+
+        return f
+
+    # Full affine LayerNorm at several ranks. Default flax form (E[x^2]-E[x]^2,
+    # max(0,var) clamp, use_scale=use_bias=True) — must fuse.
+    for shape in [(4, 16), (2, 8, 16), (2, 3, 4, 32)]:
+        d = shape[-1]
+        configs.append(
+            FusionTestConfig(
+                name=f"layer_norm.affine.{'x'.join(map(str, shape))}",
+                func=_flax_layer_norm(),
+                args=(randn(*shape), randn(d), randn(d)),
+                expected_custom_calls={"mps.layer_norm": 1},
+                # fast::layer_norm reorders the reduction vs the decomposed
+                # form; loosen the fused-vs-unfused check accordingly.
+                fusion_atol=2e-4,
+                fusion_rtol=2e-4,
+                atol=2e-4,
+                rtol=2e-4,
+            )
+        )
+
+    # Hand-written affine LayerNorm (the mps.ops fallback form: mean of squared
+    # deviation rather than E[x^2]-E[x]^2). Different variance graph — must NOT
+    # fuse (conservative: we only claim the flax/E[x^2]-E[x]^2 form).
+    def _manual_ln(x, w, b):
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+        return (x - mean) * (var + 1e-5) ** -0.5 * w + b
+
+    configs.append(
+        FusionTestConfig(
+            name="layer_norm.manual_variance_no_fuse",
+            func=_manual_ln,
+            args=(randn(2, 8, 16), randn(16), randn(16)),
+            expected_custom_calls={"mps.layer_norm": 0},
+        )
+    )
+
+    # No affine params (use_scale=use_bias=False): no weight/bias to pass to the
+    # kernel — must NOT fuse.
+    configs.append(
+        FusionTestConfig(
+            name="layer_norm.no_affine_no_fuse",
+            func=_flax_layer_norm(use_scale=False, use_bias=False),
+            args=(randn(2, 8, 16),),
+            expected_custom_calls={"mps.layer_norm": 0},
+            atol=2e-4,
+            rtol=2e-4,
+        )
+    )
+
+    # Plain affine over a non-trailing axis — must NOT match (kernel is last-axis).
+    def _ln_axis0(x, w, b):
+        mean = jnp.mean(x, axis=0, keepdims=True)
+        var = jnp.mean(x * x, axis=0, keepdims=True) - mean * mean
+        return (x - mean) * jax.lax.rsqrt(var + 1e-5) * w + b
+
+    configs.append(
+        FusionTestConfig(
+            name="layer_norm.non_trailing_axis_no_fuse",
+            func=_ln_axis0,
+            args=(randn(16, 8), randn(16, 1), randn(16, 1)),
+            expected_custom_calls={"mps.layer_norm": 0},
         )
     )
 
