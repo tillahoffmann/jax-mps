@@ -43,6 +43,12 @@ def main():
     parser.add_argument(
         "--steps", type=int, default=None, help="Number of steps (overrides epochs)./"
     )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=5,
+        help="Warmup steps excluded from timing (compile + reach steady state).",
+    )
     args = parser.parse_args()
 
     print(f"JAX devices: {jax.devices()}")
@@ -72,26 +78,48 @@ def main():
 
     # Training loop.
     num_steps = args.steps if args.steps else EPOCHS * num_batches
-    batch_idx = 0
-    times_per_step = []
+    warmup = min(args.warmup, max(num_steps - 1, 0))
 
-    print(f"Starting training for {num_steps} steps ...")
+    # We deliberately do NOT call .item() inside the hot loop. A per-step host
+    # read forces a CPU<->GPU sync every iteration, serializing dispatch with
+    # compute and hiding any benefit of JAX_MPS_ASYNC_DISPATCH. Instead we keep
+    # each step's loss as a device array, let JAX queue the next dispatch while
+    # the GPU works, and sync exactly once at the window boundary
+    # (block_until_ready). Wall time over the measured window / step count is
+    # the true steady-state throughput, with CPU/GPU overlap included.
+    print(f"Starting training for {num_steps} steps ({warmup} warmup) ...")
     steps = tqdm(range(num_steps))
-    loss = jnp.nan
-    for _ in steps:
-        start = perf_counter()
+    losses = []
+    measure_start = None
+    measured_steps = 0
+    for i in steps:
+        if i == warmup:
+            # Drain warmup dispatches, then start the clock on a quiet GPU.
+            jax.block_until_ready(losses)
+            losses.clear()
+            measure_start = perf_counter()
+        # Cycle through the precomputed batches so the example actually trains
+        # over the dataset rather than repeating a single batch.
+        batch_idx = i % num_batches
         loss = train_step(
             model, optimizer, batched_images[batch_idx], batched_labels[batch_idx]
-        ).item()
-        end = perf_counter()
-        times_per_step.append(end - start)
-        steps.set_description(f"loss = {loss:.3f}")
+        )
+        losses.append(loss)
+        if i >= warmup:
+            measured_steps += 1
 
-    print(f"Final training loss: {loss:.3f}")
-    times_per_step = times_per_step[len(times_per_step) // 2 :]
-    print(
-        f"Time per step (second half): {sum(times_per_step) / len(times_per_step):.3f}"
-    )
+    # Single sync point for the whole measured window.
+    jax.block_until_ready(losses)
+    elapsed = perf_counter() - measure_start if measure_start is not None else 0.0
+    final_loss = float(losses[-1]) if losses else float("nan")
+
+    print(f"Final training loss: {final_loss:.3f}")
+    if measured_steps:
+        per_step = elapsed / measured_steps
+        print(
+            f"Time per step (steady state, {measured_steps} steps): {per_step:.4f} s "
+            f"({measured_steps / elapsed:.1f} steps/s)"
+        )
 
 
 if __name__ == "__main__":
