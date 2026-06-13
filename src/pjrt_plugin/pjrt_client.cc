@@ -1,6 +1,9 @@
 // PJRT Client API implementation for Metal backend
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #include "pjrt_plugin/issue_url.h"
 #include "pjrt_plugin/logging.h"
@@ -47,8 +50,27 @@ PJRT_Error* MPS_Plugin_Attributes(PJRT_Plugin_Attributes_Args* args) {
 // Client API
 // ============================================================================
 
+// Print a one-time notice about the async-dispatch mode at client creation
+// (the natural "startup" point — this is where JAX brings up the MPS backend).
+static void AnnounceAsyncDispatch() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (std::getenv("JAX_MPS_ASYNC_DISPATCH")) {
+            std::fprintf(stderr,
+                         "[jax-mps] JAX_MPS_ASYNC_DISPATCH is ON: async dispatch enabled — "
+                         "may be much faster, but experimental and may break. "
+                         "Unset it for safe synchronous execution.\n");
+        } else {
+            std::fprintf(stderr,
+                         "[jax-mps] Tip: set JAX_MPS_ASYNC_DISPATCH=1 to opt into async dispatch "
+                         "(experimental; can be much faster for dispatch-bound workloads).\n");
+        }
+    });
+}
+
 PJRT_Error* MPS_Client_Create(PJRT_Client_Create_Args* args) {
     MPS_LOG_DEBUG(" PJRT_Client_Create called, args=%p\n", (void*)args);
+    AnnounceAsyncDispatch();
 
     PJRT_Client* client = GetOrCreateDefaultClient();
     if (!client) {
@@ -295,9 +317,7 @@ PJRT_Error* MPS_Client_BufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Arg
 
     args->buffer = buffer;
 
-    auto* event = new PJRT_Event();
-    event->ready = true;
-    args->done_with_host_buffer = event;
+    args->done_with_host_buffer = new PJRT_Event();
 
     return nullptr;
 }

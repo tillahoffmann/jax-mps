@@ -5,6 +5,7 @@
 #include <mlx/compile.h>
 #include <mlx/memory.h>
 #include <mlx/mlx.h>
+#include <mlx/primitives.h>
 
 #include <chrono>
 #include <cstdint>
@@ -296,6 +297,49 @@ using Duration = std::chrono::duration<double, std::milli>;
 bool IsProfilingEnabled() {
     static bool enabled = std::getenv("MPS_PROFILE") != nullptr;
     return enabled;
+}
+
+// When set, the final materialization of an executable's outputs uses
+// mlx::core::async_eval instead of the blocking mlx::core::eval, letting
+// Execute() return before the GPU finishes so the caller can dispatch the next
+// computation while this one runs (CPU/GPU pipelining). PJRT completion events
+// (see PJRT_Event) track real GPU completion via the outputs' MLX stream
+// events, so block_until_ready() and host reads remain correct.
+bool IsAsyncDispatchEnabled() {
+    static bool enabled = std::getenv("JAX_MPS_ASYNC_DISPATCH") != nullptr;
+    return enabled;
+}
+
+// Collect the outputs of control-flow primitives (while/case) reachable from
+// `roots` in the lazy graph. Those primitives run a host-controlled loop via a
+// nested synchronous mlx::core::eval(); that re-entrant eval is only safe under
+// a *synchronous* outer pass. Under async dispatch we therefore resolve their
+// dependency cones with a synchronous eval() first (see Execute), then
+// async_eval() the remainder so independent/downstream work — and the next
+// dispatch — still pipeline. Traversal stops at each control-flow output: a
+// synchronous eval() of it pulls in its inputs (and any nested/upstream
+// control flow) transitively.
+std::vector<mlx::core::array> CollectControlFlowOutputs(
+    const std::vector<mlx::core::array>& roots) {
+    std::vector<mlx::core::array> found;
+    std::unordered_set<std::uintptr_t> visited;
+    std::vector<mlx::core::array> stack(roots.begin(), roots.end());
+    while (!stack.empty()) {
+        mlx::core::array arr = std::move(stack.back());
+        stack.pop_back();
+        if (!visited.insert(arr.id()).second)
+            continue;
+        if (!arr.has_primitive())
+            continue;
+        const char* pname = arr.primitive().name();
+        if (std::strcmp(pname, "WhileLoop") == 0 || std::strcmp(pname, "Case") == 0) {
+            found.push_back(std::move(arr));
+            continue;
+        }
+        for (const auto& in : arr.inputs())
+            stack.push_back(in);
+    }
+    return found;
 }
 
 struct OpTimingStats {
@@ -676,6 +720,10 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
                 if (!ExecuteFunction(parsed_module_.entry_func, inputs, outs, local_ctx)) {
                     return {};
                 }
+                // Remember whether this graph contains control-flow primitives,
+                // so the async path can skip the control-flow walk when it
+                // doesn't (set during the compile trace; replays reuse it).
+                has_control_flow_ = local_ctx.produced_control_flow;
                 return outs;
             };
 
@@ -728,7 +776,25 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     }
     if (!outputs.empty()) {
         try {
-            mlx::core::eval(outputs);
+            if (IsAsyncDispatchEnabled()) {
+                // Resolve any control-flow primitives (while/case) synchronously
+                // first: their internal re-entrant eval() deadlocks under an
+                // async_eval outer pass (it waits cross-stream on a per-stream
+                // completion event that the outer pass only signals at its end).
+                // This syncs just the loop(s) and their dependency cone — which
+                // a data-dependent loop forces to complete anyway — then the
+                // async_eval below pipelines all independent/downstream work and
+                // lets the next dispatch overlap.
+                if (has_control_flow_) {
+                    std::vector<mlx::core::array> cf_outputs = CollectControlFlowOutputs(outputs);
+                    if (!cf_outputs.empty()) {
+                        mlx::core::eval(cf_outputs);
+                    }
+                }
+                mlx::core::async_eval(outputs);
+            } else {
+                mlx::core::eval(outputs);
+            }
         } catch (const std::exception& e) {
             MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
             result.error_message = std::string("eval: ") + e.what();

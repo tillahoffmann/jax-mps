@@ -382,6 +382,7 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
         // --- Custom primitive approach ---
         // Create a WhileLoopPrimitive that is opaque to mx::compile but runs
         // the loop with compiled body + per-step eval when eval'd.
+        ctx.produced_control_flow = true;
         //
         // This path is safe for BOTH the PJRT compile path and the eager
         // compile-probe path (below). In both cases, the primitive's inputs
@@ -639,6 +640,7 @@ bool HandleCase(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         // --- Custom primitive approach ---
         // Create a CasePrimitive that is opaque to mx::compile but executes
         // the selected branch with compiled body + eval when eval'd.
+        ctx.produced_control_flow = true;
 
         auto branches = caseOp.getBranches();
         const size_t numBranches = branches.size();

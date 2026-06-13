@@ -234,17 +234,23 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
     // args->output_lists[0] is pre-allocated array of PJRT_Buffer* with num_outputs entries
     PJRT_Buffer** output_list = args->output_lists[0];
 
+    std::vector<mlx::core::array> output_arrays;
+    output_arrays.reserve(num_outputs);
     for (size_t i = 0; i < num_outputs; ++i) {
         // Create new PJRT_Buffer wrapping the MlxBuffer
         auto* pjrt_buffer = new PJRT_Buffer();
         pjrt_buffer->buffer = std::move(result.buffers[i]);
         pjrt_buffer->client = client;
         output_list[i] = pjrt_buffer;
+        output_arrays.push_back(pjrt_buffer->buffer->array());
     }
 
-    // Set the ready event (execution is synchronous for now)
+    // Completion event tracking the outputs. Under async dispatch these arrays
+    // are still in flight (mlx::core::async_eval), so the event reports real
+    // GPU completion via their MLX stream events; in synchronous mode they are
+    // already evaluated and the event is immediately ready.
     if (args->device_complete_events) {
-        args->device_complete_events[0] = new PJRT_Event{.ready = true};
+        args->device_complete_events[0] = new PJRT_Event(std::move(output_arrays));
     }
 
     MPS_LOG_INFO("Execution complete\n");

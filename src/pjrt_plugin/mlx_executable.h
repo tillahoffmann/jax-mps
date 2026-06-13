@@ -63,6 +63,10 @@ private:
     // MLX compile support (thread safety via GetPjrtGlobalMutex at PJRT layer)
     mutable bool compile_attempted_ = false;
     mutable bool compile_succeeded_ = false;
+    // True once the compiled graph is known to contain a control-flow primitive
+    // (WhileLoop/Case). Gates the async-dispatch control-flow graph walk so pure
+    // executables skip it entirely.
+    mutable bool has_control_flow_ = false;
     mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)>
         compiled_fn_;
 };

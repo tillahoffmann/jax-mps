@@ -30,6 +30,10 @@ using ValueMap = std::unordered_map<void*, mlx::core::array>;
 struct ExecContext {
     mlir::ModuleOp module;
     bool inside_compile = false;  // true when running inside mlx::core::compile()
+    // Set true when a handler emits a control-flow primitive (WhileLoop/Case)
+    // into the graph. Lets the executable skip the control-flow graph walk in
+    // the async-dispatch path for pure (control-flow-free) graphs.
+    bool produced_control_flow = false;
     // First underlying failure reason seen during dispatch. Populated by the
     // dispatcher with the MLX/handler exception text on a caught throw, or
     // with a synthesized "<op fingerprint>: handler returned false" string on
