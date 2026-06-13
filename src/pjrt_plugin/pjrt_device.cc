@@ -116,7 +116,13 @@ PJRT_Error* MPS_Device_MemoryStats(PJRT_Device_MemoryStats_Args* args) {
     // The caller does NOT zero-initialize the out fields, so every optional
     // field's `_is_set` flag must be written explicitly: leave the ones MLX
     // can't report set to false, otherwise JAX reads uninitialized garbage.
-    args->bytes_in_use = static_cast<int64_t>(mlx::core::get_active_memory());
+    //
+    // Snapshot active memory once so the fields derived from it stay mutually
+    // consistent: querying separately could otherwise report
+    // `pool_bytes < bytes_in_use` if another thread (de)allocates in between.
+    const auto active = static_cast<int64_t>(mlx::core::get_active_memory());
+
+    args->bytes_in_use = active;
 
     args->peak_bytes_in_use = static_cast<int64_t>(mlx::core::get_peak_memory());
     args->peak_bytes_in_use_is_set = true;
@@ -125,8 +131,7 @@ PJRT_Error* MPS_Device_MemoryStats(PJRT_Device_MemoryStats_Args* args) {
     args->bytes_limit_is_set = true;
 
     // Memory held by the allocator = in-use plus the freed-but-retained cache.
-    args->pool_bytes = static_cast<int64_t>(mlx::core::get_active_memory()) +
-                       static_cast<int64_t>(mlx::core::get_cache_memory());
+    args->pool_bytes = active + static_cast<int64_t>(mlx::core::get_cache_memory());
     args->pool_bytes_is_set = true;
 
     // Stats MLX does not expose.
