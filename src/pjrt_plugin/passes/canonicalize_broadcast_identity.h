@@ -12,6 +12,12 @@ namespace mps {
 //   subtract(x, broadcast(splat 0))  -> x   (RHS-zero ONLY; 0 - x is negation)
 //   multiply(x, broadcast(splat 1))  -> x   (either operand order)
 //
+// Intentionally FLOAT-only: the splat constant must be a float type. The
+// motivating cases (flax norm decompositions) are all float, and restricting
+// to float keeps this orthogonal to the integer/shape canonicalization the
+// upstream simplification + folder passes already handle. Extend to integer
+// splats only if a concrete case needs it.
+//
 // Every fold is guarded on result-shape equality with x: when the splat
 // operand is the larger one (x is being broadcast up), the op is a reshape of
 // x, not an identity, and we must NOT fold. These are true algebraic

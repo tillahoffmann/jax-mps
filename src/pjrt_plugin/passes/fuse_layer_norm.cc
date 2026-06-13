@@ -26,6 +26,7 @@
 
 #include "pjrt_plugin/passes/fuse_layer_norm.h"
 
+#include <cstdio>
 #include <string>
 
 #include "llvm/ADT/APFloat.h"
@@ -326,7 +327,14 @@ public:
             wType.getShape()[0] != resultShape.back() || bType.getShape()[0] != resultShape.back())
             return mlir::failure();
 
-        std::string backendConfig = "{\"eps\": " + std::to_string(eps) + "}";
+        // Serialize eps with full float precision (%.9g >= max_digits10 for
+        // float, and uses scientific notation for small values). std::to_string
+        // prints only 6 decimals, which rounds eps <= 1e-7 to "0.000000" and
+        // would silently change the fused op's epsilon (LLVM's JSON parser on
+        // the runtime side accepts scientific notation).
+        char epsBuf[32];
+        std::snprintf(epsBuf, sizeof(epsBuf), "%.9g", static_cast<double>(eps));
+        std::string backendConfig = std::string("{\"eps\": ") + epsBuf + "}";
         llvm::SmallVector<Value, 3> operands{x, weight, bias};
         llvm::SmallVector<mlir::Type, 1> resultTypes{resultType};
         auto customCall = stablehlo::CustomCallOp::create(

@@ -259,6 +259,32 @@ def make_fusion_configs() -> list[FusionTestConfig]:
             )
         )
 
+    # Tiny epsilon (1e-12). Guards the backend_config serialization: eps must be
+    # written with enough precision that it doesn't round to "0.000000" (which
+    # std::to_string would do). If eps were dropped to 0, the fused kernel would
+    # diverge from the reference on a low-variance input. The custom flax layer
+    # with epsilon set exercises this end to end.
+    def _flax_layer_norm_eps(eps):
+        layer = flax_nn.LayerNorm(epsilon=eps)
+
+        def f(x, scale, bias):
+            return layer.apply({"params": {"scale": scale, "bias": bias}}, x)
+
+        return f
+
+    configs.append(
+        FusionTestConfig(
+            name="layer_norm.tiny_eps",
+            func=_flax_layer_norm_eps(1e-12),
+            args=(randn(2, 8, 16), randn(16), randn(16)),
+            expected_custom_calls={"mps.layer_norm": 1},
+            fusion_atol=2e-4,
+            fusion_rtol=2e-4,
+            atol=2e-4,
+            rtol=2e-4,
+        )
+    )
+
     # Hand-written affine LayerNorm (the mps.ops fallback form: mean of squared
     # deviation rather than E[x^2]-E[x]^2). Different variance graph — must NOT
     # fuse (conservative: we only claim the flax/E[x^2]-E[x]^2 form).
