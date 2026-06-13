@@ -7,9 +7,12 @@
 # shellcheck source=setup_deps_common.sh
 source "$(dirname "$0")/setup_deps_common.sh" "$@"
 
-MLX_GIT_TAG="$(tr -d '[:space:]' < "$REPO_ROOT/third_party/mlx/version.txt")"
-if [ -z "$MLX_GIT_TAG" ]; then
-    echo "Error: MLX Git tag is empty; check $REPO_ROOT/third_party/mlx/version.txt" >&2
+# version.txt holds either a release tag (e.g. v0.31.2) or a full commit SHA
+# (to pin an untagged main commit without drift). Both fetch the same way:
+# GitHub serves arbitrary commit SHAs to `git fetch` (allowAnySHA1InWant).
+MLX_GIT_REF="$(tr -d '[:space:]' < "$REPO_ROOT/third_party/mlx/version.txt")"
+if [ -z "$MLX_GIT_REF" ]; then
+    echo "Error: MLX Git ref is empty; check $REPO_ROOT/third_party/mlx/version.txt" >&2
     exit 1
 fi
 MLX_PATCHES_DIR="$REPO_ROOT/third_party/mlx/patches"
@@ -17,7 +20,7 @@ MLX_PATCHES_DIR="$REPO_ROOT/third_party/mlx/patches"
 echo "=== jax-mps MLX setup ==="
 echo "Prefix:       $PREFIX"
 echo "Jobs:         $JOBS"
-echo "MLX:          $MLX_GIT_TAG"
+echo "MLX:          $MLX_GIT_REF"
 echo ""
 
 if [ "$FORCE_REBUILD" = true ]; then
@@ -34,22 +37,26 @@ MLX_PATCHES_HASH=""
 if [ -d "$MLX_PATCHES_DIR" ] && ls "$MLX_PATCHES_DIR"/*.patch &>/dev/null; then
     MLX_PATCHES_HASH=$(cat "$MLX_PATCHES_DIR"/*.patch | shasum -a 256 | cut -d' ' -f1)
 fi
-MLX_FULL_TAG="${MLX_GIT_TAG}:${MLX_PATCHES_HASH}"
+MLX_FULL_TAG="${MLX_GIT_REF}:${MLX_PATCHES_HASH}"
 INSTALLED_MLX_TAG=""
 if [ -f "$MLX_STAMP" ]; then
     INSTALLED_MLX_TAG="$(cat "$MLX_STAMP")"
 fi
 if [ "$INSTALLED_MLX_TAG" != "$MLX_FULL_TAG" ]; then
-    echo "=== Cloning MLX at tag $MLX_GIT_TAG ==="
-    if [ ! -d "$MLX_DIR" ]; then
+    echo "=== Cloning MLX at ref $MLX_GIT_REF ==="
+    if [ ! -d "$MLX_DIR/.git" ]; then
+        rm -rf "$MLX_DIR"
         mkdir -p "$MLX_DIR"
         cd "$MLX_DIR"
         git init
         git remote add origin https://github.com/ml-explore/mlx.git
     else
         cd "$MLX_DIR"
+        # Ensure the remote exists (a reaped /tmp can leave a partial repo).
+        git remote get-url origin >/dev/null 2>&1 ||
+            git remote add origin https://github.com/ml-explore/mlx.git
     fi
-    git fetch --depth 1 origin tag "$MLX_GIT_TAG" --no-tags
+    git fetch --depth 1 origin "$MLX_GIT_REF" --no-tags
     git checkout FETCH_HEAD
 
     echo "=== Applying MLX patches ==="
@@ -74,7 +81,7 @@ if [ "$INSTALLED_MLX_TAG" != "$MLX_FULL_TAG" ]; then
     echo "$MLX_FULL_TAG" > "$MLX_STAMP"
     echo "MLX installed to $PREFIX"
 else
-    echo "=== MLX already installed ($MLX_GIT_TAG) ==="
+    echo "=== MLX already installed ($MLX_GIT_REF) ==="
 fi
 
 echo ""
