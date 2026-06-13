@@ -486,8 +486,8 @@ struct GpuCaptureState {
         return active;
     }
 
-    // Call after the dispatch's outputs are materialized (or on the eval error
-    // path). Finalizes the trace once the window is full.
+    // Call after the dispatch's outputs are materialized. Finalizes the trace
+    // once the window is full.
     void EndDispatch() {
         if (!active) {
             return;
@@ -499,6 +499,22 @@ struct GpuCaptureState {
             fprintf(stderr, "[JAX_MPS_GPU_CAPTURE] wrote trace to %s\n", path.c_str());
         }
     }
+
+    // Call on the eval error path. Stops and flushes an in-progress capture
+    // unconditionally: EndDispatch only stops once the window is full, so a
+    // multi-dispatch window interrupted by an exception would otherwise leave
+    // MTLCaptureManager capturing indefinitely and never write the .gputrace.
+    void AbortCapture() {
+        if (!active) {
+            return;
+        }
+        mlx::core::metal::stop_capture();
+        active = false;
+        finished = true;
+        fprintf(stderr,
+                "[JAX_MPS_GPU_CAPTURE] eval failed mid-capture; wrote partial trace to %s\n",
+                path.c_str());
+    }
 };
 
 GpuCaptureState& GetGpuCaptureState() {
@@ -508,10 +524,12 @@ GpuCaptureState& GetGpuCaptureState() {
         if (path == nullptr || path[0] == '\0') {
             return s;  // disabled
         }
-        // Apple requires MTL_CAPTURE_ENABLED in the environment at process
-        // start; without it startCapture fails. Skip gracefully instead.
+        // Apple's Metal runtime only honors programmatic capture when
+        // MTL_CAPTURE_ENABLED=1 is set in the environment at process start;
+        // otherwise startCapture fails. Match that exact gate so we skip
+        // gracefully in the same cases Apple would reject.
         const char* cap = std::getenv("MTL_CAPTURE_ENABLED");
-        const bool cap_enabled = cap != nullptr && std::strcmp(cap, "0") != 0 && cap[0] != '\0';
+        const bool cap_enabled = cap != nullptr && std::strcmp(cap, "1") == 0;
         if (!cap_enabled) {
             fprintf(stderr,
                     "[JAX_MPS_GPU_CAPTURE] ignoring: Metal GPU capture requires "
@@ -918,7 +936,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
         } catch (const std::exception& e) {
             MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
             result.error_message = std::string("eval: ") + e.what();
-            capture.EndDispatch();
+            capture.AbortCapture();
             return result;
         }
         capture.EndDispatch();
