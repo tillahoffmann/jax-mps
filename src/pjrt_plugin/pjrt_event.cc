@@ -171,7 +171,14 @@ PJRT_Error* MPS_Event_Error(PJRT_Event_Error_Args* args) {
 
 PJRT_Error* MPS_Event_Await(PJRT_Event_Await_Args* args) {
     if (args->event) {
-        args->event->Await();
+        // mlx::core::Event::wait() can throw; an exception must not cross the
+        // PJRT C API boundary (UB). Surface it as a PJRT_Error instead.
+        try {
+            args->event->Await();
+        } catch (const std::exception& e) {
+            return new PJRT_Error{std::string("event await: ") + e.what(),
+                                  PJRT_Error_Code_INTERNAL};
+        }
     }
     return nullptr;
 }

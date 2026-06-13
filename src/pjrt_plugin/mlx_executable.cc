@@ -7,6 +7,7 @@
 #include <mlx/mlx.h>
 #include <mlx/primitives.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -288,6 +289,38 @@ OpHandler MakeLogicalShiftHandler(const char* opName, BinaryMlxFn shiftFn) {
     };
 }
 
+// Opt-in async dispatch (JAX_MPS_ASYNC_DISPATCH). When enabled, the final
+// materialization of an executable's outputs uses mlx::core::async_eval instead
+// of the blocking mlx::core::eval, letting Execute() return before the GPU
+// finishes so the caller can dispatch the next computation (CPU/GPU pipelining).
+// PJRT completion events (see PJRT_Event) track real GPU completion, so
+// block_until_ready() and host reads remain correct.
+//
+// The value is parsed, not just tested for presence: "1"/"true"/"yes"/"on"
+// (case-insensitive) enable it; anything else — including "0" and unset —
+// disables it, so JAX_MPS_ASYNC_DISPATCH=0 turns it off as expected. Declared in
+// the header so the startup notice (pjrt_client.cc) uses the identical check.
+bool IsAsyncDispatchEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("JAX_MPS_ASYNC_DISPATCH");
+        if (value == nullptr) {
+            return false;
+        }
+        auto iequals = [](const char* a, const char* b) {
+            for (; *a != '\0' && *b != '\0'; ++a, ++b) {
+                if (std::tolower(static_cast<unsigned char>(*a)) !=
+                    std::tolower(static_cast<unsigned char>(*b))) {
+                    return false;
+                }
+            }
+            return *a == *b;
+        };
+        return iequals(value, "1") || iequals(value, "true") || iequals(value, "yes") ||
+               iequals(value, "on");
+    }();
+    return enabled;
+}
+
 namespace {
 
 // Profiling infrastructure
@@ -296,17 +329,6 @@ using Duration = std::chrono::duration<double, std::milli>;
 
 bool IsProfilingEnabled() {
     static bool enabled = std::getenv("MPS_PROFILE") != nullptr;
-    return enabled;
-}
-
-// When set, the final materialization of an executable's outputs uses
-// mlx::core::async_eval instead of the blocking mlx::core::eval, letting
-// Execute() return before the GPU finishes so the caller can dispatch the next
-// computation while this one runs (CPU/GPU pipelining). PJRT completion events
-// (see PJRT_Event) track real GPU completion via the outputs' MLX stream
-// events, so block_until_ready() and host reads remain correct.
-bool IsAsyncDispatchEnabled() {
-    static bool enabled = std::getenv("JAX_MPS_ASYNC_DISPATCH") != nullptr;
     return enabled;
 }
 

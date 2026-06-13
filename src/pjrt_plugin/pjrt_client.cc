@@ -1,7 +1,6 @@
 // PJRT Client API implementation for Metal backend
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -55,7 +54,7 @@ PJRT_Error* MPS_Plugin_Attributes(PJRT_Plugin_Attributes_Args* args) {
 static void AnnounceAsyncDispatch() {
     static std::once_flag once;
     std::call_once(once, [] {
-        if (std::getenv("JAX_MPS_ASYNC_DISPATCH")) {
+        if (jax_mps::IsAsyncDispatchEnabled()) {
             std::fprintf(stderr,
                          "[jax-mps] JAX_MPS_ASYNC_DISPATCH is ON: async dispatch enabled — "
                          "may be much faster, but experimental and may break. "

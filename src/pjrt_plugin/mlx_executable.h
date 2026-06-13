@@ -17,6 +17,11 @@ namespace jax_mps {
 // Returns the set of op names that have handlers in the MLX executable
 std::unordered_set<std::string> GetSupportedOpNames();
 
+// True when JAX_MPS_ASYNC_DISPATCH is set to an enabling value
+// ("1"/"true"/"yes"/"on", case-insensitive). Shared so the executable and the
+// startup notice agree. Evaluated once and cached.
+bool IsAsyncDispatchEnabled();
+
 class MlxBuffer;
 
 struct MlxExecuteResult {
