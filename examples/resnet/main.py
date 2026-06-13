@@ -79,7 +79,6 @@ def main():
     # Training loop.
     num_steps = args.steps if args.steps else EPOCHS * num_batches
     warmup = min(args.warmup, max(num_steps - 1, 0))
-    batch_idx = 0
 
     # We deliberately do NOT call .item() inside the hot loop. A per-step host
     # read forces a CPU<->GPU sync every iteration, serializing dispatch with
@@ -99,6 +98,9 @@ def main():
             jax.block_until_ready(losses)
             losses.clear()
             measure_start = perf_counter()
+        # Cycle through the precomputed batches so the example actually trains
+        # over the dataset rather than repeating a single batch.
+        batch_idx = i % num_batches
         loss = train_step(
             model, optimizer, batched_images[batch_idx], batched_labels[batch_idx]
         )

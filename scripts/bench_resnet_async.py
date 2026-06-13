@@ -78,8 +78,9 @@ def main() -> int:
             losses.append(loss)
             tag = "async" if async_on else "sync "
             # Round 0 runs on a cool machine and throttles mid-round; treat it
-            # as a thermal warmup and exclude it from the medians.
-            warm = r >= 1
+            # as a thermal warmup and exclude it from the medians -- unless it is
+            # the only round, in which case there is nothing else to report.
+            warm = r >= 1 or a.rounds == 1
             if warm:
                 (async_times if async_on else sync_times).append(t)
             mark = "" if warm else "  (warmup, excluded)"
@@ -93,9 +94,9 @@ def main() -> int:
     print(f"async (flag on):  median {async_med * 1e3:7.1f} ms  n={len(async_times)}")
     print(f"speedup (sync/async): {sync_med / async_med:.3f}x")
     if len(set(round(x, 3) for x in losses)) == 1:
-        print(f"loss identical across all runs: {losses[0]:.3f} (numerically equal)")
+        print(f"loss agrees to 3 decimals across all runs: {losses[0]:.3f}")
     else:
-        print(f"loss range: {min(losses):.3f} .. {max(losses):.3f}")
+        print(f"loss range: {min(losses):.6f} .. {max(losses):.6f}")
     return 0
 
 
