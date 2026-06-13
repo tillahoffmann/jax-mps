@@ -1,5 +1,7 @@
 // PJRT Device and DeviceDescription API implementation for Metal backend
 
+#include <mlx/mlx.h>
+
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/pjrt_types.h"
 
@@ -107,5 +109,34 @@ PJRT_Error* MPS_Device_DefaultMemory(PJRT_Device_DefaultMemory_Args* args) {
 }
 
 PJRT_Error* MPS_Device_MemoryStats(PJRT_Device_MemoryStats_Args* args) {
-    return MakeError("MemoryStats not implemented", PJRT_Error_Code_UNIMPLEMENTED);
+    // MLX tracks memory globally (unified-memory allocator), not per-device.
+    // We have a single Metal device, so the process-wide figures are exactly
+    // this device's stats.
+    //
+    // The caller does NOT zero-initialize the out fields, so every optional
+    // field's `_is_set` flag must be written explicitly: leave the ones MLX
+    // can't report set to false, otherwise JAX reads uninitialized garbage.
+    args->bytes_in_use = static_cast<int64_t>(mlx::core::get_active_memory());
+
+    args->peak_bytes_in_use = static_cast<int64_t>(mlx::core::get_peak_memory());
+    args->peak_bytes_in_use_is_set = true;
+
+    args->bytes_limit = static_cast<int64_t>(mlx::core::get_memory_limit());
+    args->bytes_limit_is_set = true;
+
+    // Memory held by the allocator = in-use plus the freed-but-retained cache.
+    args->pool_bytes = static_cast<int64_t>(mlx::core::get_active_memory()) +
+                       static_cast<int64_t>(mlx::core::get_cache_memory());
+    args->pool_bytes_is_set = true;
+
+    // Stats MLX does not expose.
+    args->num_allocs_is_set = false;
+    args->largest_alloc_size_is_set = false;
+    args->bytes_reserved_is_set = false;
+    args->peak_bytes_reserved_is_set = false;
+    args->bytes_reservable_limit_is_set = false;
+    args->largest_free_block_bytes_is_set = false;
+    args->peak_pool_bytes_is_set = false;
+
+    return nullptr;
 }
