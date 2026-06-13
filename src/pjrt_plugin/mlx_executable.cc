@@ -2,6 +2,7 @@
 
 #include "pjrt_plugin/mlx_executable.h"
 
+#include <mlx/backend/metal/metal.h>
 #include <mlx/compile.h>
 #include <mlx/memory.h>
 #include <mlx/mlx.h>
@@ -439,6 +440,98 @@ ProfilingState& GetProfilingState() {
     return state;
 }
 
+// GPU trace capture, gated by JAX_MPS_GPU_CAPTURE=<path-to-.gputrace>.
+//
+// Captures a bounded window of Execute() dispatches into a single Metal trace
+// document (openable in Xcode/Instruments) via MLX's pure-C++ wrappers around
+// MTLCaptureManager. The window spans JAX_MPS_GPU_CAPTURE_DISPATCHES dispatches
+// (default 1): capture starts before the first and stops after the last.
+//
+// Apple gates programmatic capture behind MTL_CAPTURE_ENABLED=1, which must be
+// present in the environment at process start. We check it ourselves and
+// disable capture with a clear message, rather than letting MLX's
+// start_capture() throw mid-execution. (We still guard start_capture with a
+// try/catch for the residual failure modes, e.g. an unwritable destination.)
+//
+// State is process-global and only meaningful for single-threaded debugging;
+// concurrent Execute() calls would race the dispatch counter, which is
+// acceptable for an opt-in capture tool.
+struct GpuCaptureState {
+    bool enabled = false;
+    bool active = false;
+    bool finished = false;
+    std::string path;
+    int total_dispatches = 1;
+    int seen = 0;
+
+    // Call before eval. Returns true when capture is active for this dispatch,
+    // in which case the caller MUST use a synchronous eval so the GPU work is
+    // enclosed by the capture window (async_eval returns before completion).
+    bool BeginDispatch() {
+        if (!enabled || finished) {
+            return false;
+        }
+        if (seen == 0) {
+            try {
+                mlx::core::metal::start_capture(path);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[JAX_MPS_GPU_CAPTURE] failed to start capture: %s\n", e.what());
+                enabled = false;
+                return false;
+            }
+            active = true;
+            fprintf(stderr, "[JAX_MPS_GPU_CAPTURE] capturing %d dispatch(es) to %s\n",
+                    total_dispatches, path.c_str());
+        }
+        return active;
+    }
+
+    // Call after the dispatch's outputs are materialized (or on the eval error
+    // path). Finalizes the trace once the window is full.
+    void EndDispatch() {
+        if (!active) {
+            return;
+        }
+        if (++seen >= total_dispatches) {
+            mlx::core::metal::stop_capture();
+            active = false;
+            finished = true;
+            fprintf(stderr, "[JAX_MPS_GPU_CAPTURE] wrote trace to %s\n", path.c_str());
+        }
+    }
+};
+
+GpuCaptureState& GetGpuCaptureState() {
+    static GpuCaptureState state = [] {
+        GpuCaptureState s;
+        const char* path = std::getenv("JAX_MPS_GPU_CAPTURE");
+        if (path == nullptr || path[0] == '\0') {
+            return s;  // disabled
+        }
+        // Apple requires MTL_CAPTURE_ENABLED in the environment at process
+        // start; without it startCapture fails. Skip gracefully instead.
+        const char* cap = std::getenv("MTL_CAPTURE_ENABLED");
+        const bool cap_enabled = cap != nullptr && std::strcmp(cap, "0") != 0 && cap[0] != '\0';
+        if (!cap_enabled) {
+            fprintf(stderr,
+                    "[JAX_MPS_GPU_CAPTURE] ignoring: Metal GPU capture requires "
+                    "MTL_CAPTURE_ENABLED=1 in the environment at process start.\n");
+            return s;
+        }
+        s.path = path;
+        s.enabled = true;
+        if (const char* n = std::getenv("JAX_MPS_GPU_CAPTURE_DISPATCHES")) {
+            char* end = nullptr;
+            const long parsed = std::strtol(n, &end, 10);
+            if (end != n && *end == '\0' && parsed > 0) {
+                s.total_dispatches = static_cast<int>(parsed);
+            }
+        }
+        return s;
+    }();
+    return state;
+}
+
 // --- Op dispatch table ---
 
 const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
@@ -797,8 +890,13 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
         eval_start = Clock::now();
     }
     if (!outputs.empty()) {
+        // While a GPU trace capture window is open we force a synchronous eval:
+        // async_eval returns before the GPU work completes, which would leave
+        // the dispatched command buffers outside the capture window.
+        auto& capture = GetGpuCaptureState();
+        const bool capturing = capture.BeginDispatch();
         try {
-            if (IsAsyncDispatchEnabled()) {
+            if (IsAsyncDispatchEnabled() && !capturing) {
                 // Resolve any control-flow primitives (while/case) synchronously
                 // first: their internal re-entrant eval() deadlocks under an
                 // async_eval outer pass (it waits cross-stream on a per-stream
@@ -820,8 +918,10 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
         } catch (const std::exception& e) {
             MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
             result.error_message = std::string("eval: ") + e.what();
+            capture.EndDispatch();
             return result;
         }
+        capture.EndDispatch();
     }
     if (profiling) {
         eval_end = Clock::now();
