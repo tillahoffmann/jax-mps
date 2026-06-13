@@ -145,9 +145,8 @@ PJRT_Error* MPS_Buffer_ToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* args) {
         args->src->buffer->ToHostBuffer(args->dst);
     }
 
-    auto* event = new PJRT_Event();
-    event->ready = true;
-    args->event = event;
+    // ToHostBuffer already eval'd and copied to host, so the transfer is done.
+    args->event = new PJRT_Event();
 
     return nullptr;
 }
@@ -158,9 +157,12 @@ PJRT_Error* MPS_Buffer_IsOnCpu(PJRT_Buffer_IsOnCpu_Args* args) {
 }
 
 PJRT_Error* MPS_Buffer_ReadyEvent(PJRT_Buffer_ReadyEvent_Args* args) {
-    auto* event = new PJRT_Event();
-    event->ready = true;
-    args->event = event;
+    std::scoped_lock lock(GetPjrtGlobalMutex());
+    std::vector<mlx::core::array> arrays;
+    if (args->buffer && args->buffer->buffer && !args->buffer->buffer->IsDeleted()) {
+        arrays.push_back(args->buffer->buffer->array());
+    }
+    args->event = new PJRT_Event(std::move(arrays));
     return nullptr;
 }
 

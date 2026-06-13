@@ -1,6 +1,7 @@
 // PJRT opaque wrapper types for Metal backend
 #pragma once
 
+#include <mlx/event.h>
 #include <xla/pjrt/c/pjrt_c_api.h>
 
 #include <memory>
@@ -20,6 +21,7 @@
 struct PJRT_TopologyDescription;
 struct PJRT_DeviceDescription;
 struct PJRT_Memory;
+struct PJRT_Error;
 
 // ============================================================================
 // Opaque wrapper types
@@ -92,8 +94,40 @@ struct PJRT_LoadedExecutable {
     std::vector<PJRT_Device*> addressable_devices;
 };
 
+// A PJRT completion event backed by MLX stream events.
+//
+// Under async dispatch (JAX_MPS_ASYNC_DISPATCH), Execute() returns before the
+// GPU finishes, so PJRT events must report real completion. We snapshot a copy
+// of each tracked array's MLX `Event` (the underlying MTLSharedEvent) at
+// construction time. All readiness queries operate ONLY on these Event copies —
+// never on the mlx::core::array / array_desc — because the array's `status`
+// field is a plain enum with no synchronization and may be mutated by the
+// scheduler or by a subsequent Execute() on the main thread. The MLX Event, by
+// contrast, wraps an MTLSharedEvent that is safe to wait/poll from any thread.
+//
+// In synchronous mode (flag off) the tracked arrays are already evaluated, so
+// `events_` is empty (or the events are already signaled) and the object
+// behaves as immediately-ready — preserving the previous behavior exactly.
 struct PJRT_Event {
-    bool ready = true;
+    // Trivially-ready event (no work to wait on).
+    PJRT_Event() = default;
+
+    // Track completion of the given arrays. Copies their valid MLX events.
+    explicit PJRT_Event(std::vector<mlx::core::array> arrays);
+
+    // Non-blocking: true once all tracked work has completed.
+    bool IsReady();
+
+    // Blocks the calling thread until all tracked work has completed.
+    void Await();
+
+    // Registers `callback` to fire once ready. If already ready it is invoked
+    // inline; otherwise a shared background thread waits and then invokes it.
+    void OnReady(PJRT_Event_OnReadyCallback callback, void* user_arg);
+
+    std::mutex mu_;
+    std::vector<mlx::core::Event> events_;
+    bool ready_ = true;
 };
 
 // ============================================================================
