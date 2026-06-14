@@ -52,4 +52,8 @@ repos:
         entry: bash -c 'CI=true uv run pytest -q'
         language: system
         pass_filenames: false
-        exclude: ^\.github/workflows/
+        # Only run the (slow) suite when code or the environment that affects
+        # it changes; skip it for docs-only commits such as README badge
+        # updates. Covers source, tests, project config, the pyright config,
+        # and the dependency lockfile.
+        files: ^(src/|tests/|pyproject\.toml|pyrightconfig\.json|uv\.lock)

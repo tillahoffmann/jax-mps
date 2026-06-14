@@ -1,0 +1,155 @@
+diff --git a/mlx/array.cpp b/mlx/array.cpp
+index e694ccf..ecf6246 100644
+--- a/mlx/array.cpp
++++ b/mlx/array.cpp
+@@ -5,6 +5,7 @@
+ #include "mlx/array.h"
+ #include "mlx/ops.h"
+ #include "mlx/primitives.h"
++#include "mlx/scheduler.h"
+ #include "mlx/transforms.h"
+ #include "mlx/transforms_impl.h"
+ 
+@@ -147,6 +148,13 @@ void array::wait() {
+       event().wait();
+       detach_event();
+     }
++    // Surface any exception thrown by an op's eval lambda on a stream worker
++    // thread. The throwing task was caught in StreamThread::thread_fn (rather
++    // than aborting the process); rethrow it here, at the synchronization
++    // barrier, so the caller observes an ordinary exception. Do this *before*
++    // marking the array available, mirroring how a poisoned GPU event makes
++    // event().wait() above throw: a failed array must not be left ready.
++    scheduler::rethrow_pending_exception();
+     set_status(Status::available);
+   }
+ }
+diff --git a/mlx/backend/cpu/encoder.h b/mlx/backend/cpu/encoder.h
+index 9a2c35a..ef24879 100644
+--- a/mlx/backend/cpu/encoder.h
++++ b/mlx/backend/cpu/encoder.h
+@@ -47,7 +47,14 @@ struct MLX_API CommandEncoder {
+     if (num_ops_ == 0) {
+       scheduler::notify_new_task(stream_);
+       auto task_wrap = [s = stream_, task = std::move(task)]() mutable {
+-        task();
++        // Always balance the notify_new_task above, even if the task throws,
++        // so n_active_tasks_ cannot leak and stall a later wait_for_one().
++        try {
++          task();
++        } catch (...) {
++          scheduler::notify_task_completion(s);
++          throw;
++        }
+         scheduler::notify_task_completion(s);
+       };
+       scheduler::enqueue(stream_, std::move(task_wrap));
+diff --git a/mlx/scheduler.cpp b/mlx/scheduler.cpp
+index e0b467a..52e8849 100644
+--- a/mlx/scheduler.cpp
++++ b/mlx/scheduler.cpp
+@@ -1,6 +1,11 @@
+ // Copyright © 2023-2026 Apple Inc.
+ 
+ #include "mlx/scheduler.h"
++
++#include <atomic>
++#include <exception>
++#include <mutex>
++
+ #include "mlx/backend/cpu/eval.h"
+ #include "mlx/backend/gpu/eval.h"
+ 
+@@ -68,5 +73,51 @@ Scheduler& scheduler() {
+   return *scheduler;
+ }
+ 
++namespace {
++
++std::mutex& pending_exception_mutex() {
++  static std::mutex m;
++  return m;
++}
++
++std::exception_ptr& pending_exception() {
++  static std::exception_ptr e;
++  return e;
++}
++
++// Fast-path flag so the common (no-error) synchronization path avoids taking
++// the mutex on every wait.
++std::atomic<bool>& has_pending_exception() {
++  static std::atomic<bool> flag{false};
++  return flag;
++}
++
++} // namespace
++
++void set_pending_exception(std::exception_ptr e) {
++  std::lock_guard<std::mutex> lk(pending_exception_mutex());
++  if (!pending_exception()) {
++    // Keep the first exception; later failures on a poisoned stream are noise.
++    pending_exception() = std::move(e);
++    has_pending_exception().store(true, std::memory_order_release);
++  }
++}
++
++void rethrow_pending_exception() {
++  if (!has_pending_exception().load(std::memory_order_acquire)) {
++    return;
++  }
++  std::exception_ptr e;
++  {
++    std::lock_guard<std::mutex> lk(pending_exception_mutex());
++    e = pending_exception();
++    pending_exception() = nullptr;
++    has_pending_exception().store(false, std::memory_order_release);
++  }
++  if (e) {
++    std::rethrow_exception(e);
++  }
++}
++
+ } // namespace scheduler
+ } // namespace mlx::core
+diff --git a/mlx/scheduler.h b/mlx/scheduler.h
+index c84ab62..2f505a8 100644
+--- a/mlx/scheduler.h
++++ b/mlx/scheduler.h
+@@ -3,6 +3,7 @@
+ #pragma once
+ 
+ #include <atomic>
++#include <exception>
+ #include <future>
+ #include <queue>
+ #include <shared_mutex>
+@@ -16,6 +17,13 @@
+ 
+ namespace mlx::core::scheduler {
+ 
++// A task running on a stream worker thread (an op's eval_cpu/eval_gpu lambda)
++// may throw. Capturing the first such exception lets it be re-thrown at the
++// next synchronization point (see array::wait) instead of escaping the worker
++// thread, which would call std::terminate and abort the whole process.
++MLX_API void set_pending_exception(std::exception_ptr e);
++MLX_API void rethrow_pending_exception();
++
+ struct StreamThread {
+   std::mutex mtx;
+   std::queue<std::function<void()>> q;
+@@ -47,7 +55,13 @@ struct StreamThread {
+         q.pop();
+       }
+ 
+-      task();
++      // Never let an exception escape the worker thread: that would terminate
++      // the process. Capture it and re-throw at the next synchronization point.
++      try {
++        task();
++      } catch (...) {
++        set_pending_exception(std::current_exception());
++      }
+     }
+   }
+ 

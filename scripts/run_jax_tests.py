@@ -166,12 +166,32 @@ def main():
     )
     args = parser.parse_args()
 
+    # Line-buffer our own output so it stays in chronological order relative to
+    # the pytest child's stream. Without this, parent print()s are block-
+    # buffered when redirected to a file and only flush at exit, landing AFTER
+    # all of pytest's output — so a native crash (e.g. an MLX op throwing on a
+    # stream thread -> abort) leaves a log whose tail does not reflect what was
+    # actually running.
+    for stream in (sys.stdout, sys.stderr):
+        # reconfigure() exists on TextIOWrapper (the usual stdout/stderr) but
+        # not on every TextIO; getattr keeps the type checker happy and is a
+        # no-op if the stream was replaced with something that lacks it.
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+
     project_root = Path(__file__).resolve().parent.parent
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     xml_dir = results_dir / "xml"
     xml_dir.mkdir(parents=True, exist_ok=True)
     clone_dir = Path(args.clone_dir)
+
+    # Always track the currently-running test. If pytest dies without writing
+    # JUnit XML (native crash/abort), this file still holds the nodeid of the
+    # test that was running, so we can name the culprit immediately instead of
+    # bisecting. Defaults under results_dir; overridable via --current-test-file.
+    current_test_file = args.current_test_file or str(results_dir / "current_test.txt")
 
     version = get_jax_version()
     print(f"JAX version: {version}")
@@ -209,19 +229,23 @@ def main():
         "-q",
         f"--timeout={args.timeout}",
         "--continue-on-collection-errors",
+        # Track the in-progress test (see current_test_file above) so a crash
+        # that prevents JUnit XML from being written can still be attributed.
+        "-p",
+        "_pytest_memory_plugin",
+        f"--current-test-file={current_test_file}",
     ]
-    if args.memory_csv or args.current_test_file:
-        cmd += ["-p", "_pytest_memory_plugin"]
     if args.memory_csv:
         cmd += [f"--memory-csv={args.memory_csv}"]
-    if args.current_test_file:
-        cmd += [f"--current-test-file={args.current_test_file}"]
     # Cap MLX's buffer cache for the test-suite scenario: thousands of
     # unrelated computations in one process otherwise leave freed MTLBuffers
     # resident until they swap (see #134, #139). Real workloads keep MLX's
     # tuned default; only the test runner sets this.
     env = {
         **os.environ,
+        # Unbuffered child stdout/stderr so pytest's progress (and any crash
+        # output) reaches the log live rather than in deferred blocks.
+        "PYTHONUNBUFFERED": "1",
         "JAX_PLATFORMS": "mps",
         "JAX_MPS_CACHE_LIMIT_BYTES": os.environ.get(
             "JAX_MPS_CACHE_LIMIT_BYTES", str(1 << 30)
@@ -233,12 +257,25 @@ def main():
     env["PYTHONPATH"] = (scripts_dir + os.pathsep + env.get("PYTHONPATH", "")).rstrip(
         os.pathsep
     )
-    print(f"\nRunning: pytest {tests_dir} ...\n")
+    print(f"\nRunning: pytest {tests_dir} ...")
+    print(f"Current-test tracker: {current_test_file}\n")
     subprocess.run(cmd, cwd=project_root, env=env)
 
     # Parse results
     if not xml_path.exists():
         print("\nERROR: No JUnit XML produced — pytest may have crashed.")
+        try:
+            last = Path(current_test_file).read_text().strip()
+        except OSError:
+            last = ""
+        if last:
+            print(f"Last test running when pytest died: {last}")
+        else:
+            print(
+                "No in-progress test was recorded — the crash happened during "
+                "collection/teardown or before the first test started "
+                f"(tracker: {current_test_file})."
+            )
         sys.exit(1)
 
     totals = parse_junit_xml(xml_path)
