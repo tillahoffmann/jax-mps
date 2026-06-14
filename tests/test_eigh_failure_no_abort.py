@@ -40,8 +40,8 @@ pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required"
 # with a geometric spectrum spanning 1..1e5 (condition number 1e5). The
 # Rayleigh-Ritz eigh on the float32 projection fails (syevd info != 0). The
 # computation is wrapped in try/except: post-fix the failure is a catchable
-# Python exception, so the process exits 0 having printed a NOABORT sentinel;
-# pre-fix the process aborts (SIGABRT) before reaching either print.
+# Python exception, so the process exits 0 having printed NOABORT:RAISED with
+# the MLX error message; pre-fix the process aborts (SIGABRT) before any print.
 _WORKLOAD = (
     "import os; os.environ.setdefault('JAX_PLATFORMS', 'mps');"
     "import numpy as np, jax, jax.numpy as jnp;"
@@ -55,7 +55,7 @@ _WORKLOAD = (
     "    jax.block_until_ready(theta);\n"
     "    print('NOABORT:COMPLETED')\n"
     "except Exception as e:\n"
-    "    print('NOABORT:RAISED', type(e).__name__)\n"
+    "    print('NOABORT:RAISED', repr(str(e)))\n"
 )
 
 
@@ -67,16 +67,26 @@ def test_failing_eigh_raises_instead_of_aborting():
         text=True,
         timeout=300,
     )
-    # The op failure must surface as a normal Python exception (or the
-    # computation completes); either way the process exits cleanly rather than
-    # aborting. SIGABRT shows up as returncode -6.
+    # The op failure must surface as a normal Python exception, so the process
+    # exits cleanly (returncode 0) rather than aborting. SIGABRT shows up as
+    # returncode -6.
     assert result.returncode == 0, (
         f"process did not exit cleanly (returncode={result.returncode}); a "
         f"failing MLX op should raise, not abort.\nstdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
-    assert "NOABORT:" in result.stdout, (
-        f"sentinel missing — the worker-thread exception was not caught.\n"
+    # Require the raised path specifically: a silent NOABORT:COMPLETED would
+    # mean the failing eigh path stopped triggering and the test no longer
+    # exercises the regression.
+    assert "NOABORT:RAISED" in result.stdout, (
+        f"expected the failure to surface as a catchable exception, but it did "
+        f"not (no NOABORT:RAISED).\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    # And that it is the worker-thread eigh failure that surfaced, not some
+    # unrelated error.
+    assert "Eigenvalue decomposition failed" in result.stdout, (
+        f"raised exception did not carry the MLX eigh error message.\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert "terminating due to uncaught exception" not in result.stderr, (

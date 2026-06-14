@@ -1,5 +1,5 @@
 diff --git a/mlx/array.cpp b/mlx/array.cpp
-index e694ccf..60b4a91 100644
+index e694ccf..ecf6246 100644
 --- a/mlx/array.cpp
 +++ b/mlx/array.cpp
 @@ -5,6 +5,7 @@
@@ -10,18 +10,20 @@ index e694ccf..60b4a91 100644
  #include "mlx/transforms.h"
  #include "mlx/transforms_impl.h"
  
-@@ -149,6 +150,11 @@ void array::wait() {
+@@ -147,6 +148,13 @@ void array::wait() {
+       event().wait();
+       detach_event();
      }
++    // Surface any exception thrown by an op's eval lambda on a stream worker
++    // thread. The throwing task was caught in StreamThread::thread_fn (rather
++    // than aborting the process); rethrow it here, at the synchronization
++    // barrier, so the caller observes an ordinary exception. Do this *before*
++    // marking the array available, mirroring how a poisoned GPU event makes
++    // event().wait() above throw: a failed array must not be left ready.
++    scheduler::rethrow_pending_exception();
      set_status(Status::available);
    }
-+  // Surface any exception thrown by an op's eval lambda on a stream worker
-+  // thread. The throwing task was caught in StreamThread::thread_fn (rather
-+  // than aborting the process); rethrow it here, at the synchronization
-+  // barrier, so the caller observes an ordinary exception.
-+  scheduler::rethrow_pending_exception();
  }
- 
- void array::eval() {
 diff --git a/mlx/backend/cpu/encoder.h b/mlx/backend/cpu/encoder.h
 index 9a2c35a..ef24879 100644
 --- a/mlx/backend/cpu/encoder.h
