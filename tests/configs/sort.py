@@ -503,11 +503,11 @@ def make_sort_op_configs():
         # =============================================================
 
         # k=1 exact fast path (argmax-equivalent), max and min directions.
+        # Gradients enabled (values output is differentiable, like lax.top_k).
         configs.append(
             OperationTestConfig(
                 lambda x: lax.approx_max_k(x, 1),
                 lambda key: random.normal(key, (4, 32)),
-                differentiable_argnums=(),
                 name="lax.approx_max_k.k1",
             )
         )
@@ -515,7 +515,6 @@ def make_sort_op_configs():
             OperationTestConfig(
                 lambda x: lax.approx_min_k(x, 1),
                 lambda key: random.normal(key, (4, 32)),
-                differentiable_argnums=(),
                 name="lax.approx_min_k.k1",
             )
         )
@@ -525,7 +524,6 @@ def make_sort_op_configs():
             OperationTestConfig(
                 lambda x: lax.approx_max_k(x, 3),
                 lambda key: random.normal(key, (4, 16)),
-                differentiable_argnums=(),
                 name="lax.approx_max_k.small_n.k3",
             )
         )
@@ -533,7 +531,6 @@ def make_sort_op_configs():
             OperationTestConfig(
                 lambda x: lax.approx_min_k(x, 3),
                 lambda key: random.normal(key, (4, 16)),
-                differentiable_argnums=(),
                 name="lax.approx_min_k.small_n.k3",
             )
         )
@@ -543,8 +540,44 @@ def make_sort_op_configs():
             OperationTestConfig(
                 lambda x: lax.approx_max_k(x, 1, reduction_dimension=0),
                 lambda key: random.normal(key, (8, 4)),
-                differentiable_argnums=(),
                 name="lax.approx_max_k.axis0",
+            )
+        )
+
+        # Approximate path (N over the strided-reduction crossover, k>1). A
+        # strictly monotonic row makes the approximation exact by construction:
+        # the top-k all fall in distinct reduction slots, so none is evicted by
+        # the block-max. This exercises the real strided reduce / block-argmax /
+        # gather / candidate-top-k code (not the exact fallback) while still
+        # matching CPU, so it fits the equality harness. (General-input recall is
+        # validated by the upstream ann_test.py suite.)
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_max_k(x, 4),
+                lambda key: jnp.broadcast_to(
+                    jnp.arange(20000, 0, -1, dtype=jnp.float32), (2, 20000)
+                ),
+                name="lax.approx_max_k.reduced",
+            )
+        )
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_min_k(x, 4),
+                lambda key: jnp.broadcast_to(
+                    jnp.arange(20000, dtype=jnp.float32), (2, 20000)
+                ),
+                name="lax.approx_min_k.reduced",
+            )
+        )
+        # aggregate_to_topk=False: returns the full reduced candidate set; checks
+        # the non-aggregating shape/order path against CPU.
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_max_k(x, 4, aggregate_to_topk=False),
+                lambda key: jnp.broadcast_to(
+                    jnp.arange(20000, 0, -1, dtype=jnp.float32), (2, 20000)
+                ),
+                name="lax.approx_max_k.no_aggregate",
             )
         )
 
