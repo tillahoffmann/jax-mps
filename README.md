@@ -1,6 +1,6 @@
 # jax-mps
 
-[![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/) ![JAX tests](https://img.shields.io/badge/JAX_tests-94.4%25_passing-yellow)[^1]
+[![GitHub Action Badge](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml/badge.svg)](https://github.com/tillahoffmann/jax-mps/actions/workflows/build.yml) [![PyPI](https://img.shields.io/pypi/v/jax-mps)](https://pypi.org/project/jax-mps/) ![JAX tests](https://img.shields.io/badge/JAX_tests-95.0%25_passing-yellow)[^1]
 
 A JAX backend for Apple Silicon using [MLX](https://github.com/ml-explore/mlx), enabling GPU-accelerated JAX computations on Mac.
 
@@ -115,4 +115,4 @@ StableHLO operations are mapped to MLX equivalents, e.g.:
 - `stablehlo.convolution` → `mlx::core::conv_general()`
 - `stablehlo.reduce` → `mlx::core::sum/max/min/prod()`
 
-[^1]: Measured against JAX's upstream test suite. Tests requiring float64 are excluded (MLX only supports float32). Tests requiring multiple devices or sharding are skipped automatically (single MPS device). Run with `uv run python scripts/run_jax_tests.py`.
+[^1]: Measured against JAX's upstream test suite. Excluded are tests exercising capabilities the MPS backend fundamentally cannot provide on a single Apple-Silicon device: float64 (not supported on Metal) and dtypes with no MLX element type at all (the sub-byte/8-bit-float family — int4/uint4 and float8/float4), tests requiring a backend other than `mps`, and collective/multi-device/sharding ops (MPS is single-device). Kernel-authoring suites that target CUDA/TPU (Pallas, Mosaic), multiprocess tests, and JAX's own documentation-coverage check are also excluded. Run with `uv run python scripts/run_jax_tests.py`.
