@@ -43,26 +43,34 @@ if [ -f "$MLX_STAMP" ]; then
     INSTALLED_MLX_TAG="$(cat "$MLX_STAMP")"
 fi
 if [ "$INSTALLED_MLX_TAG" != "$MLX_FULL_TAG" ]; then
-    echo "=== Cloning MLX at ref $MLX_GIT_REF ==="
-    if [ ! -d "$MLX_DIR/.git" ]; then
-        rm -rf "$MLX_DIR"
-        mkdir -p "$MLX_DIR"
-        cd "$MLX_DIR"
-        git init
-        git remote add origin https://github.com/ml-explore/mlx.git
+    # Fetch the source as a hash-pinned tarball rather than cloning. GitHub
+    # serves a deterministic archive of any commit's tree at the URL below, so
+    # there is no .git directory for a reaped /tmp to leave half-populated (the
+    # failure mode that a shallow clone hits when its objects are GC'd).
+    MLX_TARBALL="$BUILD_DIR/mlx-${MLX_GIT_REF}.tar.gz"
+    echo "=== Downloading MLX source for ref $MLX_GIT_REF ==="
+    if [ ! -f "$MLX_TARBALL" ]; then
+        mkdir -p "$BUILD_DIR"
+        # Download to a temp name then rename so an interrupted download never
+        # leaves a truncated tarball that looks complete on the next run.
+        curl -fL "https://github.com/ml-explore/mlx/archive/${MLX_GIT_REF}.tar.gz" \
+            -o "${MLX_TARBALL}.tmp"
+        mv "${MLX_TARBALL}.tmp" "$MLX_TARBALL"
     else
-        cd "$MLX_DIR"
-        # Ensure the remote exists (a reaped /tmp can leave a partial repo).
-        git remote get-url origin >/dev/null 2>&1 ||
-            git remote add origin https://github.com/ml-explore/mlx.git
+        echo "Using cached tarball $MLX_TARBALL"
     fi
-    git fetch --depth 1 origin "$MLX_GIT_REF" --no-tags
-    git checkout FETCH_HEAD
+
+    # Always extract into a pristine tree so patches apply cleanly (and a
+    # reaped /tmp simply triggers a re-extract from the cached tarball).
+    rm -rf "$MLX_DIR"
+    mkdir -p "$MLX_DIR"
+    tar -xzf "$MLX_TARBALL" -C "$MLX_DIR" --strip-components=1
 
     echo "=== Applying MLX patches ==="
-    git checkout -- . && git clean -fd
+    # git apply works outside a git repository: it patches the working tree
+    # relative to the current directory (default -p1 strips the a/ b/ prefix).
     for patch in "$MLX_PATCHES_DIR"/*.patch; do
-        [ -f "$patch" ] && git apply --verbose "$patch"
+        [ -f "$patch" ] && (cd "$MLX_DIR" && git apply --verbose "$patch")
     done
 
     echo "=== Building MLX (static) ==="
