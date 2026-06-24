@@ -782,21 +782,19 @@ bool HandleCase(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
             }
         }
 
-        // Fallback: add the index directly. This is safe when:
-        // (a) the index has no defining op (block argument — mx::compile
-        //     will re-substitute), or
-        // (b) the index is a stablehlo.constant (compile-time literal that
-        //     never changes across replays, so freezing is correct).
-        // Any other defining op is an unrecognized intermediate that would
-        // be frozen under mx::compile, silently selecting the wrong branch.
+        // Fallback: pass the index through directly as a primitive input. Like
+        // every other CasePrimitive input, it is wired via make_arrays() as an
+        // explicit graph edge, so mx::compile recomputes it on each replay — it
+        // is never frozen as a compile-time constant. This is the same property
+        // that makes WhileLoopPrimitive's external captures safe (see the note
+        // in HandleWhile), and it holds for an arbitrary index-defining op,
+        // including a nested stablehlo.case whose result selects this case (the
+        // pattern NUTS generates). The clamp/convert decomposition above is a
+        // cheaper optimization that taps the raw function argument; this
+        // fallback covers every other shape. CasePrimitive::eval_impl
+        // bounds-checks the index (out-of-range selects the last branch per the
+        // StableHLO spec), so passing it unclamped here is safe.
         if (indexArgPos == SIZE_MAX) {
-            if (indexDefOp && !mlir::isa<mlir::stablehlo::ConstantOp>(indexDefOp)) {
-                MPS_LOG_ERROR(
-                    "HandleCase: unrecognized index pattern (defined by %s), "
-                    "cannot safely compile\n",
-                    indexDefOp->getName().getStringRef().str().c_str());
-                return false;
-            }
             indexArgPos = extArrays.size();
             extKeys.push_back(ToKey(indexVal));
             extArrays.push_back(*index);
