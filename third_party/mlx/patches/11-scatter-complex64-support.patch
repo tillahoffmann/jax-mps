@@ -23,10 +23,10 @@ index cdb4a03b..6197a19c 100644
  
    int nidx = axes_.size();
 diff --git a/mlx/backend/metal/kernels/atomic.h b/mlx/backend/metal/kernels/atomic.h
-index 76362f58..13bf779c 100644
+index 76362f58..2d2ccd24 100644
 --- a/mlx/backend/metal/kernels/atomic.h
 +++ b/mlx/backend/metal/kernels/atomic.h
-@@ -31,6 +31,51 @@ struct mlx_atomic<T, enable_if_t<is_metal_atomic<T>>> {
+@@ -31,6 +31,60 @@ struct mlx_atomic<T, enable_if_t<is_metal_atomic<T>>> {
    atomic<T> val;
  };
  
@@ -42,6 +42,13 @@ index 76362f58..13bf779c 100644
 +// !is_metal_atomic templates, which would otherwise divide by a zero packing
 +// size for an 8-byte type. Sufficient for scatter assignment (store) and sum
 +// reductions (fetch_add); other reductions are undefined for complex values.
++//
++// Note: real and imag are updated as two independent atomics, not as one atomic
++// pair. With sum reductions this is exact (component-wise addition commutes).
++// With store (assign), if two threads target the same destination index the
++// winning real and imag may come from different threads (a torn pair). This
++// matches MLX's existing "winner is unspecified for duplicate scatter indices"
++// behaviour and is correct for the common unique-index case.
 +struct complex64_t;
 +
 +template <>
@@ -50,6 +57,8 @@ index 76362f58..13bf779c 100644
 +  atomic<float> imag;
 +};
 +
++// Provided for symmetry / future CAS-based reductions; the scatter None and Sum
++// paths use only store and fetch_add below.
 +METAL_FUNC complex64_t
 +mlx_atomic_load_explicit(device mlx_atomic<complex64_t>* object, size_t offset) {
 +  return complex64_t{
@@ -79,12 +88,16 @@ index 76362f58..13bf779c 100644
  // Native metal atomics
  ///////////////////////////////////////////////////////////////////////////////
 diff --git a/mlx/ops.cpp b/mlx/ops.cpp
-index e4ce3d75..eed5a307 100644
+index e4ce3d75..35da2e17 100644
 --- a/mlx/ops.cpp
 +++ b/mlx/ops.cpp
-@@ -3652,10 +3652,18 @@ array scatter(
+@@ -3650,12 +3650,21 @@ array scatter(
+     idx = astype(idx, dtype, s);
+   }
  
-   // TODO, remove when scatter supports 64-bit outputs
+-  // TODO, remove when scatter supports 64-bit outputs
++  // TODO: support the remaining 64-bit outputs (int64/uint64/float64) on GPU
++  // scatter; complex64 is handled below via component-wise atomics.
    if (to_stream(s).device == Device::gpu && size_of(a.dtype()) == 8) {
 -    std::ostringstream msg;
 -    msg << "[scatter] GPU scatter does not yet support " << a.dtype()
