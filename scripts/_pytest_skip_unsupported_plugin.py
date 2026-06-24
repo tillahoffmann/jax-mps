@@ -41,17 +41,20 @@ _UNSUPPORTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"MLX does not support float64"),
         "MLX does not support float64 on Metal",
     ),
-    # Sub-byte ints (int4/uint4) and the float8/float4 family have no MLX element
-    # type, so BufferFromHostBuffer cannot materialise them. PjrtDtypeToMlx
-    # (mlx_buffer.cc) throws this exact message for any PJRT dtype outside MLX's
-    # type set; float64 has its own distinct message above, and every
-    # MLX-representable dtype is mapped, so this never masks a fixable handler
-    # bug -- it only catches dtypes the backend fundamentally cannot store.
-    # These tests exercise JAX's dtype system (promotion, repr, views), not MPS
-    # compute correctness.
+    # Catch-all for any PJRT dtype not mapped in PjrtDtypeToMlx (mlx_buffer.cc),
+    # which throws this exact message from its default case. Today the only such
+    # dtypes are the sub-byte ints (int4/uint4) and the float8/float4 family,
+    # none of which have an MLX element type, so BufferFromHostBuffer cannot
+    # materialise them. The affected tests exercise JAX's dtype system
+    # (promotion, repr, views), not MPS compute correctness.
+    #
+    # Note this is a catch-all, not an enumerated list: if a future PJRT dtype
+    # that *should* map to an existing MLX type is left out of PjrtDtypeToMlx, it
+    # would also be skipped here. The skipped nodeids make such a gap visible,
+    # and the fix in that case is to extend the mapping rather than rely on this.
     (
         re.compile(r"Unsupported PJRT dtype: \d+"),
-        "dtype has no MLX element type (int4/uint4/float8/float4 family)",
+        "PJRT dtype not mapped in MLX (e.g. int4/uint4/float8/float4)",
     ),
     # Test requests a backend other than the only one jax-mps provides.
     (
