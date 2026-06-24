@@ -118,6 +118,22 @@ bool HandleDotGeneral(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
     mlx::core::array lhsVal = lhsNeedsCast ? mlx::core::astype(*lhs, mlx::core::float32) : *lhs;
     mlx::core::array rhsVal = rhsNeedsCast ? mlx::core::astype(*rhs, mlx::core::float32) : *rhs;
 
+    // Degenerate case: a rank-0 operand. A scalar has no dimensions to batch or
+    // contract over, and StableHLO requires the batch/contract dim lists of the
+    // two operands to have equal length -- so if either operand is rank-0 there
+    // are no batch and no contracting dims at all, and the op reduces to a pure
+    // outer product. With one scalar that is exactly a broadcasting multiply
+    // (the non-scalar operand's free dims, in order, are the output dims). This
+    // also avoids the einsum path, whose subscript would be e.g. ",->" for two
+    // scalars -- a string MLX's einsum parser cannot handle.
+    if (lhsRank == 0 || rhsRank == 0) {
+        auto result = mlx::core::multiply(lhsVal, rhsVal);
+        if (needsCast)
+            result = mlx::core::astype(result, *resultDtype);
+        values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
     // Try einsum path if enabled
     if (UseEinsumForDotGeneral()) {
         std::string subscript = BuildEinsumSubscript(lhsRank, rhsRank, lhsBatchDims, rhsBatchDims,

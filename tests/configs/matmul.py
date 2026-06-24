@@ -181,6 +181,34 @@ def make_matmul_op_configs():
             name="outer_product",
         )
 
+        # Scalar . scalar (rank-0 operands): no batch/contract dims possible, so
+        # dot_general degenerates to a plain product. The einsum subscript for
+        # this case is ",->" which MLX cannot parse; the handler special-cases it
+        # to a broadcasting multiply. Regression test for the scalar dot bug that
+        # surfaced in remat/custom_jvp tests.
+        yield OperationTestConfig(
+            lambda x, y: lax.dot_general(x, y, dimension_numbers=(([], []), ([], []))),
+            lambda key: random.normal(key, ()),
+            lambda key: random.normal(key, ()),
+            name="dot_general_scalar_scalar",
+        )
+
+        # Scalar . vector outer product: rank-0 lhs, rank-1 rhs -> scaled vector.
+        yield OperationTestConfig(
+            lambda x, y: lax.dot_general(x, y, dimension_numbers=(([], []), ([], []))),
+            lambda key: random.normal(key, ()),
+            lambda key: random.normal(key, (4,)),
+            name="dot_general_scalar_vector",
+        )
+
+        # Matrix . scalar outer product: rank-2 lhs, rank-0 rhs -> scaled matrix.
+        yield OperationTestConfig(
+            lambda x, y: lax.dot_general(x, y, dimension_numbers=(([], []), ([], []))),
+            lambda key: random.normal(key, (3, 4)),
+            lambda key: random.normal(key, ()),
+            name="dot_general_matrix_scalar",
+        )
+
         # Edge case: zero batch size (empty batch dimension)
         # CPU handles this correctly, returning empty arrays with the right shape.
         yield OperationTestConfig(
