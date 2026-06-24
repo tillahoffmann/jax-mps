@@ -3,7 +3,7 @@ import numpy
 from jax import lax, random
 from jax import numpy as jnp
 
-from .util import OperationTestConfig
+from .util import OperationTestConfig, complex_standard_normal
 
 
 def make_slice_op_configs():
@@ -73,6 +73,24 @@ def make_slice_op_configs():
                 lambda key: jnp.ones((2, 2, 2), dtype=jnp.float32),
                 lambda key: jnp.array(5.0, dtype=jnp.float32),
                 name="scatternd_add_mode",
+            ),
+            # Complex64 scatter: MLX's GPU scatter rejects 8-byte dtypes, so
+            # complex assignment (None) and add (Sum) are enabled via a vendored
+            # MLX patch that does component-wise atomics on the real/imag parts
+            # (third_party/mlx/patches/11-scatter-complex64-support.patch).
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].set(val),
+                lambda key: complex_standard_normal(key, (5, 3), complex=True),
+                numpy.array([0, 2]),
+                lambda key: complex_standard_normal(key, (2, 3), complex=True),
+                name="complex_scatter_set",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: x.at[idx].add(val),
+                lambda key: complex_standard_normal(key, (5, 3), complex=True),
+                numpy.array([0, 2]),
+                lambda key: complex_standard_normal(key, (2, 3), complex=True),
+                name="complex_scatter_add",
             ),
             # Higher rank tensor (rank 4)
             OperationTestConfig(

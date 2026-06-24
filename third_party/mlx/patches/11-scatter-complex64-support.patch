@@ -1,0 +1,107 @@
+diff --git a/mlx/backend/metal/indexing.cpp b/mlx/backend/metal/indexing.cpp
+index cdb4a03b..6197a19c 100644
+--- a/mlx/backend/metal/indexing.cpp
++++ b/mlx/backend/metal/indexing.cpp
+@@ -231,9 +231,16 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
+ 
+ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
+   if (size_of(out.dtype()) == 8) {
+-    std::ostringstream msg;
+-    msg << "[Scatter::eval_gpu] Does not support " << out.dtype();
+-    throw std::invalid_argument(msg.str());
++    // complex64 is supported for assignment (None) and sum reductions via
++    // component-wise atomics on the real/imag parts (see atomic.h). Other
++    // 8-byte dtypes and reductions remain unsupported.
++    bool complex_ok = out.dtype() == complex64 &&
++        (reduce_type_ == Scatter::None || reduce_type_ == Scatter::Sum);
++    if (!complex_ok) {
++      std::ostringstream msg;
++      msg << "[Scatter::eval_gpu] Does not support " << out.dtype();
++      throw std::invalid_argument(msg.str());
++    }
+   }
+ 
+   int nidx = axes_.size();
+diff --git a/mlx/backend/metal/kernels/atomic.h b/mlx/backend/metal/kernels/atomic.h
+index 76362f58..13bf779c 100644
+--- a/mlx/backend/metal/kernels/atomic.h
++++ b/mlx/backend/metal/kernels/atomic.h
+@@ -31,6 +31,51 @@ struct mlx_atomic<T, enable_if_t<is_metal_atomic<T>>> {
+   atomic<T> val;
+ };
+ 
++///////////////////////////////////////////////////////////////////////////////
++// complex64 atomics (component-wise)
++///////////////////////////////////////////////////////////////////////////////
++
++// complex64 is 8 bytes (two floats) and Metal has no native 8-byte atomic, nor
++// does it fit the packed-uint fallback used for sub-32-bit types. Provide a
++// layout-compatible wrapper (two atomic<float>, identical layout to
++// complex64_t's {real, imag}) plus component-wise operations on the real and
++// imaginary parts. These non-template overloads are preferred over the generic
++// !is_metal_atomic templates, which would otherwise divide by a zero packing
++// size for an 8-byte type. Sufficient for scatter assignment (store) and sum
++// reductions (fetch_add); other reductions are undefined for complex values.
++struct complex64_t;
++
++template <>
++struct mlx_atomic<complex64_t> {
++  atomic<float> real;
++  atomic<float> imag;
++};
++
++METAL_FUNC complex64_t
++mlx_atomic_load_explicit(device mlx_atomic<complex64_t>* object, size_t offset) {
++  return complex64_t{
++      atomic_load_explicit(&(object[offset].real), memory_order_relaxed),
++      atomic_load_explicit(&(object[offset].imag), memory_order_relaxed)};
++}
++
++METAL_FUNC void mlx_atomic_store_explicit(
++    device mlx_atomic<complex64_t>* object,
++    complex64_t val,
++    size_t offset) {
++  atomic_store_explicit(&(object[offset].real), val.real, memory_order_relaxed);
++  atomic_store_explicit(&(object[offset].imag), val.imag, memory_order_relaxed);
++}
++
++METAL_FUNC void mlx_atomic_fetch_add_explicit(
++    device mlx_atomic<complex64_t>* object,
++    complex64_t val,
++    size_t offset) {
++  atomic_fetch_add_explicit(
++      &(object[offset].real), val.real, memory_order_relaxed);
++  atomic_fetch_add_explicit(
++      &(object[offset].imag), val.imag, memory_order_relaxed);
++}
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // Native metal atomics
+ ///////////////////////////////////////////////////////////////////////////////
+diff --git a/mlx/ops.cpp b/mlx/ops.cpp
+index e4ce3d75..eed5a307 100644
+--- a/mlx/ops.cpp
++++ b/mlx/ops.cpp
+@@ -3652,10 +3652,18 @@ array scatter(
+ 
+   // TODO, remove when scatter supports 64-bit outputs
+   if (to_stream(s).device == Device::gpu && size_of(a.dtype()) == 8) {
+-    std::ostringstream msg;
+-    msg << "[scatter] GPU scatter does not yet support " << a.dtype()
+-        << " for the input or updates.";
+-    throw std::invalid_argument(msg.str());
++    // complex64 scatter is supported via component-wise atomics on the real and
++    // imaginary parts (see atomic.h), but only for assignment and sum
++    // reductions; prod/min/max are undefined for complex. Other 8-byte dtypes
++    // (int64/uint64) remain unsupported.
++    bool complex_ok = a.dtype() == complex64 &&
++        (mode == Scatter::None || mode == Scatter::Sum);
++    if (!complex_ok) {
++      std::ostringstream msg;
++      msg << "[scatter] GPU scatter does not yet support " << a.dtype()
++          << " for the input or updates.";
++      throw std::invalid_argument(msg.str());
++    }
+   }
+ 
+   inputs.insert(inputs.begin(), a);
