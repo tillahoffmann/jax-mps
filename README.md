@@ -115,4 +115,4 @@ StableHLO operations are mapped to MLX equivalents, e.g.:
 - `stablehlo.convolution` → `mlx::core::conv_general()`
 - `stablehlo.reduce` → `mlx::core::sum/max/min/prod()`
 
-[^1]: Measured against JAX's upstream test suite. Tests requiring float64 are excluded (MLX only supports float32). Tests requiring multiple devices or sharding are skipped automatically (single MPS device). Run with `uv run python scripts/run_jax_tests.py`.
+[^1]: Measured against JAX's upstream test suite. Excluded are tests exercising capabilities the MPS backend fundamentally cannot provide on a single Apple-Silicon device: dtypes with no MLX element type (float64, and the sub-byte/8-bit-float family — int4/uint4 and float8/float4), tests requiring a backend other than `mps`, and collective/multi-device/sharding ops (MPS is single-device). Kernel-authoring suites that target CUDA/TPU (Pallas, Mosaic), multiprocess tests, and JAX's own documentation-coverage check are also excluded. Run with `uv run python scripts/run_jax_tests.py`.
