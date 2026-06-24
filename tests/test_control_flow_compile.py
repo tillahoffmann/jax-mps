@@ -122,12 +122,19 @@ def test_token_threaded_with_real_output():
     assert float(out) == 4.0
 
 
-def test_grad_through_token_consuming():
-    """Differentiation past a token-consuming primitive must work."""
+def test_grad_with_live_token():
+    """Differentiating a jitted fn that keeps a token live must work.
+
+    The token is returned as an aux output (``has_aux``) so it survives DCE and
+    actually appears in the differentiated, jitted graph — exercising the token
+    handlers in that context — while the gradient is taken w.r.t. the real loss.
+    """
     import jax.numpy as jnp
 
     def f(x):
-        jax.lax.create_token()
-        return x * 2.0
+        return x * x, jax.lax.after_all(jax.lax.create_token())
 
-    assert float(jax.grad(f)(jnp.float32(2.0))) == 2.0
+    value_and_grad = jax.jit(jax.value_and_grad(f, has_aux=True))
+    (value, _token), grad = value_and_grad(jnp.float32(3.0))
+    assert float(value) == 9.0
+    assert float(grad) == 6.0

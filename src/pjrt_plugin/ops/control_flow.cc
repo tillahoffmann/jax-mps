@@ -1656,7 +1656,6 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     return true;
 }
 
-// Handler for stablehlo.optimization_barrier
 // Handlers for stablehlo.create_token / stablehlo.after_all.
 //
 // A token (!stablehlo.token) carries no data — it only threads execution
@@ -1680,6 +1679,7 @@ bool HandleAfterAll(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
     return true;
 }
 
+// Handler for stablehlo.optimization_barrier
 bool HandleOptimizationBarrier(mlir::Operation* op, ValueMap& values,
                                std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
