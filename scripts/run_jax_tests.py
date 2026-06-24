@@ -6,8 +6,8 @@ Usage:
 
 Options:
     --results-dir DIR   Where to write results (default: /tmp/jax-test-results)
-    --clone-dir DIR     Where to clone JAX tests (default: /tmp/jax-test-suite)
-    --keep              Reuse existing clone
+    --clone-dir DIR     Where to unpack JAX tests (default: /tmp/jax-test-suite)
+    --keep              Reuse existing download
     --timeout SECONDS   Per-test timeout in seconds (default: 60)
 """
 
@@ -18,8 +18,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# Upstream JAX repo; tests are fetched as a hash/tag-pinned source tarball
+# (no git clone -- see fetch_jax_tests).
+JAX_REPO = "jax-ml/jax"
 
 # Files / directories excluded from the suite
 EXCLUDED_FILES = {
@@ -36,7 +42,7 @@ EXCLUDED_FILES = {
 
 # Test-only modules that live in the JAX source tree but are NOT shipped in the
 # jax wheel. Tests import them via ``from jax._src import <name>``; without them
-# the whole module fails to collect. We extract each from the cloned test repo
+# the whole module fails to collect. We extract each from the source tarball
 # (pinned to the same tag as the installed jax) and inject it into sys.modules at
 # runtime via _pytest_vendor_modules_plugin -- site-packages is left untouched.
 VENDORED_TEST_MODULES = ("hypothesis_test_util",)
@@ -52,119 +58,124 @@ def get_jax_version() -> str:
     return result.stdout.strip()
 
 
-def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
+def _jax_tarball(version: str, clone_dir: Path) -> Path:
+    """Download (and cache) the hash-pinned JAX source tarball for jax-v<version>.
+
+    GitHub serves a deterministic archive of any tag's tree, so there is no git
+    clone -- and thus no .git directory for a reaped /tmp to leave half-populated
+    (the failure mode a shallow clone hits when its objects are GC'd). Cached
+    under ``clone_dir/.cache`` and keyed by tag.
+    """
+    tag = f"jax-v{version}"
+    cache = clone_dir / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    tarball = cache / f"{tag}.tar.gz"
+    if not tarball.is_file():
+        url = f"https://github.com/{JAX_REPO}/archive/refs/tags/{tag}.tar.gz"
+        print(f"Downloading {url} ...")
+        # Download to a temp name then rename so an interrupted download never
+        # leaves a truncated tarball that looks complete on the next run.
+        tmp = tarball.with_suffix(".tmp")
+        with urllib.request.urlopen(url) as resp, open(tmp, "wb") as f:  # noqa: S310
+            shutil.copyfileobj(resp, f)
+        tmp.rename(tarball)
+    return tarball
+
+
+def _iter_subtree(tf: tarfile.TarFile, prefix: str):
+    """Yield members under ``<top>/<prefix>``, renamed relative to <top>.
+
+    GitHub archives nest everything under a single top-level ``<repo>-<ref>/``
+    directory; we strip it. ``prefix`` is matched on the post-strip path so only
+    the top-level ``tests/`` is selected, not nested ones (e.g. examples/*/tests).
+    """
+    for member in tf.getmembers():
+        parts = member.name.split("/", 1)
+        if len(parts) < 2:
+            continue
+        rel = parts[1]
+        if rel == prefix or rel.startswith(prefix + "/"):
+            member.name = rel
+            yield member
+
+
+def fetch_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
+    """Fetch the upstream JAX test tree from the source tarball (no git)."""
     tests_dir = clone_dir / "tests"
     tag = f"jax-v{version}"
+    stamp = clone_dir / ".jax-tag"
 
-    if keep and tests_dir.is_dir():
-        local = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=clone_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        remote = (
-            subprocess.run(
-                ["git", "ls-remote", "origin", f"refs/tags/{tag}"],
-                cwd=clone_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            .stdout.split("\t", 1)[0]
-            .strip()
-        )
-        if local and remote and local == remote:
-            print(f"Reusing existing clone at {clone_dir} (HEAD={local[:7]} == {tag})")
-            # Re-assert the sparse checkout so a stray top-level ``jax/`` tree
-            # (e.g. from a manual checkout) can never shadow the installed jax.
-            # check=True: if this fails we must not proceed with a working tree
-            # that might shadow jax -- that is exactly what this guards against.
-            subprocess.run(
-                ["git", "sparse-checkout", "set", "tests"],
-                cwd=clone_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return tests_dir
-        print(
-            f"Existing clone at {clone_dir} is out of date "
-            f"(HEAD={local[:7] or '?'}, remote {tag}={remote[:7] or '?'}); re-cloning."
+    if (
+        keep
+        and tests_dir.is_dir()
+        and stamp.is_file()
+        and stamp.read_text().strip() == tag
+    ):
+        print(f"Reusing existing JAX tests at {clone_dir} ({tag})")
+        return tests_dir
+
+    print(f"Fetching JAX {tag} tests to {clone_dir} ...")
+    # Replace only the extracted tree; keep the tarball cache under .cache.
+    if tests_dir.exists():
+        shutil.rmtree(tests_dir)
+    stamp.unlink(missing_ok=True)
+    clone_dir.mkdir(parents=True, exist_ok=True)
+
+    tarball = _jax_tarball(version, clone_dir)
+    with tarfile.open(tarball) as tf:
+        # Extract only the top-level tests/ subtree. filter="data" guards against
+        # path-traversal/special members (Python 3.12+ default, set explicitly).
+        tf.extractall(clone_dir, members=_iter_subtree(tf, "tests"), filter="data")
+
+    # Fail hard if the archive yielded no tests: a structure change or a bad/empty
+    # download must not silently degrade into a "0 collected, 100% pass" run.
+    n_tests = sum(1 for _ in tests_dir.glob("*_test.py"))
+    if n_tests == 0:
+        raise RuntimeError(
+            f"No '*_test.py' files extracted from {tarball} into {tests_dir}; "
+            "the JAX source archive layout may have changed. Refusing to proceed."
         )
 
-    print(f"Cloning JAX {tag} tests to {clone_dir} ...")
-
-    if clone_dir.exists():
-        shutil.rmtree(clone_dir)
-
-    subprocess.run(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            tag,
-            "--no-checkout",
-            "https://github.com/jax-ml/jax.git",
-            str(clone_dir),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "sparse-checkout", "set", "tests"],
-        cwd=clone_dir,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "checkout"],
-        cwd=clone_dir,
-        check=True,
-        capture_output=True,
-    )
-
-    print(f"Cloned {sum(1 for _ in tests_dir.glob('*_test.py'))} test files.")
+    stamp.write_text(tag + "\n")
+    print(f"Fetched {n_tests} test files.")
     return tests_dir
 
 
-def extract_vendored_modules(clone_dir: Path, dest_dir: Path) -> Path | None:
+def extract_vendored_modules(
+    version: str, clone_dir: Path, dest_dir: Path
+) -> Path | None:
     """Extract test-only ``jax._src`` modules omitted from the wheel.
 
-    Modules like ``hypothesis_test_util`` exist in the JAX source repo but are
-    stripped from the distributed wheel, so ``from jax._src import ...`` fails
-    and the importing test files cannot be collected. The cloned test repo is at
-    the same tag as the installed jax, so the blob there matches the installed
-    internals. We read it with ``git show`` (no working-tree changes -- the
-    sparse checkout stays restricted to ``tests``) into ``dest_dir``, from where
-    ``_pytest_vendor_modules_plugin`` injects it into ``sys.modules`` at runtime.
-    The installed site-packages is never modified.
+    Modules like ``hypothesis_test_util`` exist in the JAX source tree but are
+    stripped from the distributed wheel, so ``from jax._src import ...`` fails and
+    the importing test files cannot be collected. We pull each from the same
+    hash-pinned source tarball (matching the installed jax's tag) into
+    ``dest_dir``, from where ``_pytest_vendor_modules_plugin`` injects it into
+    ``sys.modules`` at runtime. The installed site-packages is never modified.
 
     Returns the directory containing the extracted modules, or None if nothing
     could be extracted.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {f"jax/_src/{name}.py": name for name in VENDORED_TEST_MODULES}
     extracted = 0
-    for name in VENDORED_TEST_MODULES:
-        blob = subprocess.run(
-            ["git", "show", f"HEAD:jax/_src/{name}.py"],
-            cwd=clone_dir,
-            capture_output=True,
-            text=True,
-        )
-        if blob.returncode != 0 or not blob.stdout:
-            print(
-                f"  warning: could not extract jax._src.{name} (tests may not collect)"
-            )
-            continue
-        (dest_dir / f"{name}.py").write_text(blob.stdout)
-        extracted += 1
+    with tarfile.open(_jax_tarball(version, clone_dir)) as tf:
+        for member in tf.getmembers():
+            # Strip the top-level <repo>-<ref>/ component and match by suffix.
+            rel = member.name.split("/", 1)[-1]
+            name = wanted.get(rel)
+            if name is None:
+                continue
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with src:
+                (dest_dir / f"{name}.py").write_bytes(src.read())
+            extracted += 1
     if extracted:
         print(f"  extracted {extracted} vendored test module(s) to {dest_dir}")
         return dest_dir
+    print("  warning: no vendored test modules extracted (tests may not collect)")
     return None
 
 
@@ -256,12 +267,14 @@ def main():
     version = get_jax_version()
     print(f"JAX version: {version}")
 
-    tests_dir = clone_jax_tests(version, clone_dir, keep=args.keep)
+    tests_dir = fetch_jax_tests(version, clone_dir, keep=args.keep)
 
     # Extract test-only jax._src modules (absent from the wheel); the vendor
     # plugin injects them into sys.modules at runtime so the importing test
     # files can be collected, without touching site-packages.
-    vendored_dir = extract_vendored_modules(clone_dir, results_dir / "vendored")
+    vendored_dir = extract_vendored_modules(
+        version, clone_dir, results_dir / "vendored"
+    )
 
     # Build ignore list for excluded files
     ignore_args: list[str] = []
