@@ -172,6 +172,51 @@ def make_reduction_op_configs():
                 lambda key: random.normal(key, (2, 8, 8, 3)),
                 name="maxpool2d-overlapping",
             ),
+            # Base dilation 1D: dilates the *input* by inserting init-valued
+            # holes between elements before windowing. This is what sum-pool
+            # gradients lower to (base_dilation == forward stride).
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x, 0.0, lax.add, (1, 2), (1, 1), "valid", (1, 2), None
+                ),
+                lambda key: random.normal(key, (2, 5)),
+                name="sumpool1d-base-dilation",
+                # JAX VJP not implemented for base dilation; forward only.
+                differentiable_argnums=(),
+            ),
+            # Base dilation 2D with sum reduction and SAME padding.
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x,
+                    0.0,
+                    lax.add,
+                    (1, 2, 2, 1),
+                    (1, 1, 1, 1),
+                    "same",
+                    (1, 2, 2, 1),
+                    None,
+                ),
+                lambda key: random.normal(key, (2, 6, 6, 3)),
+                name="sumpool2d-base-dilation-same",
+                differentiable_argnums=(),
+            ),
+            # Base dilation with max reduction (holes filled with init=-inf so
+            # they never win the window).
+            OperationTestConfig(
+                lambda x: lax.reduce_window(
+                    x,
+                    -jnp.inf,
+                    lax.max,
+                    (1, 2, 2, 1),
+                    (1, 1, 1, 1),
+                    "valid",
+                    (1, 2, 2, 1),
+                    None,
+                ),
+                lambda key: random.normal(key, (2, 6, 6, 3)),
+                name="maxpool2d-base-dilation",
+                differentiable_argnums=(),
+            ),
             # Non-square window: 2x3 window
             OperationTestConfig(
                 lambda x: lax.reduce_window(

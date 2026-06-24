@@ -306,15 +306,46 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
     }
 
     // ---------- Tier 2: Pooling pattern ----------
-    if (!allBaseDilOne) {
-        MPS_LOG_ERROR("stablehlo.reduce_window: base dilations not supported\n");
-        return false;
-    }
-
     if (reduceType != ReduceType::Max && reduceType != ReduceType::Sum &&
         reduceType != ReduceType::Min && reduceType != ReduceType::Prod) {
         MPS_LOG_ERROR("stablehlo.reduce_window: pooling supports max/sum/min/prod only\n");
         return false;
+    }
+
+    // Base dilation: StableHLO dilates the *input* by inserting (base_dil - 1)
+    // holes between elements along each axis BEFORE padding and windowing, with
+    // the holes filled by the init value. init is the reduction identity
+    // (0/-inf/+inf/1 for sum/max/min/prod), so the holes never affect the
+    // result. Materialize the dilated base via a strided slice_update, then the
+    // rest of the pooling path treats it like an ordinary (base_dil == 1) input.
+    mlx::core::array base = *input;
+    // allBaseDilOne is true whenever baseDilOpt is empty, so reaching here with
+    // !allBaseDilOne guarantees a value; the explicit check keeps clang-tidy's
+    // optional-access analysis happy.
+    if (!allBaseDilOne && baseDilOpt) {
+        auto* init = RequireValue(values, rwOp.getInitValues()[0], "stablehlo.reduce_window");
+        if (!init)
+            return false;
+
+        std::vector<int64_t> baseDil(rank, 1);
+        auto bd = *baseDilOpt;
+        for (int64_t i = 0; i < rank; i++)
+            baseDil[i] = bd[i];
+
+        mlx::core::Shape dilShape(rank);
+        mlx::core::Shape startIdx(rank, 0);
+        mlx::core::Shape stopIdx(rank);
+        mlx::core::Shape strideIdx(rank);
+        for (int64_t i = 0; i < rank; i++) {
+            // Runtime shape so dynamically-shaped operands stay correct.
+            int dim = input->shape(static_cast<int>(i));
+            dilShape[i] = (dim - 1) * static_cast<int>(baseDil[i]) + 1;
+            stopIdx[i] = dilShape[i];
+            strideIdx[i] = static_cast<int>(baseDil[i]);
+        }
+
+        mlx::core::array dilated = mlx::core::full(dilShape, *init, input->dtype());
+        base = mlx::core::slice_update(dilated, *input, startIdx, stopIdx, strideIdx);
     }
 
     // For Prod, the StableHLO reduction semantics include the init value as a
@@ -355,8 +386,8 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         }
     }
 
-    // Pad input if needed.
-    mlx::core::array padded = *input;
+    // Pad the (possibly base-dilated) input if needed.
+    mlx::core::array padded = base;
     bool needsPad = false;
     for (int64_t i = 0; i < rank; i++) {
         if (padLow[i] != 0 || padHigh[i] != 0) {
@@ -373,7 +404,7 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
         for (int64_t i = 0; i < rank; i++) {
             padWidth[i] = {static_cast<int>(padLow[i]), static_cast<int>(padHigh[i])};
         }
-        padded = mlx::core::pad(*input, padWidth, *init);
+        padded = mlx::core::pad(base, padWidth, *init);
     }
 
     auto paddedShape = padded.shape();
