@@ -314,10 +314,13 @@ bool HandleReduceWindow(mlir::Operation* op, ValueMap& values,
 
     // Base dilation: StableHLO dilates the *input* by inserting (base_dil - 1)
     // holes between elements along each axis BEFORE padding and windowing, with
-    // the holes filled by the init value. init is the reduction identity
-    // (0/-inf/+inf/1 for sum/max/min/prod), so the holes never affect the
-    // result. Materialize the dilated base via a strided slice_update, then the
-    // rest of the pooling path treats it like an ordinary (base_dil == 1) input.
+    // the holes filled by the init value -- which is exactly what we do here, so
+    // the fill is faithful to the spec for any init. For the identity inits that
+    // pooling uses (0/-inf/+inf/1 for sum/max/min/prod) the holes are inert;
+    // like the rest of this pooling tier, a non-identity init is not relied on
+    // (and prod's init=1 is checked explicitly above). Materialize the dilated
+    // base via a strided slice_update, then the rest of the pooling path treats
+    // it like an ordinary (base_dil == 1) input.
     mlx::core::array base = *input;
     // allBaseDilOne is true whenever baseDilOpt is empty, so reaching here with
     // !allBaseDilOne guarantees a value; the explicit check keeps clang-tidy's
