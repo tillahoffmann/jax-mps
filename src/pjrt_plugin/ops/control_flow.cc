@@ -1657,6 +1657,29 @@ bool HandleComposite(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
 }
 
 // Handler for stablehlo.optimization_barrier
+// Handlers for stablehlo.create_token / stablehlo.after_all.
+//
+// A token (!stablehlo.token) carries no data — it only threads execution
+// ordering between side-effecting ops. The MPS backend executes a module's ops
+// in program order, so the ordering is already implied; we just need a value to
+// stand in for the token wherever it flows (notably as a jit function result or
+// argument). We represent it as a trivial scalar placeholder. Output marshalling
+// already maps non-tensor results to an f32 scalar buffer (see MlxExecutable),
+// and input binding is by position, so a token round-trips as that scalar.
+bool HandleCreateToken(mlir::Operation* op, ValueMap& values,
+                       std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
+    values.emplace(ToKey(op->getResult(0)), mlx::core::array(0.0F));
+    return true;
+}
+
+// after_all merges N input tokens into one. Tokens carry no data, so the merged
+// token is just a fresh placeholder; the operand tokens are ignored.
+bool HandleAfterAll(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                    ExecContext& ctx) {
+    values.emplace(ToKey(op->getResult(0)), mlx::core::array(0.0F));
+    return true;
+}
+
 bool HandleOptimizationBarrier(mlir::Operation* op, ValueMap& values,
                                std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
@@ -1741,6 +1764,8 @@ void RegisterControlFlowHandlers(std::unordered_map<std::string, OpHandler>& han
     handlers.insert({"stablehlo.while", HandleWhile});
     handlers.insert({"stablehlo.case", HandleCase});
     handlers.insert({"stablehlo.rng_bit_generator", HandleRngBitGenerator});
+    handlers.insert({"stablehlo.create_token", HandleCreateToken});
+    handlers.insert({"stablehlo.after_all", HandleAfterAll});
 }
 
 }  // namespace jax_mps

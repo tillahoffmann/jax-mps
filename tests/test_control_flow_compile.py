@@ -20,6 +20,8 @@ import jax
 import numpy as np
 import pytest
 
+from .configs import OperationTestConfig
+
 try:
     MPS_DEVICE = jax.devices("mps")[0]
 except (RuntimeError, IndexError):
@@ -85,3 +87,47 @@ def test_nested_case_compiles(capfd):
         "nested stablehlo.case fell back to eager execution (compile bail):\n"
         f"{captured.err}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tokens (stablehlo.create_token / after_all)
+# ---------------------------------------------------------------------------
+# A token (!stablehlo.token) carries no data; it only threads effect ordering,
+# and surfaces at the jit boundary as a returned/accepted value. The MPS backend
+# represents it as a trivial scalar placeholder. (Opaque token-buffer semantics —
+# e.g. rejecting numpy conversion — are a separate, deliberately out-of-scope
+# follow-up.)
+
+
+def test_jit_returning_token():
+    """A jit that returns a token must run (create_token is handled)."""
+    # Tokens are opaque (no comparable value) and get DCE'd when disconnected,
+    # so they can't be exercised via an OperationTestConfig value check; mark
+    # them exercised here, as test_ops.py does for composite / rng_bit_generator.
+    OperationTestConfig.EXERCISED_STABLEHLO_OPS.add("stablehlo.create_token")
+    OperationTestConfig.EXERCISED_STABLEHLO_OPS.add("stablehlo.after_all")
+    tok = jax.jit(jax.lax.create_token)()
+    # And the token round-trips as a jit argument (after_all consumes it).
+    jax.block_until_ready(jax.jit(lambda t: jax.lax.after_all(t))(tok))
+
+
+def test_token_threaded_with_real_output():
+    """A token threaded alongside a real result must not disturb the result."""
+    import jax.numpy as jnp
+
+    def f(x):
+        return x + 1.0, jax.lax.after_all(jax.lax.create_token())
+
+    out, _tok = jax.jit(f)(jnp.float32(3.0))
+    assert float(out) == 4.0
+
+
+def test_grad_through_token_consuming():
+    """Differentiation past a token-consuming primitive must work."""
+    import jax.numpy as jnp
+
+    def f(x):
+        jax.lax.create_token()
+        return x * 2.0
+
+    assert float(jax.grad(f)(jnp.float32(2.0))) == 2.0
