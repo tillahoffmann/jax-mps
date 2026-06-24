@@ -27,7 +27,19 @@ EXCLUDED_FILES = {
     "pallas",  # Pallas kernel-authoring path is not implemented for MPS;
     #          interpret-mode tests hang the runner without firing the
     #          per-test --timeout (native-code stall).
+    "mosaic",  # Mosaic GPU/TPU kernel-authoring tests target CUDA/TPU; the
+    #          MPS backend cannot run them (and several import test-only
+    #          modules absent from the jax wheel).
+    "multiprocess",  # Multi-host tests require multiple processes/devices;
+    #          MPS presents a single device on one host.
 }
+
+# Test-only modules that live in the JAX source tree but are NOT shipped in the
+# jax wheel. Tests import them via ``from jax._src import <name>``; without them
+# the whole module fails to collect. We extract each from the cloned test repo
+# (pinned to the same tag as the installed jax) and inject it into sys.modules at
+# runtime via _pytest_vendor_modules_plugin -- site-packages is left untouched.
+VENDORED_TEST_MODULES = ("hypothesis_test_util",)
 
 
 def get_jax_version() -> str:
@@ -65,6 +77,14 @@ def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
         )
         if local and remote and local == remote:
             print(f"Reusing existing clone at {clone_dir} (HEAD={local[:7]} == {tag})")
+            # Re-assert the sparse checkout so a stray top-level ``jax/`` tree
+            # (e.g. from a manual checkout) can never shadow the installed jax.
+            subprocess.run(
+                ["git", "sparse-checkout", "set", "tests"],
+                cwd=clone_dir,
+                capture_output=True,
+                text=True,
+            )
             return tests_dir
         print(
             f"Existing clone at {clone_dir} is out of date "
@@ -106,6 +126,43 @@ def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
 
     print(f"Cloned {sum(1 for _ in tests_dir.glob('*_test.py'))} test files.")
     return tests_dir
+
+
+def extract_vendored_modules(clone_dir: Path, dest_dir: Path) -> Path | None:
+    """Extract test-only ``jax._src`` modules omitted from the wheel.
+
+    Modules like ``hypothesis_test_util`` exist in the JAX source repo but are
+    stripped from the distributed wheel, so ``from jax._src import ...`` fails
+    and the importing test files cannot be collected. The cloned test repo is at
+    the same tag as the installed jax, so the blob there matches the installed
+    internals. We read it with ``git show`` (no working-tree changes -- the
+    sparse checkout stays restricted to ``tests``) into ``dest_dir``, from where
+    ``_pytest_vendor_modules_plugin`` injects it into ``sys.modules`` at runtime.
+    The installed site-packages is never modified.
+
+    Returns the directory containing the extracted modules, or None if nothing
+    could be extracted.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    extracted = 0
+    for name in VENDORED_TEST_MODULES:
+        blob = subprocess.run(
+            ["git", "show", f"HEAD:jax/_src/{name}.py"],
+            cwd=clone_dir,
+            capture_output=True,
+            text=True,
+        )
+        if blob.returncode != 0 or not blob.stdout:
+            print(
+                f"  warning: could not extract jax._src.{name} (tests may not collect)"
+            )
+            continue
+        (dest_dir / f"{name}.py").write_text(blob.stdout)
+        extracted += 1
+    if extracted:
+        print(f"  extracted {extracted} vendored test module(s) to {dest_dir}")
+        return dest_dir
+    return None
 
 
 def parse_junit_xml(xml_path: Path) -> dict[str, int]:
@@ -198,6 +255,11 @@ def main():
 
     tests_dir = clone_jax_tests(version, clone_dir, keep=args.keep)
 
+    # Extract test-only jax._src modules (absent from the wheel); the vendor
+    # plugin injects them into sys.modules at runtime so the importing test
+    # files can be collected, without touching site-packages.
+    vendored_dir = extract_vendored_modules(clone_dir, results_dir / "vendored")
+
     # Build ignore list for excluded files
     ignore_args: list[str] = []
     for name in sorted(EXCLUDED_FILES):
@@ -225,6 +287,7 @@ def main():
         "no:benchmark",
         "-p",
         "_pytest_skip_unsupported_plugin",
+        *(["-p", "_pytest_vendor_modules_plugin"] if vendored_dir else []),
         "--tb=no",
         "-q",
         f"--timeout={args.timeout}",
@@ -251,8 +314,12 @@ def main():
             "JAX_MPS_CACHE_LIMIT_BYTES", str(1 << 30)
         ),
     }
-    # Make scripts/ plugins (_pytest_skip_unsupported_plugin and the optional
-    # _pytest_memory_plugin) importable.
+    # Point the vendor plugin at the extracted test-only modules (if any).
+    if vendored_dir:
+        env["JAX_MPS_VENDORED_DIR"] = str(vendored_dir)
+    # Make scripts/ plugins (_pytest_skip_unsupported_plugin,
+    # _pytest_vendor_modules_plugin, and the optional _pytest_memory_plugin)
+    # importable.
     scripts_dir = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = (scripts_dir + os.pathsep + env.get("PYTHONPATH", "")).rstrip(
         os.pathsep
