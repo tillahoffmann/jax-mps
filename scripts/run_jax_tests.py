@@ -79,11 +79,14 @@ def clone_jax_tests(version: str, clone_dir: Path, keep: bool) -> Path:
             print(f"Reusing existing clone at {clone_dir} (HEAD={local[:7]} == {tag})")
             # Re-assert the sparse checkout so a stray top-level ``jax/`` tree
             # (e.g. from a manual checkout) can never shadow the installed jax.
+            # check=True: if this fails we must not proceed with a working tree
+            # that might shadow jax -- that is exactly what this guards against.
             subprocess.run(
                 ["git", "sparse-checkout", "set", "tests"],
                 cwd=clone_dir,
                 capture_output=True,
                 text=True,
+                check=True,
             )
             return tests_dir
         print(
