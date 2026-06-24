@@ -490,4 +490,62 @@ def make_sort_op_configs():
             )
         )
 
+        # =============================================================
+        # lax.approx_max_k / approx_min_k — approximate top-k.
+        # On MPS these go through a custom platform lowering that does a
+        # recall-driven strided reduction for large inputs and falls back to
+        # exact top-k otherwise. These configs deliberately target the
+        # exact-equivalent settings (k=1, or N small enough to fit one
+        # reduction tile so no reduction happens) so results match CPU exactly;
+        # the genuinely-approximate path's recall is validated by the upstream
+        # ann_test.py suite. Inputs use random normals (no ties) so the
+        # exact-path index selection is unambiguous.
+        # =============================================================
+
+        # k=1 exact fast path (argmax-equivalent), max and min directions.
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_max_k(x, 1),
+                lambda key: random.normal(key, (4, 32)),
+                differentiable_argnums=(),
+                name="lax.approx_max_k.k1",
+            )
+        )
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_min_k(x, 1),
+                lambda key: random.normal(key, (4, 32)),
+                differentiable_argnums=(),
+                name="lax.approx_min_k.k1",
+            )
+        )
+
+        # Small N, k>1: fits a single reduction tile -> no reduction -> exact.
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_max_k(x, 3),
+                lambda key: random.normal(key, (4, 16)),
+                differentiable_argnums=(),
+                name="lax.approx_max_k.small_n.k3",
+            )
+        )
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_min_k(x, 3),
+                lambda key: random.normal(key, (4, 16)),
+                differentiable_argnums=(),
+                name="lax.approx_min_k.small_n.k3",
+            )
+        )
+
+        # Non-last reduction_dimension: exercises the moveaxis path.
+        configs.append(
+            OperationTestConfig(
+                lambda x: lax.approx_max_k(x, 1, reduction_dimension=0),
+                lambda key: random.normal(key, (8, 4)),
+                differentiable_argnums=(),
+                name="lax.approx_max_k.axis0",
+            )
+        )
+
         return configs

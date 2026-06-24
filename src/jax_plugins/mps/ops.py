@@ -15,9 +15,11 @@ import jax
 import jax.numpy as jnp
 from jax._src import core
 from jax._src.interpreters import mlir
+from jax._src.lax import ann as lax_ann
 from jax._src.lax import lax as lax_lax
 from jax._src.lax import linalg as lax_linalg
 from jax._src.lax import special as lax_special
+from jax._src.lib import _jax  # pyright: ignore[reportPrivateImportUsage]
 from jax._src.lib.mlir import ir  # pyright: ignore[reportPrivateImportUsage]
 from jax._src.lib.mlir.dialects import hlo
 
@@ -709,6 +711,98 @@ def _logistic_lowering(ctx, x, *, accuracy=None):
     return [hlo.logistic(x)]
 
 
+# ---------------------------------------------------------------------------
+# Approximate top-k (approx_max_k / approx_min_k)
+# ---------------------------------------------------------------------------
+# JAX registers the fast approx_top_k lowering for the TPU platform only
+# (jax/_src/lax/ann.py); every other backend gets the `is_fallback=True`
+# lowering that computes exact top-k. We provide a real MPS lowering — the
+# intended platform extension point, mirroring how TPU does it — that does a
+# recall-driven strided reduction for large inputs (5-11x faster than exact at
+# scale; see scratch benchmarks) and falls back to exact top-k where that does
+# not pay (k==1, or input small enough to fit one reduction tile).
+
+# Below this reduction-axis size the strided path's extra kernels (reshape,
+# block argmax, gather, candidate top-k) cost more than a single argpartition
+# over the whole axis, so we keep exact top-k. Measured crossover on M-class
+# GPUs is ~8-16k (noisy); 16384 is the conservative point above which the
+# approximate path is reliably faster. Exact below it is never slower than the
+# status quo and still numerically valid (recall 1.0).
+_APPROX_TOPK_MIN_REDUCTION_SIZE = 16384
+
+
+def _approx_top_k_mps_impl(
+    operand,
+    *,
+    k,
+    reduction_dimension,
+    recall_target,
+    is_max_k,
+    reduction_input_size_override,
+    aggregate_to_topk,
+):
+    """Pure-JAX approximate top-k for MPS, decomposed into supported ops.
+
+    Uses XLA's own reduction-size formula (``approx_top_k_reduction_output_size``)
+    to choose the block count, so the achieved recall matches ``recall_target``
+    and ``aggregate_to_topk=False`` output shapes line up with JAX's abstract
+    eval. Returns ``(values, int32 indices)`` along ``reduction_dimension``.
+    """
+    rank = operand.ndim
+    d = reduction_dimension % rank
+    x = jnp.moveaxis(operand, d, -1)
+    n = x.shape[-1]
+
+    # (candidate count, log2 of block count) from XLA's recall model. Query with
+    # aggregate_to_topk=False to get the intermediate reduction structure even
+    # when we aggregate to exactly k afterwards.
+    reduced_size, log2_red = _jax.approx_top_k_reduction_output_size(
+        n, rank, k, float(recall_target), False, reduction_input_size_override
+    )
+    num_blocks = 1 << max(int(log2_red), 0)
+
+    # Solve everything as a max-problem; negate for min-k (indices unaffected).
+    work = x if is_max_k else -x
+
+    def finalize(vals, idx):
+        vals = vals if is_max_k else -vals
+        return (
+            jnp.moveaxis(vals, -1, d),
+            jnp.moveaxis(idx.astype(jnp.int32), -1, d),
+        )
+
+    # Exact fast path: aggregate to exactly k with no beneficial reduction.
+    # k==1 is already a single max-reduction; num_blocks<=1 means N fits one
+    # tile; below the crossover size the strided path is slower than exact.
+    # All are exact (recall 1.0) and at least as fast as the strided path.
+    if aggregate_to_topk and (
+        k == 1 or num_blocks <= 1 or n < _APPROX_TOPK_MIN_REDUCTION_SIZE
+    ):
+        vals, idx = jax.lax.top_k(work, k)
+        return finalize(vals, idx)
+
+    # Strided block reduction: split the last axis into `num_blocks` blocks of
+    # `reduced_size`; the per-position max over blocks yields `reduced_size`
+    # candidates. block b, position j  <-  flat index b*reduced_size + j.
+    padded = num_blocks * reduced_size
+    if padded != n:
+        pad = jnp.broadcast_to(
+            jnp.array(-jnp.inf, work.dtype), (*work.shape[:-1], padded - n)
+        )
+        work = jnp.concatenate([work, pad], axis=-1)
+    blocks = work.reshape(*work.shape[:-1], num_blocks, reduced_size)
+    cand_vals = jnp.max(blocks, axis=-2)
+    best_block = jnp.argmax(blocks, axis=-2).astype(jnp.int32)
+    cand_idx = best_block * reduced_size + jnp.arange(reduced_size, dtype=jnp.int32)
+
+    # Aggregate the candidates: exact top-k(k), or (aggregate_to_topk=False) the
+    # full candidate set sorted descending — top_k over all reduced_size entries.
+    out_k = k if aggregate_to_topk else reduced_size
+    top_vals, local = jax.lax.top_k(cand_vals, out_k)
+    out_idx = jnp.take_along_axis(cand_idx, local, axis=-1)
+    return finalize(top_vals, out_idx)
+
+
 def register_fused_ops():
     """Register MPS MLIR lowerings for fused custom_calls and related ops.
 
@@ -739,6 +833,15 @@ def register_fused_ops():
     mlir.register_lowering(lax_linalg.eigh_p, _eigh_lowering, platform="mps")
     mlir.register_lowering(lax_linalg.qr_p, _qr_lowering, platform="mps")
     mlir.register_lowering(lax_linalg.svd_p, _svd_lowering, platform="mps")
+
+    # Approximate top-k: a real MPS lowering (recall-driven strided reduction
+    # with exact fallback) instead of JAX's exact non-TPU fallback. CPU/GPU keep
+    # JAX's default lowering, so no fallback registration is needed here.
+    mlir.register_lowering(
+        lax_ann.approx_top_k_p,
+        mlir.lower_fun(_approx_top_k_mps_impl, multiple_results=True),
+        platform="mps",
+    )
 
     # Intercept unary ops that JAX would normally lower to chlo.* primitives
     # (then decomposed to stablehlo.exp / add / etc. by CHLO legalization) and
