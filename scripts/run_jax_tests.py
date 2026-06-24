@@ -38,6 +38,9 @@ EXCLUDED_FILES = {
     #          modules absent from the jax wheel).
     "multiprocess",  # Multi-host tests require multiple processes/devices;
     #          MPS presents a single device on one host.
+    "documentation_coverage_test.py",  # Reads JAX's docs/ RST tree (e.g.
+    #          docs/jax.numpy.rst), which the tests-only runner does not fetch;
+    #          they validate JAX's documentation coverage, not the MPS backend.
 }
 
 # Test-only modules that live in the JAX source tree but are NOT shipped in the
