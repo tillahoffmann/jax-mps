@@ -72,7 +72,7 @@ def main():
         mlx_t.append(perf_counter() - t0)
     lo, md, rtf = _rtf(mlx_t, audio_s)
     print(
-        f"{'mlx-audio float32':26s}{lo * 1000:8.1f}m{md * 1000:8.1f}m{rtf:8.1f}x   (baseline)"
+        f"{'mlx-audio float32':26s}{lo * 1000:7.1f}ms{md * 1000:7.1f}ms{rtf:8.1f}x   (baseline)"
     )
 
     for dt in dtypes:
@@ -90,7 +90,7 @@ def main():
         lo, md, rtf = _rtf(jax_t, audio_s)
         speed = min(mx_t) / lo
         print(
-            f"{'JAX-MPS ' + dt:26s}{lo * 1000:8.1f}m{md * 1000:8.1f}m{rtf:8.1f}x   {parity}  ({speed:.2f}x mlx)"
+            f"{'JAX-MPS ' + dt:26s}{lo * 1000:7.1f}ms{md * 1000:7.1f}ms{rtf:8.1f}x   {parity}  ({speed:.2f}x mlx)"
         )
 
 

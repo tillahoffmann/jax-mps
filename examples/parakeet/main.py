@@ -3,7 +3,7 @@
 Reimplements NVIDIA's Parakeet-TDT (the model mlx-audio runs) in JAX: log-mel
 front-end + Conformer encoder (JIT-compiled onto MPS) + greedy TDT decoder.
 
-    JAX_PLATFORMS=mps uv run examples/parakeet/main.py --audio examples/parakeet/sample.wav
+    JAX_PLATFORMS=mps uv run examples/parakeet/main.py examples/parakeet/sample.wav
 """
 
 from __future__ import annotations
