@@ -135,7 +135,7 @@ def log_mel(
     frames = x[idx]  # (num_frames, n_fft)
 
     spec = jnp.fft.rfft(frames * window)  # (num_frames, n_fft//2+1)
-    power = jnp.abs(spec) ** 2
+    power = spec.real**2 + spec.imag**2  # |spec|^2 without the abs()'s sqrt
 
     mel = filterbank @ power.T  # (features, num_frames)
     mel = jnp.log(mel + cfg.log_zero_guard)

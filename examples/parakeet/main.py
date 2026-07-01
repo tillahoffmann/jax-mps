@@ -50,13 +50,15 @@ class Parakeet:
 
         @jax.jit
         def _encode(state, mel):
-            return nnx.merge(self._graphdef, state)(mel)
+            # Cast to float32 in-graph so the host copy is a single Execute (no
+            # extra eager dtype-conversion dispatch) and the decoder gets float32.
+            return nnx.merge(self._graphdef, state)(mel).astype(jnp.float32)
 
         # Fused front-end + encoder: one compiled graph from waveform to features.
         @jax.jit
         def _encode_wav(state, wav):
             mel = log_mel(wav, self.pre, self.window, self.filterbank)
-            return nnx.merge(self._graphdef, state)(mel)
+            return nnx.merge(self._graphdef, state)(mel).astype(jnp.float32)
 
         self._encode = _encode
         self._encode_wav = _encode_wav
@@ -67,12 +69,10 @@ class Parakeet:
         )
 
     def encode(self, mel: jnp.ndarray) -> np.ndarray:
-        feats = self._encode(self._state, mel)
-        return np.asarray(feats.astype(jnp.float32))
+        return np.asarray(self._encode(self._state, mel))
 
     def encode_wav(self, wav: np.ndarray) -> np.ndarray:
-        feats = self._encode_wav(self._state, jnp.asarray(wav, self.dtype))
-        return np.asarray(feats.astype(jnp.float32))
+        return np.asarray(self._encode_wav(self._state, jnp.asarray(wav, self.dtype)))
 
     def transcribe(self, wav: np.ndarray) -> str:
         feats = self.encode_wav(wav)

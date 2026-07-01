@@ -154,19 +154,21 @@ class RelPositionMultiHeadAttention(nnx.Module):
         self.head_dim = d_model // n_head
         self.scale = self.head_dim**-0.5
 
-        def lin():
+        def lin(out):
             return nnx.Linear(
                 d_model,
-                d_model,
+                out,
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
                 rngs=nnx.Rngs(0),
             )
 
-        self.linear_q, self.linear_k, self.linear_v = lin(), lin(), lin()
-        self.linear_out = lin()
-        self.linear_pos = lin()
+        # Fused Q/K/V: one (d, 3d) matmul is better-tiled than three (d, d) ones
+        # at the short sequence lengths here.
+        self.linear_qkv = lin(3 * d_model)
+        self.linear_out = lin(d_model)
+        self.linear_pos = lin(d_model)
         self.pos_bias_u = nnx.Param(jnp.zeros((n_head, self.head_dim), dtype))
         self.pos_bias_v = nnx.Param(jnp.zeros((n_head, self.head_dim), dtype))
 
@@ -182,9 +184,10 @@ class RelPositionMultiHeadAttention(nnx.Module):
     def __call__(self, x, pos_emb):
         b, t, _ = x.shape
         h, d = self.n_head, self.head_dim
-        q = self.linear_q(x).reshape(b, t, h, d)
-        k = self.linear_k(x).reshape(b, t, h, d).transpose(0, 2, 1, 3)
-        v = self.linear_v(x).reshape(b, t, h, d).transpose(0, 2, 1, 3)
+        q, k, v = jnp.split(self.linear_qkv(x), 3, axis=-1)
+        q = q.reshape(b, t, h, d)
+        k = k.reshape(b, t, h, d).transpose(0, 2, 1, 3)
+        v = v.reshape(b, t, h, d).transpose(0, 2, 1, 3)
         p = (
             self.linear_pos(pos_emb)
             .reshape(pos_emb.shape[0], -1, h, d)
@@ -210,12 +213,19 @@ class Convolution(nnx.Module):
     def __init__(self, cfg: ConformerConfig):
         d, dt = cfg.d_model, cfg.dtype
         self.pad = (cfg.conv_kernel_size - 1) // 2
-        self.pointwise_conv1 = Conv1d(d, 2 * d, 1, bias=False, dtype=dt)
+        # The pointwise (kernel-size-1) convs are just channel matmuls on the
+        # channels-last activations; use Linear so they lower to dot_general
+        # instead of conv_general (no per-Execute kernel transpose).
+        self.pointwise_conv1 = nnx.Linear(
+            d, 2 * d, use_bias=False, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
+        )
         self.depthwise_conv = Conv1d(
             d, d, cfg.conv_kernel_size, padding=self.pad, groups=d, bias=False, dtype=dt
         )
         self.batch_norm = BatchNorm1d(d, dtype=dt)
-        self.pointwise_conv2 = Conv1d(d, d, 1, bias=False, dtype=dt)
+        self.pointwise_conv2 = nnx.Linear(
+            d, d, use_bias=False, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
+        )
 
     def __call__(self, x):  # x: (B, T, d)
         x = self.pointwise_conv1(x)
@@ -301,9 +311,9 @@ class Conformer(nnx.Module):
             jnp.arange(0, d, 2, dtype=jnp.float32) * -(math.log(10000.0) / d)
         )
         ang = positions * div_term
-        pe = jnp.zeros((2 * t - 1, d), jnp.float32)
-        pe = pe.at[:, 0::2].set(jnp.sin(ang))
-        pe = pe.at[:, 1::2].set(jnp.cos(ang))
+        # Interleave sin (even indices) and cos (odd) via stack+reshape rather
+        # than two strided scatters.
+        pe = jnp.stack([jnp.sin(ang), jnp.cos(ang)], axis=-1).reshape(2 * t - 1, d)
         return pe[None].astype(dtype)  # (1, 2T-1, d)
 
     def __call__(self, mel):  # mel: (B, T, feat)

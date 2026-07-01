@@ -46,22 +46,28 @@ def load_encoder(encoder, t: dict, dtype=jnp.float32):
 
         ln(layer.norm_self_att, "norm_self_att")
         a = layer.self_attn
-        for nm in ("linear_q", "linear_k", "linear_v", "linear_pos", "linear_out"):
-            getattr(a, nm).kernel.value = w(f"{b}.self_attn.{nm}.weight").T
+        # Fused Q/K/V: concatenate the three (in, out) kernels along the output axis.
+        a.linear_qkv.kernel.value = jnp.concatenate(
+            [w(f"{b}.self_attn.linear_{nm}.weight").T for nm in ("q", "k", "v")],
+            axis=-1,
+        )
+        a.linear_pos.kernel.value = w(f"{b}.self_attn.linear_pos.weight").T
+        a.linear_out.kernel.value = w(f"{b}.self_attn.linear_out.weight").T
         a.pos_bias_u.value = w(f"{b}.self_attn.pos_bias_u")
         a.pos_bias_v.value = w(f"{b}.self_attn.pos_bias_v")
 
         ln(layer.norm_conv, "norm_conv")
         c = layer.conv
-        c.pointwise_conv1.kernel.value = jnp.asarray(
-            conv1d_w(t[f"{b}.conv.pointwise_conv1.weight"])
-        ).astype(dtype)
+        # Pointwise convs are now Linear: MLX [out, 1, in] -> Linear kernel [in, out].
+        c.pointwise_conv1.kernel.value = w(f"{b}.conv.pointwise_conv1.weight")[
+            :, 0, :
+        ].T
         c.depthwise_conv.kernel.value = jnp.asarray(
             conv1d_w(t[f"{b}.conv.depthwise_conv.weight"])
         ).astype(dtype)
-        c.pointwise_conv2.kernel.value = jnp.asarray(
-            conv1d_w(t[f"{b}.conv.pointwise_conv2.weight"])
-        ).astype(dtype)
+        c.pointwise_conv2.kernel.value = w(f"{b}.conv.pointwise_conv2.weight")[
+            :, 0, :
+        ].T
         bn = c.batch_norm
         bn.weight.value = w(f"{b}.conv.batch_norm.weight")
         bn.bias.value = w(f"{b}.conv.batch_norm.bias")
