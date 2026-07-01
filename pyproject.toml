@@ -61,6 +61,8 @@ dev = [
     "flatbuffers",
     "huggingface-hub",
     "hypothesis",
+    "librosa>=0.10",
+    "mlx-audio>=0.2.3",
     "mlx-lm>=0.31.1",
     "numpyro>=0.20.0",
     "pre-commit>=4.5.1",
@@ -73,6 +75,7 @@ dev = [
     "ruff>=0.14.13",
     "safetensors",
     "sentencepiece",
+    "soundfile>=0.12",
     "tokenizers>=0.22.2",
     "tqdm>=4.67.1",
 ]
