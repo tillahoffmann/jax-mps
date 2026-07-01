@@ -10,10 +10,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax import lax
 
 from jax_plugins.mps.ops import sdpa
 
@@ -30,99 +28,6 @@ class ConformerConfig:
     subsampling_conv_channels: int = 256
     pos_emb_max_len: int = 5000
     dtype: jnp.dtype = jnp.float32
-
-
-def _silu(x):
-    return x * jax.nn.sigmoid(x)
-
-
-def _glu(x, axis=-1):
-    a, b = jnp.split(x, 2, axis=axis)
-    return a * jax.nn.sigmoid(b)
-
-
-class Conv1d(nnx.Module):
-    """Channels-last (NWC) 1-D conv; kernel stored WIO = (k, in/groups, out)."""
-
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k,
-        *,
-        stride=1,
-        padding=0,
-        groups=1,
-        bias=True,
-        dtype=jnp.float32,
-    ):
-        self.stride, self.padding, self.groups = stride, padding, groups
-        self.kernel = nnx.Param(jnp.zeros((k, in_ch // groups, out_ch), dtype))
-        self.bias = nnx.Param(jnp.zeros((out_ch,), dtype)) if bias else None
-
-    def __call__(self, x):
-        y = lax.conv_general_dilated(
-            x,
-            self.kernel.value,
-            (self.stride,),
-            [(self.padding, self.padding)],
-            dimension_numbers=("NWC", "WIO", "NWC"),
-            feature_group_count=self.groups,
-        )
-        if self.bias is not None:
-            y = y + self.bias.value
-        return y
-
-
-class Conv2d(nnx.Module):
-    """Channels-last (NHWC) 2-D conv; kernel stored HWIO = (kh, kw, in/groups, out)."""
-
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k,
-        *,
-        stride=1,
-        padding=0,
-        groups=1,
-        bias=True,
-        dtype=jnp.float32,
-    ):
-        self.stride, self.padding, self.groups = stride, padding, groups
-        self.kernel = nnx.Param(jnp.zeros((k, k, in_ch // groups, out_ch), dtype))
-        self.bias = nnx.Param(jnp.zeros((out_ch,), dtype)) if bias else None
-
-    def __call__(self, x):
-        s, p = self.stride, self.padding
-        y = lax.conv_general_dilated(
-            x,
-            self.kernel.value,
-            (s, s),
-            [(p, p), (p, p)],
-            dimension_numbers=("NHWC", "HWIO", "NHWC"),
-            feature_group_count=self.groups,
-        )
-        if self.bias is not None:
-            y = y + self.bias.value
-        return y
-
-
-class BatchNorm1d(nnx.Module):
-    """Inference-only batch norm over the channel (last) axis."""
-
-    def __init__(self, ch, eps=1e-5, dtype=jnp.float32):
-        self.eps = eps
-        self.weight = nnx.Param(jnp.ones((ch,), dtype))
-        self.bias = nnx.Param(jnp.zeros((ch,), dtype))
-        self.running_mean = nnx.Param(jnp.zeros((ch,), dtype))
-        self.running_var = nnx.Param(jnp.ones((ch,), dtype))
-
-    def __call__(self, x):
-        xhat = (x - self.running_mean.value) * lax.rsqrt(
-            self.running_var.value + self.eps
-        )
-        return xhat * self.weight.value + self.bias.value
 
 
 class FeedForward(nnx.Module):
@@ -145,7 +50,7 @@ class FeedForward(nnx.Module):
         )
 
     def __call__(self, x):
-        return self.linear2(_silu(self.linear1(x)))
+        return self.linear2(nnx.silu(self.linear1(x)))
 
 
 class RelPositionMultiHeadAttention(nnx.Module):
@@ -212,27 +117,34 @@ class RelPositionMultiHeadAttention(nnx.Module):
 class Convolution(nnx.Module):
     def __init__(self, cfg: ConformerConfig):
         d, dt = cfg.d_model, cfg.dtype
-        self.pad = (cfg.conv_kernel_size - 1) // 2
+        pad = (cfg.conv_kernel_size - 1) // 2
         # The pointwise (kernel-size-1) convs are just channel matmuls on the
-        # channels-last activations; use Linear so they lower to dot_general
-        # instead of conv_general (no per-Execute kernel transpose).
+        # channels-last activations, so use Linear (they lower to dot_general).
         self.pointwise_conv1 = nnx.Linear(
             d, 2 * d, use_bias=False, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
         )
-        self.depthwise_conv = Conv1d(
-            d, d, cfg.conv_kernel_size, padding=self.pad, groups=d, bias=False, dtype=dt
+        self.depthwise_conv = nnx.Conv(
+            d,
+            d,
+            kernel_size=(cfg.conv_kernel_size,),
+            padding=pad,
+            feature_group_count=d,
+            use_bias=False,
+            dtype=dt,
+            param_dtype=dt,
+            rngs=nnx.Rngs(0),
         )
-        self.batch_norm = BatchNorm1d(d, dtype=dt)
+        self.batch_norm = nnx.BatchNorm(
+            d, use_running_average=True, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
+        )
         self.pointwise_conv2 = nnx.Linear(
             d, d, use_bias=False, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
         )
 
     def __call__(self, x):  # x: (B, T, d)
-        x = self.pointwise_conv1(x)
-        x = _glu(x, axis=-1)
+        x = nnx.glu(self.pointwise_conv1(x), axis=-1)
         x = self.depthwise_conv(x)
-        x = self.batch_norm(x)
-        x = _silu(x)
+        x = nnx.silu(self.batch_norm(x))
         return self.pointwise_conv2(x)
 
 
@@ -271,12 +183,26 @@ class DwStridingSubsampling(nnx.Module):
         freq = cfg.feat_in
         for _ in range(self._sampling_num):
             freq = (freq + 2 * 1 - 3) // 2 + 1
+
+        def conv2d(ic, oc, k, stride, groups=1):
+            return nnx.Conv(
+                ic,
+                oc,
+                kernel_size=(k, k),
+                strides=(stride, stride),
+                padding=(k - 1) // 2,
+                feature_group_count=groups,
+                dtype=dt,
+                param_dtype=dt,
+                rngs=nnx.Rngs(0),
+            )
+
         # conv dict index matches checkpoint keys (ReLU layers occupy 1/4/7).
-        conv = {"0": Conv2d(1, c, 3, stride=2, padding=1, dtype=dt)}
+        conv = {"0": conv2d(1, c, 3, stride=2)}
         for stage in range(1, self._sampling_num):
             base = 1 + 3 * (stage - 1) + 1  # 2, 5, ...
-            conv[str(base)] = Conv2d(c, c, 3, stride=2, padding=1, groups=c, dtype=dt)
-            conv[str(base + 1)] = Conv2d(c, c, 1, stride=1, padding=0, dtype=dt)
+            conv[str(base)] = conv2d(c, c, 3, stride=2, groups=c)
+            conv[str(base + 1)] = conv2d(c, c, 1, stride=1)
         self.conv = nnx.Dict(conv)
         self.out = nnx.Linear(
             c * freq, cfg.d_model, dtype=dt, param_dtype=dt, rngs=nnx.Rngs(0)
@@ -290,7 +216,7 @@ class DwStridingSubsampling(nnx.Module):
             x = self.conv[key](x)
             # ReLU after conv.0 and after each pointwise conv (pattern conv,relu / dw,pw,relu).
             if first or key in ("3", "6"):
-                x = jax.nn.relu(x)
+                x = nnx.relu(x)
             first = False
         # x: (B, T', F', C) -> (B, T', C*F')
         b, tp, fp, c = x.shape

@@ -8,21 +8,23 @@ mlx-audio always runs float32 (it has no dtype knob); the JAX pipeline is swept
 across float32/bfloat16/float16 so you can see the low-precision speedup and
 confirm the transcript still matches.
 
-    JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py
-    JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py --dtype bfloat16
+    JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py sample.wav
+    JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py sample.wav --dtype bfloat16
 """
 
 from __future__ import annotations
 
 import argparse
 import statistics
-import sys
-from pathlib import Path
 from time import perf_counter
 
-sys.path.insert(0, str(Path(__file__).parent))
+import jax.numpy as jnp
+import soundfile as sf
+from audio import load_audio
+from main import Parakeet
+from mlx_audio.stt.utils import load_model
 
-DTYPES = {"float32": None, "bfloat16": None, "float16": None}  # resolved lazily
+DTYPES = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}
 
 
 def _rtf(times, audio_s):
@@ -31,22 +33,13 @@ def _rtf(times, audio_s):
 
 
 def make_jax(audio_path, model_id, dtype_str):
-    import jax.numpy as jnp
-    from audio import load_audio
-    from main import Parakeet
-
-    dtype = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}[
-        dtype_str
-    ]
-    model = Parakeet(model_id, dtype=dtype)
-    wav = load_audio(audio_path, model.pre.sample_rate)
+    model = Parakeet(model_id, dtype=DTYPES[dtype_str])
+    wav = load_audio(audio_path, model.preprocess.sample_rate)
     model.transcribe(wav)  # warm up JIT
     return lambda: model.transcribe(wav)
 
 
 def make_mlx(audio_path, model_id):
-    from mlx_audio.stt.utils import load_model
-
     model = load_model(model_id)
     model.generate(audio_path)  # warm up  # pyright: ignore[reportOptionalCall]
     return lambda: model.generate(audio_path).text.strip()  # pyright: ignore[reportOptionalCall]
@@ -54,13 +47,11 @@ def make_mlx(audio_path, model_id):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("audio", help="path to an audio file to benchmark")
     parser.add_argument("--model", default="mlx-community/parakeet-tdt-0.6b-v2")
-    parser.add_argument("--audio", default=str(Path(__file__).parent / "sample.wav"))
     parser.add_argument("--dtype", default="all", choices=["all", *DTYPES])
     parser.add_argument("--rounds", type=int, default=20)
     args = parser.parse_args()
-
-    import soundfile as sf
 
     info = sf.info(args.audio)
     audio_s = info.frames / info.samplerate

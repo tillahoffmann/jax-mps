@@ -37,14 +37,13 @@ make sample       # curl sample.wav (public-domain JFK speech clip, ~11s)
 make transcribe   # JAX_PLATFORMS=mps uv run main.py
 make benchmark    # parity + RTF vs mlx-audio, swept over float32/bfloat16/float16
 make bench-async  # A/B the plugin's async dispatch (JAX_MPS_ASYNC_DISPATCH)
-make bench-batch  # encoder throughput vs batch size (amortized per-clip)
 ```
 
-Or invoke directly:
+Or invoke directly (audio path is a positional argument):
 
 ```bash
-JAX_PLATFORMS=mps uv run examples/parakeet/main.py --audio examples/parakeet/sample.wav
-JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py
+JAX_PLATFORMS=mps uv run examples/parakeet/main.py examples/parakeet/sample.wav
+JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py examples/parakeet/sample.wav
 ```
 
 The demo clip is whisper.cpp's public-domain `jfk.wav`; the expected transcript is

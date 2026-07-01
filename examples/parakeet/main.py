@@ -36,46 +36,31 @@ class Parakeet:
         for f in sorted(path.glob("*.safetensors")):
             tensors.update(load_file(str(f)))
 
-        self.cfg = ConformerConfig(dtype=dtype)
-        self.pre = PreprocessConfig()
+        self.preprocess = PreprocessConfig()
         self.dtype = dtype
 
-        encoder = Conformer(self.cfg)
+        # Build the module structure without running (device) initializers, then
+        # fill in the real weights -- avoids initializing every param on device.
+        encoder = jax.eval_shape(lambda: Conformer(ConformerConfig(dtype=dtype)))
         load_encoder(encoder, tensors, dtype=dtype)
         self._graphdef, self._state = nnx.split(encoder)
 
-        self.window, self.filterbank = build_frontend(self.pre)
+        window, filterbank = build_frontend(self.preprocess)
         self.decoder = load_decoder(tensors)
         self.vocab, _ = load_vocabulary(str(path / "tokenizer.model"))
 
+        # One compiled graph from waveform to encoder features (log-mel + encoder).
+        # Cast to float32 in-graph so the host copy is a single Execute and the
+        # decoder gets float32.
         @jax.jit
-        def _encode(state, mel):
-            # Cast to float32 in-graph so the host copy is a single Execute (no
-            # extra eager dtype-conversion dispatch) and the decoder gets float32.
+        def encode(state, wav):
+            mel = log_mel(wav, self.preprocess, window, filterbank)
             return nnx.merge(self._graphdef, state)(mel).astype(jnp.float32)
 
-        # Fused front-end + encoder: one compiled graph from waveform to features.
-        @jax.jit
-        def _encode_wav(state, wav):
-            mel = log_mel(wav, self.pre, self.window, self.filterbank)
-            return nnx.merge(self._graphdef, state)(mel).astype(jnp.float32)
-
-        self._encode = _encode
-        self._encode_wav = _encode_wav
-
-    def mel(self, wav: np.ndarray) -> jnp.ndarray:
-        return log_mel(
-            jnp.asarray(wav, self.dtype), self.pre, self.window, self.filterbank
-        )
-
-    def encode(self, mel: jnp.ndarray) -> np.ndarray:
-        return np.asarray(self._encode(self._state, mel))
-
-    def encode_wav(self, wav: np.ndarray) -> np.ndarray:
-        return np.asarray(self._encode_wav(self._state, jnp.asarray(wav, self.dtype)))
+        self._encode = encode
 
     def transcribe(self, wav: np.ndarray) -> str:
-        feats = self.encode_wav(wav)
+        feats = np.asarray(self._encode(self._state, jnp.asarray(wav, self.dtype)))
         text, _ = greedy_decode(
             feats, self.decoder, self.vocab, durations=(0, 1, 2, 3, 4)
         )
@@ -84,8 +69,8 @@ class Parakeet:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("audio", help="path to an audio file to transcribe")
     parser.add_argument("--model", default="mlx-community/parakeet-tdt-0.6b-v2")
-    parser.add_argument("--audio", default=str(Path(__file__).parent / "sample.wav"))
     parser.add_argument(
         "--dtype", default="float32", choices=["float32", "float16", "bfloat16"]
     )
@@ -97,8 +82,8 @@ def main():
     print(f"JAX devices: {jax.devices()}")
 
     model = Parakeet(args.model, dtype=dtype)
-    wav = load_audio(args.audio, model.pre.sample_rate)
-    audio_s = len(wav) / model.pre.sample_rate
+    wav = load_audio(args.audio, model.preprocess.sample_rate)
+    audio_s = len(wav) / model.preprocess.sample_rate
 
     # Warm up JIT, then time a run.
     _ = model.transcribe(wav)

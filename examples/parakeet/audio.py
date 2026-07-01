@@ -11,7 +11,9 @@ import math
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+import librosa
 import numpy as np
+import soundfile as sf
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class PreprocessConfig:
     log_zero_guard: float = 2.0**-24
 
     @property
-    def win_length(self) -> int:
+    def window_length(self) -> int:
         return int(self.window_size * self.sample_rate)
 
     @property
@@ -42,7 +44,7 @@ def hann_window(size: int) -> np.ndarray:
     # Symmetric (periodic=False) Hann window, matching mlx_audio.utils.hanning.
     denom = size - 1
     n = np.arange(size, dtype=np.float64)
-    return (0.5 * (1.0 - np.cos(2.0 * math.pi * n / denom))).astype(np.float32)
+    return 0.5 * (1.0 - np.cos(2.0 * math.pi * n / denom))
 
 
 def _hz_to_mel_slaney(freq: float) -> float:
@@ -92,21 +94,24 @@ def mel_filterbank(sample_rate: int, n_fft: int, n_mels: int) -> np.ndarray:
 
     enorm = 2.0 / (f_pts[2 : n_mels + 2] - f_pts[:n_mels])
     fb = fb * enorm[None, :]
-    return np.moveaxis(fb, 0, 1).astype(np.float32)  # (n_mels, n_freqs)
+    return np.moveaxis(fb, 0, 1)  # (n_mels, n_freqs)
 
 
 def build_frontend(cfg: PreprocessConfig):
-    """Return (window, filterbank) host constants centered/shaped for the STFT."""
-    win = hann_window(cfg.win_length)  # (win_length,)
+    """Return the analysis (window, filterbank) as float32 host constants.
+
+    They are float32 regardless of the model dtype: the STFT runs in float32 for
+    numerical stability and to match mlx-audio's (non-precise) mel path, and
+    log_mel casts the waveform to float32 too.
+    """
+    window = hann_window(cfg.window_length)
     # Center-pad the window to n_fft (matches torch.stft / NeMo / mlx-audio).
-    if win.shape[0] < cfg.n_fft:
-        left = (cfg.n_fft - win.shape[0]) // 2
-        right = cfg.n_fft - win.shape[0] - left
-        win = np.concatenate(
-            [np.zeros(left, np.float32), win, np.zeros(right, np.float32)]
-        )
-    fb = mel_filterbank(cfg.sample_rate, cfg.n_fft, cfg.features)
-    return jnp.asarray(win), jnp.asarray(fb)
+    if window.shape[0] < cfg.n_fft:
+        left = (cfg.n_fft - window.shape[0]) // 2
+        right = cfg.n_fft - window.shape[0] - left
+        window = np.concatenate([np.zeros(left), window, np.zeros(right)])
+    filterbank = mel_filterbank(cfg.sample_rate, cfg.n_fft, cfg.features)
+    return jnp.asarray(window, jnp.float32), jnp.asarray(filterbank, jnp.float32)
 
 
 def log_mel(
@@ -155,13 +160,9 @@ def log_mel(
 
 def load_audio(path: str, sample_rate: int = 16000) -> np.ndarray:
     """Load an audio file as a 1-D float32 waveform at ``sample_rate`` (mono)."""
-    import soundfile as sf
-
     wav, sr = sf.read(path, dtype="float32", always_2d=False)
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
     if sr != sample_rate:
-        import librosa
-
         wav = librosa.resample(wav, orig_sr=sr, target_sr=sample_rate)
     return np.ascontiguousarray(wav, dtype=np.float32)

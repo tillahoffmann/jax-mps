@@ -69,10 +69,10 @@ def load_encoder(encoder, t: dict, dtype=jnp.float32):
             :, 0, :
         ].T
         bn = c.batch_norm
-        bn.weight.value = w(f"{b}.conv.batch_norm.weight")
+        bn.scale.value = w(f"{b}.conv.batch_norm.weight")
         bn.bias.value = w(f"{b}.conv.batch_norm.bias")
-        bn.running_mean.value = w(f"{b}.conv.batch_norm.running_mean")
-        bn.running_var.value = w(f"{b}.conv.batch_norm.running_var")
+        bn.mean.value = w(f"{b}.conv.batch_norm.running_mean")
+        bn.var.value = w(f"{b}.conv.batch_norm.running_var")
 
         ln(layer.norm_feed_forward2, "norm_feed_forward2")
         ff(layer.feed_forward2, "feed_forward2")
