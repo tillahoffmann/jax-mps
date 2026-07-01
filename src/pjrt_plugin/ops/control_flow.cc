@@ -71,6 +71,15 @@ mlx::core::array BoolMaskToAdditive(const mlx::core::array& mask, mlx::core::Dty
         mlx::core::where(mask, mlx::core::array(0.0F), mlx::core::array(-1e9F)), dtype);
 }
 
+// Normalize an SDPA mask to an additive bias. A boolean mask is converted
+// (True -> 0, False -> -1e9); a float mask is already an additive bias (used by
+// e.g. relative-position / ALiBi attention) and is just cast to the compute dtype.
+mlx::core::array MaskToAdditive(const mlx::core::array& mask, mlx::core::Dtype dtype) {
+    if (mask.dtype() == mlx::core::bool_)
+        return BoolMaskToAdditive(mask, dtype);
+    return mlx::core::astype(mask, dtype);
+}
+
 // Common helper for return-like operations (func.return, stablehlo.return)
 bool CollectReturnValues(mlir::Operation* op, ValueMap& values,
                          std::vector<mlx::core::array>& outputs, const char* opName) {
@@ -1037,7 +1046,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto v = bc.getNumber("scale"))
             scale = static_cast<float>(*v);
 
-        auto additive_mask = BoolMaskToAdditive(*mask, queries->dtype());
+        auto additive_mask = MaskToAdditive(*mask, queries->dtype());
         auto result = mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale,
                                                                     "", additive_mask);
         values.emplace(ToKey(op->getResult(0)), std::move(result));
@@ -1275,7 +1284,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto v = bc.getNumber("scale"))
             scale = static_cast<float>(*v);
 
-        auto additive_mask = BoolMaskToAdditive(*mask, q->dtype());
+        auto additive_mask = MaskToAdditive(*mask, q->dtype());
         auto vjp_fn = [scale, &additive_mask](const std::vector<mlx::core::array>& primals) {
             return std::vector<mlx::core::array>{mlx::core::fast::scaled_dot_product_attention(
                 primals[0], primals[1], primals[2], scale, "", additive_mask)};

@@ -52,9 +52,16 @@ _sdpa_p.def_abstract_eval(_sdpa_abstract)
 
 
 def _sdpa_impl(q, k, v, mask, *, scale):
-    """Pure JAX fallback for non-MPS platforms."""
+    """Pure JAX fallback for non-MPS platforms.
+
+    A boolean mask gates attention (True = attend); a float mask is an additive
+    bias added to the pre-softmax scores (e.g. relative-position / ALiBi).
+    """
     attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) * scale
-    attn = jnp.where(mask, attn, jnp.finfo(attn.dtype).min)
+    if jnp.issubdtype(mask.dtype, jnp.floating):
+        attn = attn + mask.astype(attn.dtype)
+    else:
+        attn = jnp.where(mask, attn, jnp.finfo(attn.dtype).min)
     attn = jax.nn.softmax(attn, axis=-1)
     return jnp.matmul(attn, v)
 
@@ -112,8 +119,9 @@ def sdpa(q, k, v, *, scale=None, is_causal=False, mask=None):
         v: Values, shape (B, N_kv, S, H).
         scale: Attention scale factor. Defaults to 1/sqrt(H).
         is_causal: Whether to apply causal (lower-triangular) masking.
-        mask: Optional boolean mask, shape broadcastable to (B, N, T, S).
-            True means attend, False means ignore.
+        mask: Optional mask, shape broadcastable to (B, N, T, S). A boolean mask
+            gates attention (True = attend, False = ignore); a float mask is added
+            to the pre-softmax scores as an additive bias (relative-position / ALiBi).
 
     Returns:
         Output of shape (B, N, T, H).

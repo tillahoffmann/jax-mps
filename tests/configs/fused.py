@@ -96,6 +96,21 @@ def make_fused_op_configs():
             name="sdpa_masked",
         )
 
+        # SDPA with float additive mask (relative-position / ALiBi style bias)
+        yield OperationTestConfig(
+            lambda q, k, v: sdpa(
+                q,
+                k,
+                v,
+                scale=0.25,
+                mask=jnp.array([[[[0.0, -1.0, 2.0, 0.5]]]], dtype=jnp.float32),
+            ),
+            lambda key: random.normal(key, (1, 2, 4, 8)),
+            lambda key: random.normal(key, (1, 2, 4, 8)),
+            lambda key: random.normal(key, (1, 2, 4, 8)),
+            name="sdpa_additive_mask",
+        )
+
         # RoPE with dynamic offset (passed as JAX value)
         yield OperationTestConfig(
             lambda x, off: rope(x, dims=8, base=10000.0, offset=off),
