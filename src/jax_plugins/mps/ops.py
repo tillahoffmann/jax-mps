@@ -130,6 +130,10 @@ def sdpa(q, k, v, *, scale=None, is_causal=False, mask=None):
         scale = q.shape[-1] ** -0.5
     scale = float(scale)
     if is_causal:
+        if mask is not None:
+            raise ValueError(
+                "sdpa does not support combining is_causal=True with an explicit mask"
+            )
         return _sdpa_causal_with_grad(q, k, v, scale)
     if mask is None:
         mask = jnp.bool_(True)

@@ -80,6 +80,14 @@ mlx::core::array MaskToAdditive(const mlx::core::array& mask, mlx::core::Dtype d
     return mlx::core::astype(mask, dtype);
 }
 
+// A valid SDPA mask is either a boolean gating mask or a floating additive bias.
+// Anything else (integer, complex) would silently change semantics via
+// MaskToAdditive, so handlers reject it instead.
+bool IsValidSdpaMaskDtype(const mlx::core::array& mask) {
+    return mask.dtype() == mlx::core::bool_ ||
+           mlx::core::issubdtype(mask.dtype(), mlx::core::floating);
+}
+
 // Common helper for return-like operations (func.return, stablehlo.return)
 bool CollectReturnValues(mlir::Operation* op, ValueMap& values,
                          std::vector<mlx::core::array>& outputs, const char* opName) {
@@ -1041,6 +1049,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto* mask = RequireValue(values, op->getOperand(3), "mps.sdpa");
         if (!queries || !keys || !vals || !mask)
             return false;
+        if (!IsValidSdpaMaskDtype(*mask)) {
+            MPS_LOG_ERROR("mps.sdpa: mask must be boolean or floating\n");
+            return false;
+        }
 
         float scale = 1.0F;
         auto bc = ParseBackendConfig(customCallOp);
@@ -1279,6 +1291,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto* g = RequireValue(values, op->getOperand(4), "mps.sdpa_bwd");
         if (!q || !k || !v || !mask || !g)
             return false;
+        if (!IsValidSdpaMaskDtype(*mask)) {
+            MPS_LOG_ERROR("mps.sdpa_bwd: mask must be boolean or floating\n");
+            return false;
+        }
 
         float scale = 1.0F;
         auto bc = ParseBackendConfig(customCallOp);
