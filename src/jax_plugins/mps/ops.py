@@ -133,6 +133,13 @@ def sdpa(q, k, v, *, scale=None, is_causal=False, mask=None):
         return _sdpa_causal_with_grad(q, k, v, scale)
     if mask is None:
         mask = jnp.bool_(True)
+    else:
+        mask = jnp.asarray(mask)
+        if mask.dtype != jnp.bool_ and not jnp.issubdtype(mask.dtype, jnp.floating):
+            raise ValueError(
+                "sdpa mask must be boolean (gating) or floating (additive bias), "
+                f"got dtype {mask.dtype}"
+            )
     return _sdpa_with_grad(q, k, v, mask, scale)
 
 

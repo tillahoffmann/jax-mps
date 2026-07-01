@@ -1027,7 +1027,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
 
     // Handle mps.sdpa — fused scaled dot-product attention via mlx::core::fast.
     // Inputs: queries (B, N, T, H), keys (B, N_kv, S, H), values (B, N_kv, S, H),
-    //         mask (boolean, broadcastable to (B, N, T, S))
+    //         mask (boolean gating mask or float additive bias; see MaskToAdditive,
+    //         broadcastable to (B, N, T, S))
     // backend_config: {"scale": <float>}
     if (callTargetName == "mps.sdpa") {
         if (op->getNumOperands() != 4 || op->getNumResults() != 1) {
