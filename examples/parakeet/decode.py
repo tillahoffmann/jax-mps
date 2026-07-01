@@ -2,8 +2,13 @@
 
 The prediction network (embedding + 2-layer LSTM) and joint network are tiny and
 the greedy loop is inherently sequential (each duration jump depends on the
-previous argmax), so this runs host-side in numpy over the encoder features. It
-mirrors ``ParakeetTDT.decode`` in mlx-audio exactly.
+previous argmax), so it runs host-side in numpy over the encoder features,
+mirroring ``ParakeetTDT.decode`` in mlx-audio. Two exact optimizations vs the
+reference: the joint's encoder projection is precomputed for all frames, and the
+prediction network is recomputed only when an emission changes its state rather
+than every frame. The remaining cost is memory-bandwidth-bound GEMVs over the
+decoder weights, which is near the host floor (lower precision doesn't help on
+CPU, and a GPU per-step loop pays more in dispatch than it saves).
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ class DecoderWeights:
 
 def load_decoder(t: dict) -> DecoderWeights:
     def a(name):
-        return np.asarray(t[name], dtype=np.float32)
+        return np.ascontiguousarray(t[name], dtype=np.float32)
 
     lstm = []
     i = 0
@@ -96,7 +101,7 @@ def greedy_decode(
     max_symbols: int = 10,
 ) -> tuple[str, list[int]]:
     """Greedy TDT decode over encoder features (1, T, enc_hidden)."""
-    feats = np.asarray(features[0], dtype=np.float32)  # (T, enc_hidden)
+    feats = np.ascontiguousarray(features[0], dtype=np.float32)  # (T, enc_hidden)
     max_length = feats.shape[0]
     blank_id = len(vocab)
 
@@ -111,25 +116,35 @@ def greedy_decode(
     last_token = blank_id
     tokens: list[int] = []
 
+    # The prediction network only depends on (last_token, hidden state), which
+    # change solely on emission -- so its output (and the joint's pred projection)
+    # is stable across the blank/duration steps in between. Recompute it lazily:
+    # ~1 LSTM pass per emitted token rather than one per frame.
+    dec_out = None
+    pred_proj = None
+    nh: list = []
+    nc: list = []
+
     time = 0
     new_symbols = 0
     while time < max_length:
-        # Prediction network step (blank -> zero embedding).
-        x = (
-            np.zeros(w.embed.shape[1], np.float32)
-            if last_token == blank_id
-            else w.embed[last_token]
-        )
-        nh, nc = [], []
-        for li in range(n_layers):
-            hi, ci = _lstm_step(x, h[li], c[li], *w.lstm[li])
-            nh.append(hi)
-            nc.append(ci)
-            x = hi
-        dec_out = x  # last-layer hidden
+        if dec_out is None:
+            x = (
+                np.zeros(w.embed.shape[1], np.float32)
+                if last_token == blank_id
+                else w.embed[last_token]
+            )
+            nh, nc = [], []
+            for li in range(n_layers):
+                hi, ci = _lstm_step(x, h[li], c[li], *w.lstm[li])
+                nh.append(hi)
+                nc.append(ci)
+                x = hi
+            dec_out = x  # last-layer hidden
+            pred_proj = w.pred_w @ dec_out + w.pred_b  # joint pred projection (cached)
 
-        # Joint network + TDT split.
-        j = np.maximum(0.0, enc_proj[time] + w.pred_w @ dec_out + w.pred_b)
+        # Joint network + TDT split (enc/pred projections precomputed).
+        j = np.maximum(0.0, enc_proj[time] + pred_proj)
         logits = w.out_w @ j + w.out_b
         pred_token = int(np.argmax(logits[: blank_id + 1]))
         decision = int(np.argmax(logits[blank_id + 1 :]))
@@ -138,6 +153,7 @@ def greedy_decode(
         if pred_token != blank_id:
             last_token = pred_token
             h, c = nh, nc
+            dec_out = None  # state changed -> recompute prediction network
             if not _is_special(vocab[pred_token]):
                 tokens.append(pred_token)
 

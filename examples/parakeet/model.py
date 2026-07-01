@@ -15,6 +15,8 @@ import jax.numpy as jnp
 from flax import nnx
 from jax import lax
 
+from jax_plugins.mps.ops import sdpa
+
 
 @dataclass(frozen=True)
 class ConformerConfig:
@@ -192,13 +194,14 @@ class RelPositionMultiHeadAttention(nnx.Module):
         q_u = (q + self.pos_bias_u.value).transpose(0, 2, 1, 3)  # (B,H,T,d)
         q_v = (q + self.pos_bias_v.value).transpose(0, 2, 1, 3)
 
-        matrix_ac = jnp.matmul(q_u, k.transpose(0, 1, 3, 2))  # (B,H,T,T)
+        # Positional bias (matrix_bd), scaled, becomes the additive SDPA mask so
+        # the whole content+position attention fuses into one mps.sdpa kernel.
         matrix_bd = jnp.matmul(q_v, p.transpose(0, 1, 3, 2))  # (B,H,T,2T-1)
-        matrix_bd = self._rel_shift(matrix_bd)[:, :, :, : k.shape[2]]  # (B,H,T,T)
+        bias = (
+            self._rel_shift(matrix_bd)[:, :, :, : k.shape[2]] * self.scale
+        )  # (B,H,T,T)
 
-        scores = (matrix_ac + matrix_bd) * self.scale
-        attn = jax.nn.softmax(scores, axis=-1)
-        out = jnp.matmul(attn, v)  # (B,H,T,d)
+        out = sdpa(q_u, k, v, scale=self.scale, mask=bias)  # (B,H,T,d)
         out = out.transpose(0, 2, 1, 3).reshape(b, t, h * d)
         return self.linear_out(out)
 

@@ -18,7 +18,10 @@ waveform ─► log-mel front-end ─► Conformer encoder ─► TDT greedy dec
   per-feature normalization). Matches NeMo/mlx-audio preprocessing.
 - **`model.py`** — FastConformer encoder in NNX: depthwise-striding subsampling
   (×8), 24 Conformer blocks (FFN · relative-position MHSA · conv module · FFN),
-  global `rel_pos` attention. This is what runs on MPS.
+  global `rel_pos` attention. This is what runs on MPS. The relative-position
+  attention uses the fused `mps.sdpa` kernel, passing the positional-bias term as
+  an additive mask so content+position attention is a single kernel. LayerNorm and
+  the biased projection are auto-fused by the plugin (`@mps.layer_norm`, `@mps.addmm`).
 - **`decode.py`** — token-and-duration transducer (TDT) greedy decode: prediction
   network (embedding + 2-layer LSTM) + joint network, run host-side in numpy (the
   loop is inherently sequential and the compute is tiny).
@@ -30,9 +33,11 @@ waveform ─► log-mel front-end ─► Conformer encoder ─► TDT greedy dec
 From this directory (`make` fetches the demo clip on first use):
 
 ```bash
-make sample      # download sample.wav (LibriSpeech "Mister Quilter ...", 5.86s)
-make transcribe  # JAX_PLATFORMS=mps uv run main.py
-make benchmark   # parity check + RTF vs mlx-audio (ROUNDS=20 by default)
+make sample       # curl sample.wav (public-domain JFK speech clip, ~11s)
+make transcribe   # JAX_PLATFORMS=mps uv run main.py
+make benchmark    # parity + RTF vs mlx-audio, swept over float32/bfloat16/float16
+make bench-async  # A/B the plugin's async dispatch (JAX_MPS_ASYNC_DISPATCH)
+make bench-batch  # encoder throughput vs batch size (amortized per-clip)
 ```
 
 Or invoke directly:
@@ -42,9 +47,8 @@ JAX_PLATFORMS=mps uv run examples/parakeet/main.py --audio examples/parakeet/sam
 JAX_PLATFORMS=mps uv run examples/parakeet/benchmark.py
 ```
 
-The demo clip is fetched from `hf-internal-testing/librispeech_asr_dummy`; the expected
-transcript is
-`mister Quilter is the Apostle of the Middle Classes, and we are glad to welcome his gospel.`
+The demo clip is whisper.cpp's public-domain `jfk.wav`; the expected transcript is
+`And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.`
 
 ## Correctness
 
@@ -60,17 +64,24 @@ Built and verified bottom-up against `mlx-audio` in float32:
 
 `benchmark.py` reports warm real-time factor (RTF = audio seconds / wall seconds),
 interleaving JAX and mlx-audio runs A/B to average out thermal throttling (single-shot
-numbers swing ~2x on Apple Silicon). On an idle machine (float32, 5.86 s clip, 20 rounds):
+numbers swing ~2x on Apple Silicon). `mlx-audio` always runs float32 (no dtype knob);
+the JAX pipeline is swept across precisions. The numbers below are **indicative** —
+a single run on one M-series machine (11 s clip, 20 rounds, min wall); system load and
+thermal state move them noticeably, so treat the *ratios* as the signal, not the
+absolute ms:
 
-| | min wall | RTF |
-| --- | --- | --- |
-| JAX-MPS (this repo) | 112.0 ms | 52.3x realtime |
-| mlx-audio | 112.9 ms | 51.9x realtime |
+| pipeline | min wall | RTF | vs mlx-audio |
+| --- | --- | --- | --- |
+| mlx-audio float32 | 169.3 ms | 65.0x | baseline |
+| JAX-MPS float32 | 151.1 ms | 72.8x | ~1.2x |
+| JAX-MPS bfloat16 | 123.1 ms | 89.4x | **~1.4x** |
+| JAX-MPS float16 | 126.1 ms | 87.2x | ~1.3x |
 
-i.e. the same throughput as `mlx-audio` (1.01x). The encoder dominates; running the
-joint's encoder projection once (outside the sequential decode loop) rather than
-per-step closes most of the gap. Numbers vary with machine and thermal state — run the
-benchmark yourself for a current figure.
+All three precisions produce the identical transcript. The edge comes from (a) fusing
+the full relative-position attention into one `mps.sdpa` kernel, (b) running the joint's
+encoder projection once outside the sequential decode loop, and (c) dropping to bfloat16
+— which mlx-audio can't do out of the box. The interleaved A/B keeps the JAX-vs-mlx
+comparison fair under load, but absolute numbers vary; run `make benchmark` yourself.
 
 ## Notes / scope
 
