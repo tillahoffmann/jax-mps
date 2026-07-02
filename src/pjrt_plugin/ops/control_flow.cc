@@ -534,7 +534,13 @@ private:
         // extreme int64 counters, but the wrapped difference is exact in uint64.
         uint64_t diff = static_cast<uint64_t>(*limit) - static_cast<uint64_t>(*init);
         auto step = static_cast<uint64_t>(counted_->step);
-        return static_cast<int64_t>(diff / step + (diff % step != 0 ? 1 : 0));
+        uint64_t count = diff / step + (diff % step != 0 ? 1 : 0);
+        // A trip count beyond int64 (possible only for extreme int64 bounds)
+        // would wrap negative and silently skip the loop — fall back to the
+        // dynamic path instead.
+        if (count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            return std::nullopt;
+        return static_cast<int64_t>(count);
     }
 
     // Public mlx::core::compile() returns a std::function whose internal
