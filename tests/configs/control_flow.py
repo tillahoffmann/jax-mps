@@ -406,7 +406,6 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.float32(1.0),
-                differentiable_argnums=(),
                 name="lax.fori_loop.long",
             ),
             # Long counted loop with nested control flow in the body: the
@@ -426,6 +425,10 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.float32(1.0),
+                # Grad through fori+nested cond produces nondeterministic wrong
+                # values on MPS — pre-existing miscompile also present on main
+                # (branch residuals appear to be dropped in the backward pass),
+                # unrelated to the counted-loop fast path. Tracked separately.
                 differentiable_argnums=(),
                 name="lax.fori_loop.long_nested_cond",
             ),
@@ -440,6 +443,7 @@ def make_control_flow_op_configs():
                 ),
                 numpy.float32(0.0),
                 numpy.int32(37),
+                # JAX rejects reverse-mode AD through fori_loop with dynamic bounds
                 differentiable_argnums=(),
                 name="lax.fori_loop.traced_bound",
             ),
