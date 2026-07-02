@@ -141,16 +141,26 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
     eos_id = tokenizer.eos_id()
     generated_ids = []
 
+    # Check for EOS in chunks rather than every token: a per-token int(token)
+    # host-syncs the GPU each step, serializing dispatch. Collecting a chunk on
+    # device and syncing once lets decode steps pipeline (and makes
+    # JAX_MPS_ASYNC_DISPATCH actually help instead of fighting the sync).
+    EOS_CHECK_INTERVAL = 16
     t0 = perf_counter()
-    for _ in range(max_new_tokens):
-        # Block on current token to check for EOS.
-        tok_id = int(token[0])
-        if tok_id == eos_id:
-            break
-        generated_ids.append(tok_id)
-        # Dispatch next decode step.
-        token, kv_cache = decode_step(state, token[None], kv_cache, pos)
-        pos += 1
+    stop = False
+    while len(generated_ids) < max_new_tokens and not stop:
+        n = min(EOS_CHECK_INTERVAL, max_new_tokens - len(generated_ids))
+        chunk = []
+        for _ in range(n):
+            chunk.append(token)
+            token, kv_cache = decode_step(state, token[None], kv_cache, pos)
+            pos += 1
+        # One host transfer for the whole chunk, then scan for EOS.
+        for tok_id in jax.device_get(jnp.concatenate(chunk)).tolist():
+            if tok_id == eos_id:
+                stop = True
+                break
+            generated_ids.append(tok_id)
     # Sync to include any in-flight computation in the timing.
     _ = token.block_until_ready()
     elapsed = perf_counter() - t0
