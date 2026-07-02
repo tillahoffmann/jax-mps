@@ -10,6 +10,7 @@ from .linalg import make_linalg_op_configs
 from .matmul import make_matmul_op_configs
 from .misc import make_misc_op_configs
 from .numpyro import make_numpyro_op_configs
+from .quantized import make_quantized_op_configs
 from .random import make_random_op_configs
 from .reduction import make_reduction_op_configs
 from .shape import make_shape_op_configs
@@ -33,6 +34,7 @@ __all__ = [
     "make_matmul_op_configs",
     "make_misc_op_configs",
     "make_numpyro_op_configs",
+    "make_quantized_op_configs",
     "make_random_op_configs",
     "make_reduction_op_configs",
     "make_shape_op_configs",

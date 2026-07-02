@@ -822,6 +822,211 @@ def _approx_top_k_mps_impl(
     return finalize(top_vals, out_idx)
 
 
+# ---------------------------------------------------------------------------
+# Weight-only quantization (mps.quantize / dequantize / quantized_matmul)
+# ---------------------------------------------------------------------------
+# Affine group-wise quantization matching MLX's scheme (mlx/backend/cpu/
+# quantized.cpp): each group of `group_size` values along the last axis is
+# packed into uint32 words (group_size*bits/32 words per group) with a per-group
+# fp `scale` and `bias` such that w ~= scale * q + bias. int4/int8 weight-only
+# quant cuts the per-token weight bandwidth that bounds LLM decode. See #189.
+#
+# These are opt-in ops (no JAX primitive to intercept): on MPS they lower to
+# MLX's fused quantized kernels; on other platforms a pure-JAX fallback runs the
+# same affine math + bit packing so the same code is portable.
+
+
+def _quant_pack_factor(bits):
+    """Elements packed per uint32 word (power-of-2 bits, matches MLX)."""
+    return 32 // bits
+
+
+def _affine_quantize_math(w, group_size, bits):
+    """Per-group affine quant. Returns (codes, scale, bias) matching MLX.
+
+    `codes` has w's shape (integer values in [0, 2**bits-1], as float32);
+    `scale`/`bias` have one entry per group along the last axis.
+    """
+    n_bins = float((1 << bits) - 1)
+    eps = 1e-7
+    shape = w.shape
+    g = w.astype(jnp.float32).reshape(
+        shape[:-1] + (shape[-1] // group_size, group_size)
+    )
+    w_min = jnp.min(g, axis=-1)
+    w_max = jnp.max(g, axis=-1)
+    mask = jnp.abs(w_min) > jnp.abs(w_max)
+    scale = jnp.maximum((w_max - w_min) / n_bins, eps)
+    scale = jnp.where(mask, scale, -scale)
+    edge = jnp.where(mask, w_min, w_max)
+    q0 = jnp.rint(edge / scale)
+    nonzero = q0 != 0
+    scale = jnp.where(nonzero, edge / jnp.where(nonzero, q0, 1.0), scale)
+    bias = jnp.where(nonzero, edge, 0.0)
+    codes = jnp.clip(jnp.rint((g - bias[..., None]) / scale[..., None]), 0.0, n_bins)
+    return codes.reshape(shape), scale, bias
+
+
+def _pack_uint32(codes, bits):
+    """Pack integer `codes` (last axis) into uint32 words, k-th value at k*bits."""
+    el = _quant_pack_factor(bits)
+    grouped = codes.astype(jnp.uint32).reshape(
+        codes.shape[:-1] + (codes.shape[-1] // el, el)
+    )
+    shifts = jnp.arange(el, dtype=jnp.uint32) * jnp.uint32(bits)
+    return jnp.sum(grouped << shifts, axis=-1, dtype=jnp.uint32)
+
+
+def _unpack_uint32(packed, bits):
+    """Inverse of _pack_uint32: uint32 words -> integer codes (float32)."""
+    el = _quant_pack_factor(bits)
+    shifts = jnp.arange(el, dtype=jnp.uint32) * jnp.uint32(bits)
+    bit_mask = jnp.uint32((1 << bits) - 1)
+    codes = (packed[..., None] >> shifts) & bit_mask
+    return codes.reshape(packed.shape[:-1] + (packed.shape[-1] * el,)).astype(
+        jnp.float32
+    )
+
+
+# --- mps.quantize -----------------------------------------------------------
+_quantize_p = core.Primitive("mps.quantize")
+_quantize_p.multiple_results = True
+
+
+def _quantize_abstract(w, *, group_size, bits):
+    el = _quant_pack_factor(bits)
+    d = w.shape[-1]
+    packed_shape = w.shape[:-1] + (d // el,)
+    group_shape = w.shape[:-1] + (d // group_size,)
+    return (
+        core.ShapedArray(packed_shape, jnp.uint32),
+        core.ShapedArray(group_shape, w.dtype),
+        core.ShapedArray(group_shape, w.dtype),
+    )
+
+
+_quantize_p.def_abstract_eval(_quantize_abstract)
+
+
+def _quantize_impl(w, *, group_size, bits):
+    codes, scale, bias = _affine_quantize_math(w, group_size, bits)
+    return _pack_uint32(codes, bits), scale.astype(w.dtype), bias.astype(w.dtype)
+
+
+_quantize_p.def_impl(_quantize_impl)
+
+
+def _quantize_lowering(ctx, w, *, group_size, bits):
+    return mlir.custom_call(
+        call_target_name="mps.quantize",
+        result_types=[_aval_to_ir_type(a) for a in ctx.avals_out],
+        operands=[w],
+        backend_config=f'{{"group_size": {group_size}, "bits": {bits}}}',
+    ).results
+
+
+# --- mps.dequantize ---------------------------------------------------------
+_dequantize_p = core.Primitive("mps.dequantize")
+
+
+def _dequantize_abstract(packed, scales, biases, *, group_size, bits):
+    d = packed.shape[-1] * _quant_pack_factor(bits)
+    return core.ShapedArray(packed.shape[:-1] + (d,), scales.dtype)
+
+
+_dequantize_p.def_abstract_eval(_dequantize_abstract)
+
+
+def _dequantize_impl(packed, scales, biases, *, group_size, bits):
+    codes = _unpack_uint32(packed, bits)
+    s = jnp.repeat(scales.astype(jnp.float32), group_size, axis=-1)
+    b = jnp.repeat(biases.astype(jnp.float32), group_size, axis=-1)
+    return (codes * s + b).astype(scales.dtype)
+
+
+_dequantize_p.def_impl(_dequantize_impl)
+
+
+def _dequantize_lowering(ctx, packed, scales, biases, *, group_size, bits):
+    return mlir.custom_call(
+        call_target_name="mps.dequantize",
+        result_types=[_aval_to_ir_type(ctx.avals_out[0])],
+        operands=[packed, scales, biases],
+        backend_config=f'{{"group_size": {group_size}, "bits": {bits}}}',
+    ).results
+
+
+# --- mps.quantized_matmul ---------------------------------------------------
+_quantized_matmul_p = core.Primitive("mps.quantized_matmul")
+
+
+def _quantized_matmul_abstract(
+    x, packed, scales, biases, *, transpose, group_size, bits
+):
+    if transpose:
+        out = packed.shape[-2]  # w is [out, in], quantized along in
+    else:
+        out = packed.shape[-1] * _quant_pack_factor(bits)  # w is [in, out]
+    return core.ShapedArray(x.shape[:-1] + (out,), x.dtype)
+
+
+_quantized_matmul_p.def_abstract_eval(_quantized_matmul_abstract)
+
+
+def _quantized_matmul_impl(x, packed, scales, biases, *, transpose, group_size, bits):
+    w = _dequantize_impl(
+        packed, scales, biases, group_size=group_size, bits=bits
+    ).astype(x.dtype)
+    if transpose:
+        return jnp.matmul(x, jnp.swapaxes(w, -1, -2))
+    return jnp.matmul(x, w)
+
+
+_quantized_matmul_p.def_impl(_quantized_matmul_impl)
+
+
+def _quantized_matmul_lowering(
+    ctx, x, packed, scales, biases, *, transpose, group_size, bits
+):
+    return mlir.custom_call(
+        call_target_name="mps.quantized_matmul",
+        result_types=[_aval_to_ir_type(ctx.avals_out[0])],
+        operands=[x, packed, scales, biases],
+        backend_config=(
+            f'{{"transpose": {1 if transpose else 0}, '
+            f'"group_size": {group_size}, "bits": {bits}}}'
+        ),
+    ).results
+
+
+def quantize(w, *, group_size=64, bits=4):
+    """Affine group-wise quantize `w` along its last axis (MLX layout).
+
+    Returns ``(packed_uint32, scales, biases)`` such that
+    ``dequantize(packed, scales, biases) ~= w``. ``w``'s last dim must be a
+    multiple of ``group_size`` and ``group_size*bits`` a multiple of 32.
+    """
+    return _quantize_p.bind(w, group_size=group_size, bits=bits)
+
+
+def dequantize(packed, scales, biases, *, group_size=64, bits=4):
+    """Reconstruct a float array from a ``quantize`` result."""
+    return _dequantize_p.bind(packed, scales, biases, group_size=group_size, bits=bits)
+
+
+def quantized_matmul(
+    x, packed, scales, biases, *, transpose=True, group_size=64, bits=4
+):
+    """Multiply ``x`` by a quantized weight matrix using MLX's fused kernel.
+
+    With ``transpose=True`` (default) the packed weight is ``[out, in]`` and the
+    result is ``x @ wᵀ`` of shape ``x.shape[:-1] + (out,)``.
+    """
+    return _quantized_matmul_p.bind(
+        x, packed, scales, biases, transpose=transpose, group_size=group_size, bits=bits
+    )
+
+
 def register_fused_ops():
     """Register MPS MLIR lowerings for fused custom_calls and related ops.
 
@@ -837,6 +1042,11 @@ def register_fused_ops():
     mlir.register_lowering(_layer_norm_p, _layer_norm_lowering, platform="mps")
     mlir.register_lowering(_rope_p, _rope_lowering, platform="mps")
     mlir.register_lowering(_gelu_p, _gelu_lowering, platform="mps")
+    mlir.register_lowering(_quantize_p, _quantize_lowering, platform="mps")
+    mlir.register_lowering(_dequantize_p, _dequantize_lowering, platform="mps")
+    mlir.register_lowering(
+        _quantized_matmul_p, _quantized_matmul_lowering, platform="mps"
+    )
 
     # Backward lowerings for MPS.
     mlir.register_lowering(_sdpa_bwd_p, _sdpa_bwd_lowering, platform="mps")
@@ -937,6 +1147,41 @@ def register_fused_ops():
     mlir.register_lowering(
         _gelu_p,
         mlir.lower_fun(lambda x: _gelu_impl_dispatch(x), multiple_results=False),
+    )
+    mlir.register_lowering(
+        _quantize_p,
+        mlir.lower_fun(
+            lambda w, group_size=64, bits=4: _quantize_impl(
+                w, group_size=group_size, bits=bits
+            ),
+            multiple_results=True,
+        ),
+    )
+    mlir.register_lowering(
+        _dequantize_p,
+        mlir.lower_fun(
+            lambda packed, scales, biases, group_size=64, bits=4: _dequantize_impl(
+                packed, scales, biases, group_size=group_size, bits=bits
+            ),
+            multiple_results=False,
+        ),
+    )
+    mlir.register_lowering(
+        _quantized_matmul_p,
+        mlir.lower_fun(
+            lambda x, packed, scales, biases, transpose=True, group_size=64, bits=4: (
+                _quantized_matmul_impl(
+                    x,
+                    packed,
+                    scales,
+                    biases,
+                    transpose=transpose,
+                    group_size=group_size,
+                    bits=bits,
+                )
+            ),
+            multiple_results=False,
+        ),
     )
 
     # Backward fallback lowerings for non-MPS platforms.
