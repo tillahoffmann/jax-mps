@@ -12,9 +12,11 @@ from huggingface_hub import snapshot_download
 from model import Gemma, GemmaConfig
 from safetensors.numpy import load_file
 
+from jax_plugins.mps.ops import quantize
+
 
 def load_model(
-    model_id: str, dtype=jnp.float32
+    model_id: str, dtype=jnp.float32, quantize_lm_head: bool = False
 ) -> tuple[Gemma, spm.SentencePieceProcessor]:
     """Download and load a Gemma model and tokenizer from HuggingFace."""
     path = Path(
@@ -38,6 +40,7 @@ def load_model(
         rope_theta=cfg.get("rope_theta", 10000.0),
         rms_norm_eps=cfg.get("rms_norm_eps", 1e-6),
         dtype=dtype,
+        quantize_lm_head=quantize_lm_head,
     )
 
     # Create model without allocating weights, then load from safetensors.
@@ -49,7 +52,16 @@ def load_model(
     def w(name):
         return jnp.array(tensors[name]).astype(dtype)
 
-    model.embed_tokens.embedding.set_value(w("model.embed_tokens.weight"))
+    embedding = w("model.embed_tokens.weight")
+    model.embed_tokens.embedding.set_value(embedding)
+    if quantize_lm_head:
+        # int8-quantize the tied LM head; keep the fp embedding for token lookup.
+        packed, scales, biases = quantize(
+            embedding, group_size=config.quant_group_size, bits=config.lm_head_bits
+        )
+        model.lm_head_packed.set_value(packed)
+        model.lm_head_scales.set_value(scales)
+        model.lm_head_biases.set_value(biases)
     model.norm.weight.set_value(w("model.norm.weight"))
     for i, layer in enumerate(model.layers):
         p = f"model.layers.{i}"
@@ -149,6 +161,11 @@ if __name__ == "__main__":
         default="float32",
         choices=["float32", "float16", "bfloat16"],
     )
+    parser.add_argument(
+        "--quantize-lm-head",
+        action="store_true",
+        help="int8-quantize the tied LM-head matmul (~21%% of decode weight traffic).",
+    )
     args = parser.parse_args()
 
     dtype = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}[
@@ -157,6 +174,8 @@ if __name__ == "__main__":
 
     print(f"JAX devices: {jax.devices()}")
     print(f"Dtype: {args.dtype}")
-    model, tokenizer = load_model(args.model, dtype=dtype)
+    model, tokenizer = load_model(
+        args.model, dtype=dtype, quantize_lm_head=args.quantize_lm_head
+    )
     print(f"Prompt: {args.prompt}")
     generate(model, tokenizer, args.prompt, args.max_tokens)
