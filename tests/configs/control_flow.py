@@ -428,7 +428,8 @@ def make_control_flow_op_configs():
                 # Grad through fori+nested cond produces nondeterministic wrong
                 # values on MPS — pre-existing miscompile also present on main
                 # (branch residuals appear to be dropped in the backward pass),
-                # unrelated to the counted-loop fast path. Tracked separately.
+                # unrelated to the counted-loop fast path. Tracked in issue #195;
+                # enabling grads here is the regression test once fixed.
                 differentiable_argnums=(),
                 name="lax.fori_loop.long_nested_cond",
             ),
