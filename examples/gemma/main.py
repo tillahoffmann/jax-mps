@@ -16,7 +16,10 @@ from jax_plugins.mps.ops import quantize
 
 
 def load_model(
-    model_id: str, dtype=jnp.float32, quantize_lm_head: bool = False
+    model_id: str,
+    dtype=jnp.float32,
+    quantize_lm_head: bool = False,
+    quantize_mlp_bits: int = 0,
 ) -> tuple[Gemma, spm.SentencePieceProcessor]:
     """Download and load a Gemma model and tokenizer from HuggingFace."""
     path = Path(
@@ -41,6 +44,7 @@ def load_model(
         rms_norm_eps=cfg.get("rms_norm_eps", 1e-6),
         dtype=dtype,
         quantize_lm_head=quantize_lm_head,
+        quantize_mlp_bits=quantize_mlp_bits,
     )
 
     # Create model without allocating weights, then load from safetensors.
@@ -69,12 +73,20 @@ def load_model(
         layer.self_attn.k_proj.kernel.set_value(w(f"{p}.self_attn.k_proj.weight").T)
         layer.self_attn.v_proj.kernel.set_value(w(f"{p}.self_attn.v_proj.weight").T)
         layer.self_attn.o_proj.kernel.set_value(w(f"{p}.self_attn.o_proj.weight").T)
-        gate_w = w(f"{p}.mlp.gate_proj.weight").T
-        up_w = w(f"{p}.mlp.up_proj.weight").T
-        layer.mlp.gate_up_proj.kernel.set_value(
-            jnp.concatenate([gate_w, up_w], axis=-1)
-        )
-        layer.mlp.down_proj.kernel.set_value(w(f"{p}.mlp.down_proj.weight").T)
+        if quantize_mlp_bits:
+            # QuantizedLinear stores [out, in] weights (quantized along in).
+            gate_up = jnp.concatenate(
+                [w(f"{p}.mlp.gate_proj.weight"), w(f"{p}.mlp.up_proj.weight")], axis=0
+            )
+            layer.mlp.gate_up_proj.set_quantized(gate_up)
+            layer.mlp.down_proj.set_quantized(w(f"{p}.mlp.down_proj.weight"))
+        else:
+            gate_w = w(f"{p}.mlp.gate_proj.weight").T
+            up_w = w(f"{p}.mlp.up_proj.weight").T
+            layer.mlp.gate_up_proj.kernel.set_value(
+                jnp.concatenate([gate_w, up_w], axis=-1)
+            )
+            layer.mlp.down_proj.kernel.set_value(w(f"{p}.mlp.down_proj.weight").T)
         layer.input_layernorm.weight.set_value(w(f"{p}.input_layernorm.weight"))
         layer.post_attention_layernorm.weight.set_value(
             w(f"{p}.post_attention_layernorm.weight")
@@ -166,6 +178,13 @@ if __name__ == "__main__":
         action="store_true",
         help="int8-quantize the tied LM-head matmul (~21%% of decode weight traffic).",
     )
+    parser.add_argument(
+        "--quantize-mlp-bits",
+        type=int,
+        default=0,
+        choices=[0, 4, 8],
+        help="Quantize MLP dense layers to this bit width (0=off, ~72%% of traffic).",
+    )
     args = parser.parse_args()
 
     dtype = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}[
@@ -175,7 +194,10 @@ if __name__ == "__main__":
     print(f"JAX devices: {jax.devices()}")
     print(f"Dtype: {args.dtype}")
     model, tokenizer = load_model(
-        args.model, dtype=dtype, quantize_lm_head=args.quantize_lm_head
+        args.model,
+        dtype=dtype,
+        quantize_lm_head=args.quantize_lm_head,
+        quantize_mlp_bits=args.quantize_mlp_bits,
     )
     print(f"Prompt: {args.prompt}")
     generate(model, tokenizer, args.prompt, args.max_tokens)

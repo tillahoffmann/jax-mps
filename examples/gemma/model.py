@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from jax_plugins.mps.ops import quantized_matmul, rms_norm, rope
+from jax_plugins.mps.ops import quantize, quantized_matmul, rms_norm, rope
 
 
 @dataclasses.dataclass
@@ -27,6 +27,12 @@ class GemmaConfig:
     quantize_lm_head: bool = False
     lm_head_bits: int = 8
     quant_group_size: int = 64
+    # Optionally quantize the MLP dense layers (gate_up + down = ~72% of the
+    # per-token weight read). 0 = off; otherwise the bit width (4 or 8) for the
+    # gate_up projection. down_proj is more sensitive, so it uses
+    # quantize_down_bits instead (mixed recipe: gate_up int4, down_proj int8).
+    quantize_mlp_bits: int = 0
+    quantize_down_bits: int = 8
 
 
 KVCache = list[tuple[jax.Array, jax.Array]]
@@ -40,6 +46,73 @@ class RMSNorm(nnx.Module):
     def __call__(self, x):
         w = self.weight[...]
         return rms_norm(x, jnp.ones_like(w) + w, eps=self.eps)
+
+
+class QuantizedLinear(nnx.Module):
+    """Bias-free Linear whose weight is int4/int8 weight-only quantized.
+
+    Holds MLX-packed weights (uint32) + per-group fp scale/bias and runs the
+    fused mps.quantized_matmul. The packed weight is ``[out, in]`` (quantized
+    along ``in``); load it with ``set_quantized`` from an ``[out, in]`` matrix.
+    """
+
+    def __init__(self, in_features, out_features, *, bits, group_size, dtype):
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bits = bits
+        self.group_size = group_size
+        self.packed = nnx.Param(
+            jnp.zeros((out_features, in_features * bits // 32), jnp.uint32)
+        )
+        self.scales = nnx.Param(
+            jnp.zeros((out_features, in_features // group_size), dtype)
+        )
+        self.biases = nnx.Param(
+            jnp.zeros((out_features, in_features // group_size), dtype)
+        )
+
+    def set_quantized(self, weight):
+        """Quantize an ``[out, in]`` weight and store the packed params."""
+        packed, scales, biases = quantize(
+            weight, group_size=self.group_size, bits=self.bits
+        )
+        self.packed.set_value(packed)
+        self.scales.set_value(scales)
+        self.biases.set_value(biases)
+
+    def __call__(self, x):
+        *lead, k = x.shape
+        y = quantized_matmul(
+            x.reshape(-1, k),
+            self.packed[...],
+            self.scales[...],
+            self.biases[...],
+            transpose=True,
+            group_size=self.group_size,
+            bits=self.bits,
+        )
+        return y.reshape(*lead, self.out_features)
+
+
+def _dense(in_features, out_features, config, *, rngs, bits=None):
+    """A gemma dense layer: QuantizedLinear if `bits`, else fp nnx.Linear.
+
+    `bits` defaults to config.quantize_mlp_bits; pass an override (e.g. for the
+    higher-precision down_proj in the mixed recipe).
+    """
+    if bits is None:
+        bits = config.quantize_mlp_bits
+    if bits:
+        return QuantizedLinear(
+            in_features,
+            out_features,
+            bits=bits,
+            group_size=config.quant_group_size,
+            dtype=config.dtype,
+        )
+    return nnx.Linear(
+        in_features, out_features, use_bias=False, dtype=config.dtype, rngs=rngs
+    )
 
 
 class GemmaAttention(nnx.Module):
@@ -138,21 +211,19 @@ class GemmaAttention(nnx.Module):
 
 class GemmaMLP(nnx.Module):
     def __init__(self, config, *, rngs):
-        dt = config.dtype
         # Fused gate+up projection: one matmul instead of two.
-        self.gate_up_proj = nnx.Linear(
-            config.hidden_size,
-            2 * config.intermediate_size,
-            use_bias=False,
-            dtype=dt,
-            rngs=rngs,
+        self.gate_up_proj = _dense(
+            config.hidden_size, 2 * config.intermediate_size, config, rngs=rngs
         )
-        self.down_proj = nnx.Linear(
+        # down_proj is more sensitive: keep it at quantize_down_bits (int8) when
+        # the MLP is quantized (mixed recipe), else fp.
+        down_bits = config.quantize_down_bits if config.quantize_mlp_bits else 0
+        self.down_proj = _dense(
             config.intermediate_size,
             config.hidden_size,
-            use_bias=False,
-            dtype=dt,
+            config,
             rngs=rngs,
+            bits=down_bits,
         )
 
     def __call__(self, x):
