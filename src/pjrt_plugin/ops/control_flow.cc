@@ -8,7 +8,11 @@
 #include <mlx/random.h>
 #include <mlx/transforms.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -17,6 +21,7 @@
 
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Matchers.h"
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -156,6 +161,186 @@ void CollectExternalValues(mlir::Region& region, const ValueMap& values, std::ve
     });
 }
 
+// ---------------------------------------------------------------------------
+// Counted-loop detection (jax-mps#193)
+//
+// lax.fori_loop / lax.scan lower to a canonical counted while loop:
+//
+//   cond { %c = stablehlo.compare LT, %counterArg, %limit; return %c }
+//   do   { ...; %next = stablehlo.add %counterArg, <const step>; return %next, ... }
+//
+// with a loop-invariant %limit. For this shape the trip count is computable
+// before the loop runs, so WhileLoopPrimitive can skip the per-iteration
+// cond eval + host readback that otherwise costs ~500us per iteration.
+// ---------------------------------------------------------------------------
+
+// Result of DetectCountedLoop. The limit is exactly one of:
+//   staticLimit     — an IR constant (typical for scan/fori with static bounds)
+//   limitLoopVarIdx — a pass-through loop variable
+//   limitExternal   — a non-constant value defined outside the while op
+struct CountedLoopInfo {
+    size_t counterIdx = 0;
+    int64_t step = 1;
+    bool isUnsigned = false;
+    std::optional<int64_t> staticLimit;
+    std::optional<size_t> limitLoopVarIdx;
+    mlir::Value limitExternal;
+};
+
+// Extract a splat integer constant as int64, honoring compare signedness.
+// Returns nullopt for non-constants, non-splat values, or unsigned values
+// that do not fit in int64.
+std::optional<int64_t> MatchIntSplatConstant(mlir::Value v, bool isUnsigned) {
+    mlir::DenseIntElementsAttr attr;
+    if (!mlir::matchPattern(v, mlir::m_Constant(&attr)) || !attr.isSplat())
+        return std::nullopt;
+    llvm::APInt val = attr.getSplatValue<llvm::APInt>();
+    if (isUnsigned) {
+        if (val.ugt(std::numeric_limits<int64_t>::max()))
+            return std::nullopt;
+        return static_cast<int64_t>(val.getZExtValue());
+    }
+    return val.getSExtValue();
+}
+
+std::optional<CountedLoopInfo> DetectCountedLoop(mlir::stablehlo::WhileOp whileOp) {
+    auto& condRegion = whileOp.getCond();
+    auto& bodyRegion = whileOp.getBody();
+    if (!condRegion.hasOneBlock() || !bodyRegion.hasOneBlock())
+        return std::nullopt;
+    auto& condBlock = condRegion.front();
+    auto& bodyBlock = bodyRegion.front();
+
+    // cond must be: return(compare(LT, blockArg[k], limit))
+    auto retOp = mlir::dyn_cast<mlir::stablehlo::ReturnOp>(condBlock.getTerminator());
+    if (!retOp || retOp.getNumOperands() != 1)
+        return std::nullopt;
+    auto cmp = retOp.getOperand(0).getDefiningOp<mlir::stablehlo::CompareOp>();
+    if (!cmp || cmp.getComparisonDirection() != mlir::stablehlo::ComparisonDirection::LT)
+        return std::nullopt;
+
+    auto counterArg = mlir::dyn_cast<mlir::BlockArgument>(cmp.getLhs());
+    if (!counterArg || counterArg.getOwner() != &condBlock)
+        return std::nullopt;
+
+    // Counter must be a rank-0 integer tensor (not bool).
+    auto counterTy = mlir::dyn_cast<mlir::RankedTensorType>(counterArg.getType());
+    if (!counterTy || counterTy.getRank() != 0)
+        return std::nullopt;
+    auto intTy = mlir::dyn_cast<mlir::IntegerType>(counterTy.getElementType());
+    if (!intTy || intTy.getWidth() == 1)
+        return std::nullopt;
+
+    CountedLoopInfo info;
+    info.counterIdx = counterArg.getArgNumber();
+
+    // Comparison signedness: explicit SIGNED/UNSIGNED, or inferred from the
+    // element type when absent/NOTYPE. FLOAT/TOTALORDER cannot apply to ints.
+    auto cmpType = cmp.getCompareType();
+    if (!cmpType || *cmpType == mlir::stablehlo::ComparisonType::NOTYPE) {
+        info.isUnsigned = intTy.isUnsigned();
+    } else if (*cmpType == mlir::stablehlo::ComparisonType::SIGNED) {
+        info.isUnsigned = false;
+    } else if (*cmpType == mlir::stablehlo::ComparisonType::UNSIGNED) {
+        info.isUnsigned = true;
+    } else {
+        return std::nullopt;
+    }
+
+    // Body must advance the counter by a constant positive step:
+    // result[k] = add(blockArg[k], <const>) (either operand order).
+    auto* bodyRet = bodyBlock.getTerminator();
+    if (bodyRet->getNumOperands() <= info.counterIdx)
+        return std::nullopt;
+    auto add = bodyRet->getOperand(info.counterIdx).getDefiningOp<mlir::stablehlo::AddOp>();
+    if (!add)
+        return std::nullopt;
+    auto matchCounterPlusConst = [&](mlir::Value argSide,
+                                     mlir::Value constSide) -> std::optional<int64_t> {
+        auto arg = mlir::dyn_cast<mlir::BlockArgument>(argSide);
+        if (!arg || arg.getOwner() != &bodyBlock || arg.getArgNumber() != info.counterIdx)
+            return std::nullopt;
+        return MatchIntSplatConstant(constSide, info.isUnsigned);
+    };
+    auto step = matchCounterPlusConst(add.getLhs(), add.getRhs());
+    if (!step)
+        step = matchCounterPlusConst(add.getRhs(), add.getLhs());
+    if (!step || *step <= 0)
+        return std::nullopt;
+    info.step = *step;
+
+    // Classify the limit: constant, pass-through loop var, or external value.
+    mlir::Value limit = cmp.getRhs();
+    if (auto staticLimit = MatchIntSplatConstant(limit, info.isUnsigned)) {
+        info.staticLimit = staticLimit;
+        return info;
+    }
+    if (auto limitArg = mlir::dyn_cast<mlir::BlockArgument>(limit)) {
+        if (limitArg.getOwner() != &condBlock)
+            return std::nullopt;
+        // The body must pass this loop var through unchanged.
+        size_t m = limitArg.getArgNumber();
+        auto passthrough = mlir::dyn_cast<mlir::BlockArgument>(bodyRet->getOperand(m));
+        if (!passthrough || passthrough.getOwner() != &bodyBlock || passthrough.getArgNumber() != m)
+            return std::nullopt;
+        info.limitLoopVarIdx = m;
+        return info;
+    }
+    // Non-constant SSA value: loop-invariant iff defined outside the while.
+    auto* defOp = limit.getDefiningOp();
+    if (!defOp || condRegion.isAncestor(defOp->getParentRegion()))
+        return std::nullopt;
+    info.limitExternal = limit;
+    return info;
+}
+
+// Read a concrete rank-0 integer array as int64, interpreting the raw bits
+// per the loop's compare signedness (StableHLO integers are signless; the
+// compare op carries the signedness). Returns nullopt for non-integer dtypes
+// or unsigned values that do not fit in int64.
+std::optional<int64_t> ReadIntScalar(const mlx::core::array& a, bool isUnsigned) {
+    auto arr = a;  // item() is non-const
+    auto d = arr.dtype();
+    if (d == mlx::core::int8)
+        return isUnsigned ? static_cast<int64_t>(static_cast<uint8_t>(arr.item<int8_t>()))
+                          : static_cast<int64_t>(arr.item<int8_t>());
+    if (d == mlx::core::int16)
+        return isUnsigned ? static_cast<int64_t>(static_cast<uint16_t>(arr.item<int16_t>()))
+                          : static_cast<int64_t>(arr.item<int16_t>());
+    if (d == mlx::core::int32)
+        return isUnsigned ? static_cast<int64_t>(static_cast<uint32_t>(arr.item<int32_t>()))
+                          : static_cast<int64_t>(arr.item<int32_t>());
+    if (d == mlx::core::int64) {
+        int64_t v = arr.item<int64_t>();
+        if (isUnsigned && v < 0)
+            return std::nullopt;  // unsigned value beyond int64 range
+        return v;
+    }
+    if (d == mlx::core::uint8)
+        return static_cast<int64_t>(arr.item<uint8_t>());
+    if (d == mlx::core::uint16)
+        return static_cast<int64_t>(arr.item<uint16_t>());
+    if (d == mlx::core::uint32)
+        return static_cast<int64_t>(arr.item<uint32_t>());
+    if (d == mlx::core::uint64) {
+        uint64_t v = arr.item<uint64_t>();
+        if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            return std::nullopt;
+        return static_cast<int64_t>(v);
+    }
+    return std::nullopt;
+}
+
+// Runtime parameters for the counted fast path, resolved against the
+// primitive's input layout (loop vars first, then external captures).
+struct CountedExec {
+    size_t counterInputIdx = 0;
+    int64_t step = 1;
+    bool isUnsigned = false;
+    std::optional<int64_t> staticLimit;   // set iff the limit is an IR constant
+    std::optional<size_t> limitInputIdx;  // otherwise: index into inputs
+};
+
 // Custom MLX primitive that encapsulates a while-loop with compiled body
 // and per-step eval. This is opaque to mx::compile (won't be fused) but
 // doesn't prevent outer compilation. When eval is called on the compiled
@@ -186,13 +371,21 @@ public:
     //   This combined function lets us eval() the full body+cond graph
     //   synchronously each iteration, bounding graph depth to one iteration
     //   and avoiding async_eval deadlocks with nested WhileLoopPrimitives.
+    // counted: when set, the loop's trip count is computed up front and the
+    //   per-iteration cond eval + host readback is skipped (jax-mps#193).
+    // bodyHasControlFlow: set by the body/cond trace when the regions contain
+    //   nested control-flow primitives (while/case). The counted path uses it
+    //   to decide whether the periodic flush may be async (see eval_impl).
     WhileLoopPrimitive(mlx::core::Stream stream, CondFn condFn, BodyFn bodyCondFn, size_t nLoopVars,
-                       size_t nExt)
+                       size_t nExt, std::optional<CountedExec> counted = std::nullopt,
+                       std::shared_ptr<std::atomic<bool>> bodyHasControlFlow = nullptr)
         : Primitive(stream),
           compiledBodyCond_(mlx::core::compile(std::move(bodyCondFn))),
           compiledCond_(mlx::core::compile(std::move(condFn))),
           nLoopVars_(nLoopVars),
-          nExt_(nExt) {
+          nExt_(nExt),
+          counted_(counted),
+          bodyHasControlFlow_(std::move(bodyHasControlFlow)) {
         if (stream.device.type != mlx::core::Device::cpu) {
             throw std::runtime_error(
                 "WhileLoopPrimitive must be on the CPU stream \u2014 GPU stream "
@@ -239,29 +432,77 @@ private:
                                      std::to_string(nLoopVars_ + nExt_) + " inputs, got " +
                                      std::to_string(current.size()));
 
-        // Initial condition check (before first body execution).
-        auto initCond = compiledCond_(current);
-        if (initCond.size() != 1 || initCond[0].size() != 1)
-            throw std::runtime_error("WhileLoopPrimitive: cond must return a single scalar");
-        mlx::core::eval(initCond[0]);
-        bool condTrue = initCond[0].item<bool>();
+        if (auto tripCount = ComputeTripCount(inputs)) {
+            // Counted fast path (jax-mps#193): the trip count is known before
+            // the loop runs, so no per-iteration cond eval / host readback is
+            // needed. Chain the compiled body lazily and flush every
+            // kEvalInterval iterations — this bounds lazy-graph growth and
+            // lets GPU work start while later iterations are still being
+            // recorded. Primitive inputs are concrete when eval runs, so the
+            // counter/limit scalar reads in ComputeTripCount are free.
+            //
+            // The periodic flush is async_eval when the body traced no nested
+            // control-flow primitives: async_eval encodes + commits the GPU
+            // work and returns without waiting, so recording the next batch
+            // overlaps GPU execution. With nested while/case in the body it
+            // must be a synchronous eval: the nested primitive's re-entrant
+            // eval() would wait on input events that an enclosing async_eval
+            // pass attaches but only signals at its end (the same deadlock
+            // documented for JAX_MPS_ASYNC_DISPATCH in mlx_executable.cc).
+            // The trace runs on the first compiledBodyCond_ call (i == 0),
+            // so the flag is always set before the first flush.
+            constexpr int64_t kEvalInterval = 64;
+            for (int64_t i = 0; i < *tripCount; ++i) {
+                auto combined = compiledBodyCond_(current);
+                if (combined.size() != 1 + nLoopVars_)
+                    throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
+                                             std::to_string(combined.size()) +
+                                             " results, expected " +
+                                             std::to_string(1 + nLoopVars_));
+                // combined[0] (the cond scalar) is ignored — the trip count
+                // already determines loop exit.
+                for (size_t j = 0; j < nLoopVars_; ++j)
+                    current[j] = std::move(combined[1 + j]);
+                if ((i + 1) % kEvalInterval == 0) {
+                    using Diff = std::vector<mlx::core::array>::difference_type;
+                    std::vector<mlx::core::array> vars(
+                        current.begin(), current.begin() + static_cast<Diff>(nLoopVars_));
+                    const bool nestedControlFlow =
+                        bodyHasControlFlow_ && bodyHasControlFlow_->load(std::memory_order_relaxed);
+                    if (nestedControlFlow)
+                        mlx::core::eval(vars);
+                    else
+                        mlx::core::async_eval(vars);
+                }
+            }
+        } else {
+            // Dynamic path: per-iteration cond eval + host readback.
+            //
+            // Initial condition check (before first body execution).
+            auto initCond = compiledCond_(current);
+            if (initCond.size() != 1 || initCond[0].size() != 1)
+                throw std::runtime_error("WhileLoopPrimitive: cond must return a single scalar");
+            mlx::core::eval(initCond[0]);
+            bool condTrue = initCond[0].item<bool>();
 
-        // Loop: body+cond combined per iteration.
-        while (condTrue) {
-            auto combined = compiledBodyCond_(current);
-            if (combined.size() != 1 + nLoopVars_)
-                throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
-                                         std::to_string(combined.size()) + " results, expected " +
-                                         std::to_string(1 + nLoopVars_));
-            // Synchronous eval — bounded graph, no accumulation, safe
-            // re-entry for nested WhileLoopPrimitives.
-            mlx::core::eval(combined);
+            // Loop: body+cond combined per iteration.
+            while (condTrue) {
+                auto combined = compiledBodyCond_(current);
+                if (combined.size() != 1 + nLoopVars_)
+                    throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
+                                             std::to_string(combined.size()) +
+                                             " results, expected " +
+                                             std::to_string(1 + nLoopVars_));
+                // Synchronous eval — bounded graph, no accumulation, safe
+                // re-entry for nested WhileLoopPrimitives.
+                mlx::core::eval(combined);
 
-            // Update loop vars from combined[1..nLoopVars]
-            for (size_t j = 0; j < nLoopVars_; ++j)
-                current[j] = std::move(combined[1 + j]);
-            // Check condition from combined[0]
-            condTrue = combined[0].item<bool>();
+                // Update loop vars from combined[1..nLoopVars]
+                for (size_t j = 0; j < nLoopVars_; ++j)
+                    current[j] = std::move(combined[1 + j]);
+                // Check condition from combined[0]
+                condTrue = combined[0].item<bool>();
+            }
         }
 
         // Synchronize final results
@@ -274,6 +515,34 @@ private:
             outputs[i].copy_shared_buffer(current[i]);
     }
 
+    // Trip count for the counted fast path, or nullopt to use the dynamic
+    // per-iteration cond loop (not a counted loop, or a scalar read failed).
+    std::optional<int64_t> ComputeTripCount(const std::vector<mlx::core::array>& inputs) const {
+        if (!counted_)
+            return std::nullopt;
+        auto init = ReadIntScalar(inputs[counted_->counterInputIdx], counted_->isUnsigned);
+        if (!init)
+            return std::nullopt;
+        std::optional<int64_t> limit = counted_->staticLimit;
+        if (!limit && counted_->limitInputIdx)
+            limit = ReadIntScalar(inputs[*counted_->limitInputIdx], counted_->isUnsigned);
+        if (!limit)
+            return std::nullopt;
+        if (*limit <= *init)
+            return 0;
+        // Unsigned arithmetic: limit - init in signed int64 could overflow for
+        // extreme int64 counters, but the wrapped difference is exact in uint64.
+        uint64_t diff = static_cast<uint64_t>(*limit) - static_cast<uint64_t>(*init);
+        auto step = static_cast<uint64_t>(counted_->step);
+        uint64_t count = diff / step + (diff % step != 0 ? 1 : 0);
+        // A trip count beyond int64 (possible only for extreme int64 bounds)
+        // would wrap negative and silently skip the loop — fall back to the
+        // dynamic path instead.
+        if (count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            return std::nullopt;
+        return static_cast<int64_t>(count);
+    }
+
     // Public mlx::core::compile() returns a std::function whose internal
     // shared_ptr deleter calls compile_erase when the last copy dies. Cache
     // eviction is tied to this primitive's lifetime — no manual erase needed.
@@ -281,6 +550,9 @@ private:
     CompiledFn compiledCond_;      // initial check only
     size_t nLoopVars_;
     size_t nExt_;
+    std::optional<CountedExec> counted_;
+    // Set during the body/cond trace; gates the async periodic flush.
+    std::shared_ptr<std::atomic<bool>> bodyHasControlFlow_;
 };
 
 // Custom MLX primitive that encapsulates a multi-branch case/switch with
@@ -430,6 +702,33 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
         const size_t nExt = extKeys.size();
         auto module = ctx.module;
 
+        // Counted-loop fast path (jax-mps#193): if the loop has a computable
+        // trip count, resolve where the limit lives in the primitive's input
+        // layout so eval can skip the per-iteration cond readback.
+        std::optional<CountedExec> counted;
+        if (auto detected = DetectCountedLoop(whileOp)) {
+            CountedExec ce;
+            ce.counterInputIdx = detected->counterIdx;
+            ce.step = detected->step;
+            ce.isUnsigned = detected->isUnsigned;
+            bool resolved = true;
+            if (detected->staticLimit) {
+                ce.staticLimit = detected->staticLimit;
+            } else if (detected->limitLoopVarIdx) {
+                ce.limitInputIdx = detected->limitLoopVarIdx;
+            } else {
+                // Non-constant external limit: find it among the collected
+                // external captures (cond references it, so it must be there).
+                auto it = std::find(extKeys.begin(), extKeys.end(), ToKey(detected->limitExternal));
+                if (it != extKeys.end())
+                    ce.limitInputIdx = nLoopVars + static_cast<size_t>(it - extKeys.begin());
+                else
+                    resolved = false;
+            }
+            if (resolved)
+                counted = ce;
+        }
+
         // Build primitive inputs: loopVars + external values
         std::vector<mlx::core::array> primInputs = loopVars;
         primInputs.insert(primInputs.end(), extArrays.begin(), extArrays.end());
@@ -464,14 +763,19 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
             return results;
         };
 
+        // Whether the body/cond regions contain nested control-flow primitives
+        // (while/case). Set during the trace, i.e. the first compiledBodyCond_
+        // call; gates the async periodic flush in the counted fast path.
+        auto bodyHasControlFlow = std::make_shared<std::atomic<bool>>(false);
+
         // Build combined body+cond function.
         // Executes body region, then cond region on the body outputs.
         // Returns [condScalar, bodyResult0, bodyResult1, ...].
         // This lets eval_impl call eval() synchronously each iteration,
         // bounding graph depth and avoiding async_eval deadlocks.
         auto bodyCondFn =
-            [&bodyRegion, &condRegion, module, extKeys, nLoopVars,
-             nExt](const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
+            [&bodyRegion, &condRegion, module, extKeys, nLoopVars, nExt, bodyHasControlFlow](
+                const std::vector<mlx::core::array>& inputs) -> std::vector<mlx::core::array> {
             using Diff = std::vector<mlx::core::array>::difference_type;
             auto args = std::vector<mlx::core::array>(
                 inputs.begin(), inputs.begin() + static_cast<Diff>(nLoopVars));
@@ -499,6 +803,9 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
 
             if (!ExecuteRegion(condRegion, bodyResults, condResults, condCtx, &condParentVals))
                 throw std::runtime_error("WhileLoopPrimitive: cond region failed");
+
+            if (bodyCtx.produced_control_flow || condCtx.produced_control_flow)
+                bodyHasControlFlow->store(true, std::memory_order_relaxed);
             if (condResults.size() != 1 || condResults[0].size() != 1)
                 throw std::runtime_error("WhileLoopPrimitive: cond must return a single scalar");
 
@@ -515,7 +822,8 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
         // deadlock on a GPU stream (see WhileLoopPrimitive class comment).
         auto cpuStream = mlx::core::default_stream(mlx::core::Device::cpu);
         auto prim = std::make_shared<WhileLoopPrimitive>(cpuStream, std::move(condFn),
-                                                         std::move(bodyCondFn), nLoopVars, nExt);
+                                                         std::move(bodyCondFn), nLoopVars, nExt,
+                                                         counted, bodyHasControlFlow);
 
         auto outputArrays =
             mlx::core::array::make_arrays(std::move(outShapes), outDtypes, prim, primInputs);

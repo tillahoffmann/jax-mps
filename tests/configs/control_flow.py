@@ -395,6 +395,84 @@ def make_control_flow_op_configs():
                 differentiable_argnums=(),
                 name="lax.fori_loop.zero_iter",
             ),
+            # fori_loop long enough to cross the counted-loop eval-batch
+            # boundary in WhileLoopPrimitive (issue #193; batch size 64,
+            # 130 = 2 full batches + remainder)
+            OperationTestConfig(
+                lambda x: lax.fori_loop(
+                    0,
+                    130,
+                    lambda i, val: val * 0.99 + i * 0.001,
+                    x,
+                ),
+                numpy.float32(1.0),
+                name="lax.fori_loop.long",
+            ),
+            # Long counted loop with nested control flow in the body: the
+            # periodic flush must stay synchronous (async_eval deadlocks on
+            # nested control-flow primitives), and this crosses the flush
+            # boundary unlike the short nested-loop configs (issue #193)
+            OperationTestConfig(
+                lambda x: lax.fori_loop(
+                    0,
+                    130,
+                    lambda i, val: lax.cond(
+                        i % 2 == 0,
+                        lambda v: v + 0.01,
+                        lambda v: v * 1.001,
+                        val,
+                    ),
+                    x,
+                ),
+                numpy.float32(1.0),
+                # Grad through fori+nested cond produces nondeterministic wrong
+                # values on MPS — pre-existing miscompile also present on main
+                # (branch residuals appear to be dropped in the backward pass),
+                # unrelated to the counted-loop fast path. Tracked in issue #195;
+                # enabling grads here is the regression test once fixed.
+                differentiable_argnums=(),
+                name="lax.fori_loop.long_nested_cond",
+            ),
+            # fori_loop with a traced (runtime) upper bound — the while cond's
+            # limit is a function argument, not an IR constant (issue #193)
+            OperationTestConfig(
+                lambda x, n: lax.fori_loop(
+                    0,
+                    n,
+                    lambda i, val: val + 1.0 + i * 0.5,
+                    x,
+                ),
+                numpy.float32(0.0),
+                numpy.int32(37),
+                # JAX rejects reverse-mode AD through fori_loop with dynamic bounds
+                differentiable_argnums=(),
+                name="lax.fori_loop.traced_bound",
+            ),
+            # scan over stacked inputs/outputs — the loop counter drives
+            # dynamic_slice/dynamic_update_slice in the body (issue #193)
+            OperationTestConfig(
+                lambda xs: lax.scan(
+                    lambda c, x: (c + x, c * 0.5),
+                    jnp.float32(0.0),
+                    xs,
+                ),
+                lambda key: random.normal(key, (67,)),
+                name="lax.scan.stacked_outputs",
+            ),
+            # Genuinely value-dependent condition (not a counted loop): the
+            # cond variable is updated by a non-constant amount each iteration,
+            # so the counted-loop fast path must NOT trigger (issue #193).
+            # Integer state keeps the trip count platform-independent.
+            OperationTestConfig(
+                lambda x: lax.while_loop(
+                    lambda state: state[1] < 100,
+                    lambda state: (state[0] + 1, state[1] + state[0]),
+                    (x, x),
+                )[1],
+                numpy.int32(1),
+                differentiable_argnums=(),
+                name="lax.while_loop.value_dependent",
+            ),
             # ==================== cond inside while ====================
             OperationTestConfig(
                 lambda x: lax.while_loop(
