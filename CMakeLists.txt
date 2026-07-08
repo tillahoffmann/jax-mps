@@ -292,12 +292,24 @@ target_link_libraries(pjrt_plugin_passes PRIVATE
     ${MLIR_LIBS}
 )
 
-# For wheel distribution: ensure RPATH is set correctly
+# For wheel distribution: set RPATH correctly, and hide C++ symbols by default
+# (only GetPjrtApi is re-exported below) so the statically-linked
+# MLIR/StableHLO/LLVM symbols stay private.
 set_target_properties(pjrt_plugin_mps PROPERTIES
     OUTPUT_NAME "pjrt_plugin_mps"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     INSTALL_RPATH "@loader_path"
     BUILD_WITH_INSTALL_RPATH TRUE
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+# Keep the plugin's statically-linked MLIR/StableHLO/LLVM symbols private.
+# TensorFlow ships its own MLIR dylibs; if those symbols remain globally
+# visible, importing TensorFlow before JAX can interpose MLIR dialect/runtime
+# pieces across ABI-incompatible builds and crash during StableHLO parsing.
+target_link_options(pjrt_plugin_mps PRIVATE
+    -Wl,-exported_symbol,_GetPjrtApi
 )
 
 # Install target - this is used by scikit-build-core
