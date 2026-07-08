@@ -292,7 +292,9 @@ target_link_libraries(pjrt_plugin_passes PRIVATE
     ${MLIR_LIBS}
 )
 
-# For wheel distribution: ensure RPATH is set correctly
+# For wheel distribution: set RPATH correctly, and hide C++ symbols by default
+# (only GetPjrtApi is re-exported below) so the statically-linked
+# MLIR/StableHLO/LLVM symbols stay private.
 set_target_properties(pjrt_plugin_mps PROPERTIES
     OUTPUT_NAME "pjrt_plugin_mps"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"

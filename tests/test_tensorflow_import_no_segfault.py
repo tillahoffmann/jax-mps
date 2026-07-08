@@ -7,8 +7,8 @@ libraries once TensorFlow is imported into the same process. When the plugin
 then registers its dialects on the first JAX MPS compile, the mixed symbol set
 crashes inside ``mlir::MLIRContext::getOrLoadDialect`` -> SIGSEGV (see #198).
 
-The fix (#199) marks every symbol in the dylib hidden and re-exports only the
-PJRT entry point ``GetPjrtApi``, so the plugin's MLIR/LLVM symbols are never
+The fix marks every symbol in the dylib hidden and re-exports only the PJRT
+entry point ``GetPjrtApi``, so the plugin's MLIR/LLVM symbols are never
 globally visible and cannot interpose. This test pins that behaviour.
 
 It runs in a subprocess because, pre-fix, the failure is a process-level
