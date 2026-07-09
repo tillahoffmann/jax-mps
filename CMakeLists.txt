@@ -9,8 +9,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Export compile commands for clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# macOS specific settings
-set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
+# macOS specific settings. The minimum version is pinned in the top-level
+# `macos-deployment-target` file (single source of truth, also read by
+# scripts/setup_deps_common.sh and .github/workflows/build.yml) so the plugin,
+# its statically-linked deps, and the wheel platform tag never drift.
+file(STRINGS "${CMAKE_SOURCE_DIR}/macos-deployment-target" MACOS_DEPLOYMENT_TARGET LIMIT_COUNT 1)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "${MACOS_DEPLOYMENT_TARGET}" CACHE STRING "Minimum macOS version")
 
 # Explicitly set sysroot so compile_commands.json works with any clang-tidy
 execute_process(

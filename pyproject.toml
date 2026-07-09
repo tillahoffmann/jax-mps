@@ -43,10 +43,8 @@ build.verbose = true
 wheel.packages = ["src/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
-[tool.cibuildwheel]
-build = ["cp311-macosx_arm64", "cp312-macosx_arm64", "cp313-macosx_arm64"]
-environment = { CMAKE_PREFIX_PATH = "$HOME/.local/jax-mps-deps" }
-before-all = "./scripts/setup_deps.sh"
+# Python-ABI agnostic wheel tag (still Requires-Python >= 3.11); results in py3-none-<platform>
+wheel.py-api = "py3"
 
 [tool.uv.sources]
 ctcache = { git = "https://github.com/matus-chochlik/ctcache.git" }

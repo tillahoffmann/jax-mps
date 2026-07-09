@@ -29,7 +29,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/llvm
-          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
+          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
           lookup-only: true
 
       - name: Install build tools
@@ -47,7 +47,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/llvm
-          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
+          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
 
   setup-protobuf:
     name: Setup Protobuf
@@ -60,7 +60,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/protobuf
-          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
+          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
           lookup-only: true
 
       - name: Install build tools
@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/protobuf
-          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
+          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
 
   setup-mlx:
     name: Setup MLX
@@ -91,7 +91,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/mlx
-          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           lookup-only: true
 
       - name: Install build tools
@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/mlx
-          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
 
   build:
     name: Build wheel
@@ -127,34 +127,35 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/llvm
-          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
+          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore Protobuf cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/protobuf
-          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
+          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore MLX cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/mlx
-          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Install dependencies
         run: uv sync --all-groups --no-install-project
 
       - name: Build wheel
-        run: uv build --wheel
+        run: |
+          # Pin the wheel's platform tag (e.g. macosx_14_0_arm64) to the
+          # deployment target instead of letting scikit-build-core track the
+          # runner OS -- otherwise the macos-26 runner tags wheels macosx_26_0,
+          # locking out older macOS. Value from the single source of truth.
+          export MACOSX_DEPLOYMENT_TARGET="$(cat macos-deployment-target)"
+          uv build --wheel
         env:
-          # Pin the wheel's platform tag (macosx_13_0_arm64) to the deployment
-          # target instead of letting scikit-build-core track the runner OS.
-          # Without this, the macos-26 runner tags wheels macosx_26_0, locking
-          # out older macOS. Keep in sync with CMAKE_OSX_DEPLOYMENT_TARGET.
-          MACOSX_DEPLOYMENT_TARGET: "13.0"
           CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload wheel
@@ -179,21 +180,21 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/llvm
-          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
+          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore Protobuf cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/protobuf
-          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
+          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore MLX cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/mlx
-          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Install llvm
@@ -246,6 +247,36 @@ jobs:
       - name: pyright
         run: .venv/bin/pyright
 
+  smoke-test-wheel:
+    name: Smoke-test wheel
+    needs: build
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Download wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel
+          path: dist/
+
+      # The wheel is tagged py3-none-macosx_<ver>_arm64: one artifact meant to
+      # load under every supported CPython (the plugin is a pure C PJRT dylib
+      # with no libpython linkage). Install that same wheel under each version
+      # and confirm the dylib loads. Device-free — the runner has no MPS GPU —
+      # so it checks packaging + dynamic loading, not compute. The default
+      # bash -e aborts the step on the first version that fails.
+      - name: Load wheel under each supported Python
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          for PY in 3.11 3.12 3.13; do
+            echo "=== Python $PY ==="
+            uv run --python "$PY" --no-project --with "$WHEEL" python scripts/smoke_test_wheel.py
+          done
+
   build-dev:
     name: Build dev wheel
     needs: [setup-llvm, setup-protobuf, setup-mlx]
@@ -263,21 +294,21 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/llvm
-          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
+          key: deps-llvm-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_llvm.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore Protobuf cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/protobuf
-          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
+          key: deps-protobuf-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_protobuf.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore MLX cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.jax-mps-deps/mlx
-          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
+          key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
       - name: Build dev wheel
@@ -286,10 +317,10 @@ jobs:
           DEV_VERSION="${BASE_VERSION}.dev${{ github.run_number }}"
           echo "Building version: $DEV_VERSION"
           sed -i '' "s/^version = \".*\"/version = \"$DEV_VERSION\"/" pyproject.toml
+          # See "Build wheel" above: pin platform tag to the deployment target.
+          export MACOSX_DEPLOYMENT_TARGET="$(cat macos-deployment-target)"
           uv build --wheel
         env:
-          # See "Build wheel" above: pin platform tag to the deployment target.
-          MACOSX_DEPLOYMENT_TARGET: "13.0"
           CMAKE_ARGS: "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/.jax-mps-deps/llvm;${{ github.workspace }}/.jax-mps-deps/protobuf;${{ github.workspace }}/.jax-mps-deps/mlx"
 
       - name: Upload dev wheel
@@ -378,7 +409,7 @@ jobs:
 
   release:
     name: Release
-    needs: [test, lint-cpp, lint-python]
+    needs: [test, lint-cpp, lint-python, smoke-test-wheel]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
