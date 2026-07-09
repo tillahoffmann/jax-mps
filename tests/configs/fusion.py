@@ -154,7 +154,7 @@ def make_fusion_configs() -> list[FusionTestConfig]:
     # --- fuse_softmax: reduce_max/sub/exp/reduce_sum/divide -> mps.softmax ---
 
     # Trailing-axis softmax at several ranks & shapes.
-    for shape in [(8,), (4, 16), (2, 3, 12), (2, 4, 8, 32)]:
+    for shape in [(8,), (1, 8), (4, 16), (2, 3, 12), (2, 4, 8, 32), (1, 1, 1, 8)]:
         configs.append(
             FusionTestConfig(
                 name=f"softmax.trailing.{'x'.join(map(str, shape))}",

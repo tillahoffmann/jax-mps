@@ -99,6 +99,7 @@ Value stripNegInfMaximum(Value v) {
         return v;
 
     auto isNegInf = [](Value cand) -> bool {
+        cand = stripTrivialReshapes(cand);
         if (auto bc = cand.getDefiningOp<stablehlo::BroadcastInDimOp>())
             cand = bc.getOperand();
         mlir::DenseElementsAttr attr;
