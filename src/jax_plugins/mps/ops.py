@@ -1049,6 +1049,11 @@ def quantize(w, *, group_size=64, bits=4):
     multiple of ``group_size`` and ``group_size*bits`` a multiple of 32.
     """
     _check_quant_config(bits, group_size)
+    if not jnp.issubdtype(w.dtype, jnp.floating):
+        raise ValueError(
+            f"quantize expects a floating-point weight, got dtype {w.dtype} "
+            "(scales/biases would be truncated to that dtype)"
+        )
     if w.shape[-1] % group_size != 0:
         raise ValueError(
             f"quantize: last axis ({w.shape[-1]}) must be a multiple of "
