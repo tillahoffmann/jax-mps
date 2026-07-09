@@ -999,6 +999,35 @@ def _quantized_matmul_lowering(
     ).results
 
 
+# Bit widths whose packing (32 // bits elements per uint32 word) our packer and
+# the MLX kernels support. Non-power-of-2 widths use a different MLX layout.
+_SUPPORTED_QUANT_BITS = (4, 8)
+
+
+def _check_quant_config(bits, group_size):
+    """Validate quant params early so bad configs fail clearly, not deep in MLX."""
+    if bits not in _SUPPORTED_QUANT_BITS:
+        raise ValueError(
+            f"quantization bits must be one of {_SUPPORTED_QUANT_BITS}, got {bits}"
+        )
+    if (group_size * bits) % 32 != 0:
+        raise ValueError(
+            "group_size * bits must be a multiple of 32 for uint32 packing; got "
+            f"group_size={group_size}, bits={bits}"
+        )
+
+
+def _check_group_shapes(name, quant_dim, group_size, scales, biases):
+    """Check per-group scales/biases match the quantized axis length."""
+    n_groups = quant_dim // group_size
+    if scales.shape[-1] != n_groups or biases.shape[-1] != n_groups:
+        raise ValueError(
+            f"{name}: scales/biases last axis must be {n_groups} groups "
+            f"(quantized dim {quant_dim} / group_size {group_size}); got "
+            f"scales {scales.shape[-1]}, biases {biases.shape[-1]}"
+        )
+
+
 def quantize(w, *, group_size=64, bits=4):
     """Affine group-wise quantize `w` along its last axis (MLX layout).
 
@@ -1006,11 +1035,20 @@ def quantize(w, *, group_size=64, bits=4):
     ``dequantize(packed, scales, biases) ~= w``. ``w``'s last dim must be a
     multiple of ``group_size`` and ``group_size*bits`` a multiple of 32.
     """
+    _check_quant_config(bits, group_size)
+    if w.shape[-1] % group_size != 0:
+        raise ValueError(
+            f"quantize: last axis ({w.shape[-1]}) must be a multiple of "
+            f"group_size ({group_size})"
+        )
     return _quantize_p.bind(w, group_size=group_size, bits=bits)
 
 
 def dequantize(packed, scales, biases, *, group_size=64, bits=4):
     """Reconstruct a float array from a ``quantize`` result."""
+    _check_quant_config(bits, group_size)
+    quant_dim = packed.shape[-1] * _quant_pack_factor(bits)
+    _check_group_shapes("dequantize", quant_dim, group_size, scales, biases)
     return _dequantize_p.bind(packed, scales, biases, group_size=group_size, bits=bits)
 
 
@@ -1022,6 +1060,16 @@ def quantized_matmul(
     With ``transpose=True`` (default) the packed weight is ``[out, in]`` and the
     result is ``x @ wᵀ`` of shape ``x.shape[:-1] + (out,)``.
     """
+    _check_quant_config(bits, group_size)
+    # The grouped (quantized) axis is `in` when transpose=True and `out` otherwise.
+    quant_dim = packed.shape[-1] * _quant_pack_factor(bits)
+    contract = quant_dim if transpose else packed.shape[-2]
+    if x.shape[-1] != contract:
+        raise ValueError(
+            f"quantized_matmul: x last axis ({x.shape[-1]}) must match the "
+            f"contraction dim ({contract}) for transpose={transpose}"
+        )
+    _check_group_shapes("quantized_matmul", quant_dim, group_size, scales, biases)
     return _quantized_matmul_p.bind(
         x, packed, scales, biases, transpose=transpose, group_size=group_size, bits=bits
     )
