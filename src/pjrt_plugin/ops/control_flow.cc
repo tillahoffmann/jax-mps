@@ -19,12 +19,14 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Matchers.h"
 #include "pjrt_plugin/ops/handler_utils.h"
+#include "pjrt_plugin/ops/metal_kernel_lib.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
 namespace jax_mps {
@@ -1512,6 +1514,284 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto out = mlx::core::quantized_matmul(*x, *packed, *scales, *biases, transpose, group_size,
                                                bits, "affine");
         values.emplace(ToKey(op->getResult(0)), std::move(out));
+        return true;
+    }
+
+    // Handle mps.metal_kernel_jit, run user-supplied MSL source via
+    // mlx::core::fast::metal_kernel with JIT runtime compilation.
+    // backend_config:
+    //   {"name": str, "source": str, "header": str,
+    //    "input_names": [str, ...], "output_names": [str, ...],
+    //    "grid": [x, y, z], "threadgroup": [x, y, z]}
+    // Operands map positionally to input_names; result types (shape + dtype) to
+    // output_names. `grid` is the total thread count per dim (MLX
+    // dispatchThreads); `threadgroup` is threads per group. Inputs are made
+    // row-contiguous so the source can index with baked strides.
+    if (callTargetName == "mps.metal_kernel_jit") {
+        auto bc = ParseBackendConfig(customCallOp);
+        auto nameOpt = bc.getString("name");
+        auto sourceOpt = bc.getString("source");
+        if (!nameOpt || !sourceOpt) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: backend_config missing name/source\n");
+            return false;
+        }
+        std::string header;
+        if (auto h = bc.getString("header"))
+            header = h->str();
+
+        auto readNames = [&](const char* key, std::vector<std::string>& out) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr)
+                return false;
+            for (auto& v : *arr) {
+                auto s = v.getAsString();
+                if (!s)
+                    return false;
+                out.emplace_back(s->str());
+            }
+            return true;
+        };
+        std::vector<std::string> input_names;
+        std::vector<std::string> output_names;
+        if (!readNames("input_names", input_names) || !readNames("output_names", output_names)) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: input_names/output_names missing or malformed\n");
+            return false;
+        }
+
+        auto readTriple = [&](const char* key, std::tuple<int, int, int>& out) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr || arr->size() != 3)
+                return false;
+            int vals[3];
+            for (int i = 0; i < 3; ++i) {
+                auto n = (*arr)[i].getAsInteger();
+                if (!n)
+                    return false;
+                vals[i] = static_cast<int>(*n);
+            }
+            out = std::make_tuple(vals[0], vals[1], vals[2]);
+            return true;
+        };
+        std::tuple<int, int, int> grid;
+        std::tuple<int, int, int> threadgroup;
+        if (!readTriple("grid", grid) || !readTriple("threadgroup", threadgroup)) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: grid/threadgroup missing or malformed\n");
+            return false;
+        }
+
+        if (op->getNumOperands() != input_names.size()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: %u operands but %zu input_names\n",
+                          op->getNumOperands(), input_names.size());
+            return false;
+        }
+        if (op->getNumResults() != output_names.size()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: %u results but %zu output_names\n",
+                          op->getNumResults(), output_names.size());
+            return false;
+        }
+
+        std::vector<mlx::core::array> inputs;
+        inputs.reserve(op->getNumOperands());
+        for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+            auto* v = RequireValue(values, op->getOperand(i), "mps.metal_kernel_jit");
+            if (!v)
+                return false;
+            inputs.push_back(*v);
+        }
+
+        std::vector<mlx::core::Shape> out_shapes;
+        std::vector<mlx::core::Dtype> out_dtypes;
+        out_shapes.reserve(op->getNumResults());
+        out_dtypes.reserve(op->getNumResults());
+        for (unsigned i = 0; i < op->getNumResults(); ++i) {
+            auto rt = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+            if (!rt) {
+                MPS_LOG_ERROR("mps.metal_kernel_jit: result %u is not RankedTensorType\n", i);
+                return false;
+            }
+            out_shapes.push_back(GetShape(rt));
+            out_dtypes.push_back(MlirTypeToMlxDtype(rt.getElementType()));
+        }
+
+        auto kernel = mlx::core::fast::metal_kernel(nameOpt->str(), input_names, output_names,
+                                                    sourceOpt->str(), header,
+                                                    /*ensure_row_contiguous=*/true,
+                                                    /*atomic_outputs=*/false);
+        auto results = kernel(inputs, out_shapes, out_dtypes, grid, threadgroup,
+                              /*template_args=*/{}, /*init_value=*/std::nullopt,
+                              /*verbose=*/false, {});
+        if (results.size() != op->getNumResults()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: kernel produced %zu outputs, expected %u\n",
+                          results.size(), op->getNumResults());
+            return false;
+        }
+        for (unsigned i = 0; i < op->getNumResults(); ++i)
+            values.emplace(ToKey(op->getResult(i)), std::move(results[i]));
+        return true;
+    }
+
+    // Handle mps.metal_kernel_lib, dispatch a named kernel from a precompiled .metallib.
+    // backend_config:
+    //   {"name": str, "metallib_path": str, "hash_name": str?,
+    //    "grid": [x,y,z], "threadgroup": [x,y,z],
+    //    "buffers": [{"slot": int, "kind": "input"|"output"|"bytes",
+    //                 "arg": int?, "bytes": [uint8...]?}, ...]?,
+    //    "function_constants": [{"index": int,
+    //                            "type": "bool"|"int"|"uint"|"float",
+    //                            "value": number}, ...]?}
+    // Without "buffers", operands bind to buffers 0..N-1 and results to
+    // N..N+M-1 (all made row-contiguous). Result types give output shapes/dtypes.
+    if (callTargetName == "mps.metal_kernel_lib") {
+        auto bc = ParseBackendConfig(customCallOp);
+        auto nameOpt = bc.getString("name");
+        auto pathOpt = bc.getString("metallib_path");
+        if (!nameOpt || !pathOpt) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: backend_config missing name/metallib_path\n");
+            return false;
+        }
+        std::string hash_name;
+        if (auto h = bc.getString("hash_name"))
+            hash_name = h->str();
+
+        auto readTriple = [&](const char* key, std::array<int, 3>& out) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr || arr->size() != 3)
+                return false;
+            for (int i = 0; i < 3; ++i) {
+                auto n = (*arr)[i].getAsInteger();
+                if (!n)
+                    return false;
+                out[i] = static_cast<int>(*n);
+            }
+            return true;
+        };
+        std::array<int, 3> grid{};
+        std::array<int, 3> threadgroup{};
+        if (!readTriple("grid", grid) || !readTriple("threadgroup", threadgroup)) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: grid/threadgroup missing or malformed\n");
+            return false;
+        }
+        // "dispatch": "threads" (grid = total threads, default) or
+        // "threadgroups" (grid = threadgroup count).
+        bool by_threadgroups = false;
+        if (auto disp = bc.getString("dispatch"))
+            by_threadgroups = (*disp == "threadgroups");
+
+        // Optional explicit buffer layout.
+        std::vector<mlx::core::MklBuffer> buffers;
+        if (auto* barr = bc.getArray("buffers")) {
+            for (auto& e : *barr) {
+                auto* obj = e.getAsObject();
+                if (!obj) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer entry not an object\n");
+                    return false;
+                }
+                mlx::core::MklBuffer b;
+                auto slot = obj->getInteger("slot");
+                auto kind = obj->getString("kind");
+                if (!slot || !kind) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer missing slot/kind\n");
+                    return false;
+                }
+                b.slot = static_cast<int>(*slot);
+                if (*kind == "input") {
+                    b.kind = mlx::core::MklBuffer::kInput;
+                    b.arg = static_cast<int>(obj->getInteger("arg").value_or(0));
+                } else if (*kind == "output") {
+                    b.kind = mlx::core::MklBuffer::kOutput;
+                    b.arg = static_cast<int>(obj->getInteger("arg").value_or(0));
+                } else if (*kind == "bytes") {
+                    b.kind = mlx::core::MklBuffer::kBytes;
+                    auto* data = obj->getArray("bytes");
+                    if (!data) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: bytes buffer missing data\n");
+                        return false;
+                    }
+                    b.bytes.reserve(data->size());
+                    for (auto& v : *data)
+                        b.bytes.push_back(static_cast<uint8_t>(v.getAsInteger().value_or(0)));
+                } else {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: unknown buffer kind\n");
+                    return false;
+                }
+                buffers.push_back(std::move(b));
+            }
+        }
+
+        // Optional function constants.
+        std::vector<mlx::core::MklConstant> constants;
+        if (auto* carr = bc.getArray("function_constants")) {
+            for (auto& e : *carr) {
+                auto* obj = e.getAsObject();
+                auto idx = obj ? obj->getInteger("index") : std::nullopt;
+                auto type = obj ? obj->getString("type") : std::nullopt;
+                if (!obj || !idx || !type) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: function_constant missing index/type\n");
+                    return false;
+                }
+                mlx::core::MklConstant c;
+                c.index = static_cast<int>(*idx);
+                if (*type == "bool") {
+                    c.type = mlx::core::MklConstant::kBool;
+                    uint8_t v = obj->getBoolean("value").value_or(false) ? 1 : 0;
+                    c.value = {v};
+                } else if (*type == "int") {
+                    c.type = mlx::core::MklConstant::kInt;
+                    int32_t v = static_cast<int32_t>(obj->getInteger("value").value_or(0));
+                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
+                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                } else if (*type == "uint") {
+                    c.type = mlx::core::MklConstant::kUint;
+                    uint32_t v = static_cast<uint32_t>(obj->getInteger("value").value_or(0));
+                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
+                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                } else if (*type == "float") {
+                    c.type = mlx::core::MklConstant::kFloat;
+                    float v = static_cast<float>(obj->getNumber("value").value_or(0.0));
+                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
+                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                } else {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: unknown constant type\n");
+                    return false;
+                }
+                constants.push_back(std::move(c));
+            }
+        }
+
+        std::vector<mlx::core::array> inputs;
+        inputs.reserve(op->getNumOperands());
+        for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+            auto* v = RequireValue(values, op->getOperand(i), "mps.metal_kernel_lib");
+            if (!v)
+                return false;
+            inputs.push_back(*v);
+        }
+
+        std::vector<mlx::core::Shape> out_shapes;
+        std::vector<mlx::core::Dtype> out_dtypes;
+        out_shapes.reserve(op->getNumResults());
+        out_dtypes.reserve(op->getNumResults());
+        for (unsigned i = 0; i < op->getNumResults(); ++i) {
+            auto rt = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+            if (!rt) {
+                MPS_LOG_ERROR("mps.metal_kernel_lib: result %u is not RankedTensorType\n", i);
+                return false;
+            }
+            out_shapes.push_back(GetShape(rt));
+            out_dtypes.push_back(MlirTypeToMlxDtype(rt.getElementType()));
+        }
+
+        auto results = mlx::core::metal_kernel_lib(
+            inputs, out_shapes, out_dtypes, pathOpt->str(), nameOpt->str(),
+            hash_name, grid, threadgroup, by_threadgroups, std::move(buffers),
+            std::move(constants));
+        if (results.size() != op->getNumResults()) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: kernel produced %zu outputs, expected %u\n",
+                          results.size(), op->getNumResults());
+            return false;
+        }
+        for (unsigned i = 0; i < op->getNumResults(); ++i)
+            values.emplace(ToKey(op->getResult(i)), std::move(results[i]));
         return true;
     }
 

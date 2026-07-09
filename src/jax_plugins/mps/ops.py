@@ -11,6 +11,8 @@ decompose to standard JAX ops.
 # pyright: reportArgumentType=false, reportOptionalCall=false
 # pyright: reportFunctionMemberAccess=false, reportCallIssue=false
 
+import json
+
 import jax
 import jax.numpy as jnp
 from jax._src import core
@@ -588,6 +590,227 @@ def gelu(x):
 
 
 # ---------------------------------------------------------------------------
+# User-defined Metal kernels
+# ---------------------------------------------------------------------------
+
+_metal_kernel_jit_p = core.Primitive("mps.metal_kernel_jit")
+_metal_kernel_jit_p.multiple_results = True
+
+
+def _metal_kernel_jit_abstract(
+    *inputs, name, source, header, input_names, output_names, grid, threadgroup,
+    out_shapes, out_dtypes,
+):
+    return tuple(
+        core.ShapedArray(shape, jnp.dtype(dtype))
+        for shape, dtype in zip(out_shapes, out_dtypes)
+    )
+
+
+_metal_kernel_jit_p.def_abstract_eval(_metal_kernel_jit_abstract)
+
+
+def _metal_kernel_jit_impl(*inputs, **params):
+    raise NotImplementedError(
+        "mps.metal_kernel_jit is only lowered on the MPS backend (no host/CPU "
+        "equivalent for arbitrary Metal source)."
+    )
+
+
+_metal_kernel_jit_p.def_impl(_metal_kernel_jit_impl)
+
+
+def _metal_kernel_jit_lowering(
+    ctx, *inputs, name, source, header, input_names, output_names, grid,
+    threadgroup, out_shapes, out_dtypes,
+):
+    cfg = {
+        "name": name,
+        "source": source,
+        "header": header,
+        "input_names": list(input_names),
+        "output_names": list(output_names),
+        "grid": [int(g) for g in grid],
+        "threadgroup": [int(t) for t in threadgroup],
+    }
+    return mlir.custom_call(
+        call_target_name="mps.metal_kernel_jit",
+        result_types=[_aval_to_ir_type(a) for a in ctx.avals_out],
+        operands=list(inputs),
+        backend_config=json.dumps(cfg),
+    ).results
+
+
+def metal_kernel_jit(
+    name, inputs, *, output_shapes, output_dtypes, grid, threadgroup, source,
+    header="", input_names=None, output_names=None,
+):
+    """JIT-compile and launch a Metal kernel from MSL source.
+
+    `source` is the MSL kernel body; reference inputs/outputs by their names
+    (input_names/output_names, default in0.. / out0..) as row-contiguous device
+    pointers. `grid` is the total thread count per dim, `threadgroup` the threads
+    per group. Outputs are allocated by MLX from output_shapes/output_dtypes.
+    """
+    inputs = [jnp.asarray(x) for x in inputs]
+    if input_names is None:
+        input_names = tuple(f"in{i}" for i in range(len(inputs)))
+    if output_names is None:
+        output_names = tuple(f"out{i}" for i in range(len(output_shapes)))
+    out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
+    out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
+    return _metal_kernel_jit_p.bind(
+        *inputs,
+        name=str(name),
+        source=str(source),
+        header=str(header),
+        input_names=tuple(input_names),
+        output_names=tuple(output_names),
+        grid=(int(grid[0]), int(grid[1]), int(grid[2])),
+        threadgroup=(int(threadgroup[0]), int(threadgroup[1]), int(threadgroup[2])),
+        out_shapes=out_shapes,
+        out_dtypes=out_dtypes,
+    )
+
+
+_metal_kernel_lib_p = core.Primitive("mps.metal_kernel_lib")
+_metal_kernel_lib_p.multiple_results = True
+
+
+def _metal_kernel_lib_abstract(
+    *inputs, name, metallib_path, hash_name, grid, threadgroup, dispatch,
+    buffers, function_constants, out_shapes, out_dtypes,
+):
+    return tuple(
+        core.ShapedArray(shape, jnp.dtype(dtype))
+        for shape, dtype in zip(out_shapes, out_dtypes)
+    )
+
+
+_metal_kernel_lib_p.def_abstract_eval(_metal_kernel_lib_abstract)
+
+
+def _metal_kernel_lib_impl(*inputs, **params):
+    raise NotImplementedError(
+        "mps.metal_kernel_lib is only lowered on the MPS backend."
+    )
+
+
+_metal_kernel_lib_p.def_impl(_metal_kernel_lib_impl)
+
+
+def _metal_kernel_lib_lowering(
+    ctx, *inputs, name, metallib_path, hash_name, grid, threadgroup, dispatch,
+    buffers, function_constants, out_shapes, out_dtypes,
+):
+    cfg = {
+        "name": name,
+        "metallib_path": metallib_path,
+        "grid": [int(g) for g in grid],
+        "threadgroup": [int(t) for t in threadgroup],
+    }
+    if hash_name:
+        cfg["hash_name"] = hash_name
+    if dispatch != "threads":
+        cfg["dispatch"] = dispatch
+    if buffers is not None:
+        cfg["buffers"] = [
+            {"slot": slot, "kind": kind}
+            | ({"bytes": list(payload)} if kind == "bytes" else {"arg": arg})
+            for (slot, kind, arg, payload) in buffers
+        ]
+    if function_constants is not None:
+        cfg["function_constants"] = [
+            {"index": idx, "type": typ, "value": val}
+            for (idx, typ, val) in function_constants
+        ]
+    return mlir.custom_call(
+        call_target_name="mps.metal_kernel_lib",
+        result_types=[_aval_to_ir_type(a) for a in ctx.avals_out],
+        operands=list(inputs),
+        backend_config=json.dumps(cfg),
+    ).results
+
+
+def _canon_buffers(buffers):
+    """Normalize buffer specs to a hashable tuple of (slot, kind, arg, bytes)."""
+    if buffers is None:
+        return None
+    out = []
+    for b in buffers:
+        slot = int(b["slot"])
+        if "input" in b:
+            out.append((slot, "input", int(b["input"]), None))
+        elif "output" in b:
+            out.append((slot, "output", int(b["output"]), None))
+        elif "bytes" in b:
+            out.append((slot, "bytes", None, bytes(b["bytes"])))
+        else:
+            raise ValueError("buffer spec needs one of 'input'/'output'/'bytes'")
+    return tuple(out)
+
+
+def _canon_function_constants(fcs):
+    """Normalize function-constant specs to a hashable tuple."""
+    if fcs is None:
+        return None
+    out = []
+    for c in fcs:
+        typ = str(c["type"])
+        val = c["value"]
+        val = bool(val) if typ == "bool" else float(val) if typ == "float" else int(val)
+        out.append((int(c["index"]), typ, val))
+    return tuple(out)
+
+
+def metal_kernel_lib(
+    name, inputs, *, metallib_path, output_shapes, output_dtypes, grid,
+    threadgroup, dispatch="threads", hash_name=None, buffers=None,
+    function_constants=None,
+):
+    """Dispatch a named kernel from a precompiled .metallib.
+
+    `name` is the kernel function's name inside the library at `metallib_path`.
+    `grid` is the total thread count per dim, `threadgroup` the threads per group.
+    Outputs are allocated from output_shapes/output_dtypes.
+
+    ``buffers=None``: operands bind to buffers 0..N-1 and outputs
+    to N..N+M-1, all row-contiguous.
+
+    Otherwise, ass `buffers` to place inputs/outputs/raw-bytes at explicit
+    slots, and `function_constants` to specialize the pipeline.
+
+    - `buffers`: list of dicts, each with ``"slot"`` and exactly one of
+      ``"input": operand_idx``, ``"output": result_idx``, or ``"bytes": bytes``.
+    - `function_constants`: list of dicts ``{"index", "type", "value"}`` where
+      type is one of ``"bool" | "int" | "uint" | "float"``.
+    - `hash_name`: pipeline cache key (defaults to `name`); give distinct keys to
+      distinct function-constant specializations of the same kernel.
+    - `dispatch`: ``"threads"`` (default; `grid` is the total thread count per
+      dim) or ``"threadgroups"`` (`grid` is the threadgroup count per dim, for
+      kernels that index by threadgroup_position_in_grid).
+    """
+    if dispatch not in ("threads", "threadgroups"):
+        raise ValueError("dispatch must be 'threads' or 'threadgroups'")
+    inputs = [jnp.asarray(x) for x in inputs]
+    out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
+    out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
+    return _metal_kernel_lib_p.bind(
+        *inputs,
+        name=str(name),
+        metallib_path=str(metallib_path),
+        hash_name=str(hash_name) if hash_name else "",
+        grid=(int(grid[0]), int(grid[1]), int(grid[2])),
+        threadgroup=(int(threadgroup[0]), int(threadgroup[1]), int(threadgroup[2])),
+        dispatch=str(dispatch),
+        buffers=_canon_buffers(buffers),
+        function_constants=_canon_function_constants(function_constants),
+        out_shapes=out_shapes,
+        out_dtypes=out_dtypes,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1104,6 +1327,8 @@ def register_fused_ops():
     primitives (sinh, cosh, asin, acos, atan, asinh, acosh, atanh, erf,
     erf_inv) that would otherwise decompose through CHLO.
     """
+    mlir.register_lowering(_metal_kernel_jit_p, _metal_kernel_jit_lowering, platform="mps")
+    mlir.register_lowering(_metal_kernel_lib_p, _metal_kernel_lib_lowering, platform="mps")
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
     mlir.register_lowering(_sdpa_causal_p, _sdpa_causal_lowering, platform="mps")
     mlir.register_lowering(_rms_norm_p, _rms_norm_lowering, platform="mps")
