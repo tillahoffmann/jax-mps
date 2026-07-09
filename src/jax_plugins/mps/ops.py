@@ -1010,6 +1010,8 @@ def _check_quant_config(bits, group_size):
         raise ValueError(
             f"quantization bits must be one of {_SUPPORTED_QUANT_BITS}, got {bits}"
         )
+    if group_size <= 0:
+        raise ValueError(f"group_size must be a positive integer, got {group_size}")
     if (group_size * bits) % 32 != 0:
         raise ValueError(
             "group_size * bits must be a multiple of 32 for uint32 packing; got "
@@ -1017,14 +1019,25 @@ def _check_quant_config(bits, group_size):
         )
 
 
-def _check_group_shapes(name, quant_dim, group_size, scales, biases):
-    """Check per-group scales/biases match the quantized axis length."""
+def _check_group_shapes(name, packed, quant_dim, group_size, scales, biases):
+    """Check per-group scales/biases match the quantized axis and packed prefix."""
+    if quant_dim % group_size != 0:
+        raise ValueError(
+            f"{name}: quantized dim ({quant_dim}) must be a multiple of "
+            f"group_size ({group_size})"
+        )
     n_groups = quant_dim // group_size
     if scales.shape[-1] != n_groups or biases.shape[-1] != n_groups:
         raise ValueError(
             f"{name}: scales/biases last axis must be {n_groups} groups "
             f"(quantized dim {quant_dim} / group_size {group_size}); got "
             f"scales {scales.shape[-1]}, biases {biases.shape[-1]}"
+        )
+    prefix = tuple(packed.shape[:-1])
+    if tuple(scales.shape[:-1]) != prefix or tuple(biases.shape[:-1]) != prefix:
+        raise ValueError(
+            f"{name}: scales/biases leading dims must match packed {prefix}; got "
+            f"scales {tuple(scales.shape[:-1])}, biases {tuple(biases.shape[:-1])}"
         )
 
 
@@ -1048,7 +1061,7 @@ def dequantize(packed, scales, biases, *, group_size=64, bits=4):
     """Reconstruct a float array from a ``quantize`` result."""
     _check_quant_config(bits, group_size)
     quant_dim = packed.shape[-1] * _quant_pack_factor(bits)
-    _check_group_shapes("dequantize", quant_dim, group_size, scales, biases)
+    _check_group_shapes("dequantize", packed, quant_dim, group_size, scales, biases)
     return _dequantize_p.bind(packed, scales, biases, group_size=group_size, bits=bits)
 
 
@@ -1069,7 +1082,9 @@ def quantized_matmul(
             f"quantized_matmul: x last axis ({x.shape[-1]}) must match the "
             f"contraction dim ({contract}) for transpose={transpose}"
         )
-    _check_group_shapes("quantized_matmul", quant_dim, group_size, scales, biases)
+    _check_group_shapes(
+        "quantized_matmul", packed, quant_dim, group_size, scales, biases
+    )
     return _quantized_matmul_p.bind(
         x, packed, scales, biases, transpose=transpose, group_size=group_size, bits=bits
     )

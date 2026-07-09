@@ -70,3 +70,28 @@ def make_quantized_op_configs():
                 differentiable_argnums=(0,),
                 grad_xfail=_QMATMUL_GRAD_XFAIL,
             )
+
+        # Non-default group_size (32) to exercise the packing/grouping layout
+        # beyond the gs=64 default, across both bit widths.
+        yield OperationTestConfig(
+            lambda w: dequantize(
+                *quantize(w, group_size=32, bits=8), group_size=32, bits=8
+            ),
+            lambda key: random.normal(key, (4, 64)),
+            name="quant_roundtrip_b8_gs32",
+            differentiable_argnums=(),
+        )
+        yield OperationTestConfig(
+            lambda x, w: quantized_matmul(
+                x,
+                *quantize(w, group_size=32, bits=4),
+                transpose=True,
+                group_size=32,
+                bits=4,
+            ),
+            lambda key: random.normal(key, (3, 64)),  # x: [M, in]
+            lambda key: random.normal(key, (8, 64)),  # w: [out, in]
+            name="quantized_matmul_b4_gs32",
+            differentiable_argnums=(0,),
+            grad_xfail=_QMATMUL_GRAD_XFAIL,
+        )
