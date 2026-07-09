@@ -4,6 +4,7 @@
 #include <mlx/compile.h>
 #include <mlx/fast.h>
 #include <mlx/linalg.h>
+#include <mlx/ops.h>
 #include <mlx/primitives.h>
 #include <mlx/random.h>
 #include <mlx/transforms.h>
@@ -1394,6 +1395,86 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto result =
             mlx::core::fast::scaled_dot_product_attention(*queries, *keys, *vals, scale, "causal");
         values.emplace(ToKey(op->getResult(0)), std::move(result));
+        return true;
+    }
+
+    // Handle mps.quantize — affine group-wise weight quantization.
+    // Input: w; outputs: packed (uint32), scales, biases.
+    // backend_config: {"group_size": <int>, "bits": <int>}
+    if (callTargetName == "mps.quantize") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 3) {
+            MPS_LOG_ERROR("mps.quantize: expected 1 input and 3 outputs\n");
+            return false;
+        }
+        auto* w = RequireValue(values, op->getOperand(0), "mps.quantize");
+        if (!w)
+            return false;
+        auto bc = ParseBackendConfig(customCallOp);
+        int group_size = 64;
+        int bits = 4;
+        if (auto v = bc.getNumber("group_size"))
+            group_size = static_cast<int>(*v);
+        if (auto v = bc.getNumber("bits"))
+            bits = static_cast<int>(*v);
+        auto outs = mlx::core::quantize(*w, group_size, bits, "affine");
+        values.emplace(ToKey(op->getResult(0)), std::move(outs[0]));
+        values.emplace(ToKey(op->getResult(1)), std::move(outs[1]));
+        values.emplace(ToKey(op->getResult(2)), std::move(outs[2]));
+        return true;
+    }
+
+    // Handle mps.dequantize — reconstruct a float matrix from quantize().
+    // Inputs: packed (uint32), scales, biases.
+    // backend_config: {"group_size": <int>, "bits": <int>}
+    if (callTargetName == "mps.dequantize") {
+        if (op->getNumOperands() != 3 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.dequantize: expected 3 inputs and 1 output\n");
+            return false;
+        }
+        auto* packed = RequireValue(values, op->getOperand(0), "mps.dequantize");
+        auto* scales = RequireValue(values, op->getOperand(1), "mps.dequantize");
+        auto* biases = RequireValue(values, op->getOperand(2), "mps.dequantize");
+        if (!packed || !scales || !biases)
+            return false;
+        auto bc = ParseBackendConfig(customCallOp);
+        int group_size = 64;
+        int bits = 4;
+        if (auto v = bc.getNumber("group_size"))
+            group_size = static_cast<int>(*v);
+        if (auto v = bc.getNumber("bits"))
+            bits = static_cast<int>(*v);
+        auto out = mlx::core::dequantize(*packed, *scales, *biases, group_size, bits, "affine");
+        values.emplace(ToKey(op->getResult(0)), std::move(out));
+        return true;
+    }
+
+    // Handle mps.quantized_matmul — x @ (quantized w) via MLX's fused kernel.
+    // Inputs: x, packed (uint32), scales, biases.
+    // backend_config: {"transpose": <0|1>, "group_size": <int>, "bits": <int>}
+    if (callTargetName == "mps.quantized_matmul") {
+        if (op->getNumOperands() != 4 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("mps.quantized_matmul: expected 4 inputs and 1 output\n");
+            return false;
+        }
+        auto* x = RequireValue(values, op->getOperand(0), "mps.quantized_matmul");
+        auto* packed = RequireValue(values, op->getOperand(1), "mps.quantized_matmul");
+        auto* scales = RequireValue(values, op->getOperand(2), "mps.quantized_matmul");
+        auto* biases = RequireValue(values, op->getOperand(3), "mps.quantized_matmul");
+        if (!x || !packed || !scales || !biases)
+            return false;
+        auto bc = ParseBackendConfig(customCallOp);
+        bool transpose = true;
+        int group_size = 64;
+        int bits = 4;
+        if (auto v = bc.getNumber("transpose"))
+            transpose = (*v != 0);
+        if (auto v = bc.getNumber("group_size"))
+            group_size = static_cast<int>(*v);
+        if (auto v = bc.getNumber("bits"))
+            bits = static_cast<int>(*v);
+        auto out = mlx::core::quantized_matmul(*x, *packed, *scales, *biases, transpose, group_size,
+                                               bits, "affine");
+        values.emplace(ToKey(op->getResult(0)), std::move(out));
         return true;
     }
 

@@ -12,9 +12,14 @@ from huggingface_hub import snapshot_download
 from model import Gemma, GemmaConfig
 from safetensors.numpy import load_file
 
+from jax_plugins.mps.ops import quantize
+
 
 def load_model(
-    model_id: str, dtype=jnp.float32
+    model_id: str,
+    dtype=jnp.float32,
+    quantize_lm_head: bool = False,
+    quantize_mlp_bits: int = 0,
 ) -> tuple[Gemma, spm.SentencePieceProcessor]:
     """Download and load a Gemma model and tokenizer from HuggingFace."""
     path = Path(
@@ -38,6 +43,8 @@ def load_model(
         rope_theta=cfg.get("rope_theta", 10000.0),
         rms_norm_eps=cfg.get("rms_norm_eps", 1e-6),
         dtype=dtype,
+        quantize_lm_head=quantize_lm_head,
+        quantize_mlp_bits=quantize_mlp_bits,
     )
 
     # Create model without allocating weights, then load from safetensors.
@@ -49,7 +56,16 @@ def load_model(
     def w(name):
         return jnp.array(tensors[name]).astype(dtype)
 
-    model.embed_tokens.embedding.set_value(w("model.embed_tokens.weight"))
+    embedding = w("model.embed_tokens.weight")
+    model.embed_tokens.embedding.set_value(embedding)
+    if quantize_lm_head:
+        # int8-quantize the tied LM head; keep the fp embedding for token lookup.
+        packed, scales, biases = quantize(
+            embedding, group_size=config.quant_group_size, bits=config.lm_head_bits
+        )
+        model.lm_head_packed.set_value(packed)
+        model.lm_head_scales.set_value(scales)
+        model.lm_head_biases.set_value(biases)
     model.norm.weight.set_value(w("model.norm.weight"))
     for i, layer in enumerate(model.layers):
         p = f"model.layers.{i}"
@@ -57,12 +73,20 @@ def load_model(
         layer.self_attn.k_proj.kernel.set_value(w(f"{p}.self_attn.k_proj.weight").T)
         layer.self_attn.v_proj.kernel.set_value(w(f"{p}.self_attn.v_proj.weight").T)
         layer.self_attn.o_proj.kernel.set_value(w(f"{p}.self_attn.o_proj.weight").T)
-        gate_w = w(f"{p}.mlp.gate_proj.weight").T
-        up_w = w(f"{p}.mlp.up_proj.weight").T
-        layer.mlp.gate_up_proj.kernel.set_value(
-            jnp.concatenate([gate_w, up_w], axis=-1)
-        )
-        layer.mlp.down_proj.kernel.set_value(w(f"{p}.mlp.down_proj.weight").T)
+        if quantize_mlp_bits:
+            # QuantizedLinear stores [out, in] weights (quantized along in).
+            gate_up = jnp.concatenate(
+                [w(f"{p}.mlp.gate_proj.weight"), w(f"{p}.mlp.up_proj.weight")], axis=0
+            )
+            layer.mlp.gate_up_proj.set_quantized(gate_up)
+            layer.mlp.down_proj.set_quantized(w(f"{p}.mlp.down_proj.weight"))
+        else:
+            gate_w = w(f"{p}.mlp.gate_proj.weight").T
+            up_w = w(f"{p}.mlp.up_proj.weight").T
+            layer.mlp.gate_up_proj.kernel.set_value(
+                jnp.concatenate([gate_w, up_w], axis=-1)
+            )
+            layer.mlp.down_proj.kernel.set_value(w(f"{p}.mlp.down_proj.weight").T)
         layer.input_layernorm.weight.set_value(w(f"{p}.input_layernorm.weight"))
         layer.post_attention_layernorm.weight.set_value(
             w(f"{p}.post_attention_layernorm.weight")
@@ -117,16 +141,26 @@ def generate(model, tokenizer, prompt, max_new_tokens=100):
     eos_id = tokenizer.eos_id()
     generated_ids = []
 
+    # Check for EOS in chunks rather than every token: a per-token int(token)
+    # host-syncs the GPU each step, serializing dispatch. Collecting a chunk on
+    # device and syncing once lets decode steps pipeline (and makes
+    # JAX_MPS_ASYNC_DISPATCH actually help instead of fighting the sync).
+    EOS_CHECK_INTERVAL = 16
     t0 = perf_counter()
-    for _ in range(max_new_tokens):
-        # Block on current token to check for EOS.
-        tok_id = int(token[0])
-        if tok_id == eos_id:
-            break
-        generated_ids.append(tok_id)
-        # Dispatch next decode step.
-        token, kv_cache = decode_step(state, token[None], kv_cache, pos)
-        pos += 1
+    stop = False
+    while len(generated_ids) < max_new_tokens and not stop:
+        n = min(EOS_CHECK_INTERVAL, max_new_tokens - len(generated_ids))
+        chunk = []
+        for _ in range(n):
+            chunk.append(token)
+            token, kv_cache = decode_step(state, token[None], kv_cache, pos)
+            pos += 1
+        # One host transfer for the whole chunk, then scan for EOS.
+        for tok_id in jax.device_get(jnp.concatenate(chunk)).tolist():
+            if tok_id == eos_id:
+                stop = True
+                break
+            generated_ids.append(tok_id)
     # Sync to include any in-flight computation in the timing.
     _ = token.block_until_ready()
     elapsed = perf_counter() - t0
@@ -149,6 +183,18 @@ if __name__ == "__main__":
         default="float32",
         choices=["float32", "float16", "bfloat16"],
     )
+    parser.add_argument(
+        "--quantize-lm-head",
+        action="store_true",
+        help="int8-quantize the tied LM-head matmul (~21%% of decode weight traffic).",
+    )
+    parser.add_argument(
+        "--quantize-mlp-bits",
+        type=int,
+        default=0,
+        choices=[0, 4, 8],
+        help="Quantize MLP dense layers to this bit width (0=off, ~72%% of traffic).",
+    )
     args = parser.parse_args()
 
     dtype = {"float32": jnp.float32, "float16": jnp.float16, "bfloat16": jnp.bfloat16}[
@@ -157,6 +203,11 @@ if __name__ == "__main__":
 
     print(f"JAX devices: {jax.devices()}")
     print(f"Dtype: {args.dtype}")
-    model, tokenizer = load_model(args.model, dtype=dtype)
+    model, tokenizer = load_model(
+        args.model,
+        dtype=dtype,
+        quantize_lm_head=args.quantize_lm_head,
+        quantize_mlp_bits=args.quantize_mlp_bits,
+    )
     print(f"Prompt: {args.prompt}")
     generate(model, tokenizer, args.prompt, args.max_tokens)
