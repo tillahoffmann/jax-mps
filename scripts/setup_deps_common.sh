@@ -12,8 +12,12 @@ JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}"
 BUILD_DIR="${BUILD_DIR:-/tmp/jax-mps-deps-build}"
 FORCE_REBUILD=false
 
-# Pin the macOS deployment target for all deps;  MLX requires macOS >= 14.0
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+# Pin the macOS deployment target for all deps so their binaries run on the
+# minimum supported macOS (MLX requires >= 14.0) rather than the build host.
+# The value lives in the top-level `macos-deployment-target` file (single source
+# of truth, also read by CMakeLists.txt and .github/workflows/build.yml).
+export MACOSX_DEPLOYMENT_TARGET="$(<"$REPO_ROOT/macos-deployment-target")"
+echo "setup_deps: building dependencies for macOS >= $MACOSX_DEPLOYMENT_TARGET" >&2
 
 while [[ $# -gt 0 ]]; do
     case $1 in
