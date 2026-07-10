@@ -95,6 +95,7 @@ class OperationTestConfig:
         grad_xfail_strict: bool = True,
         name: str | None = None,
         seed: int = 42,
+        config_overrides: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         self.func = func
@@ -102,6 +103,10 @@ class OperationTestConfig:
         self.static_argnums = static_argnums
         self.grad_transform = grad_transform or jax.grad
         self.grad_xfail = grad_xfail
+        # jax.config flags to apply (and restore) around evaluation. Needed for
+        # flags read at lowering time, e.g. jax_threefry_partitionable, which a
+        # config-construction-time toggle would not capture.
+        self.config_overrides = config_overrides or {}
         # When False, the grad xfail is non-strict: the test may pass (xpass) or
         # fail (xfail) without erroring. Use for intermittent/flaky failures.
         self.grad_xfail_strict = grad_xfail_strict
@@ -163,8 +168,27 @@ class OperationTestConfig:
                 differentiable_argnums.append(argnum)
         return tuple(differentiable_argnums)
 
+    @contextmanager
+    def _apply_config_overrides(self):
+        """Apply self.config_overrides as jax.config flags, restoring after."""
+        if not self.config_overrides:
+            yield
+            return
+        previous = {k: getattr(jax.config, k) for k in self.config_overrides}
+        for k, v in self.config_overrides.items():
+            jax.config.update(k, v)
+        try:
+            yield
+        finally:
+            for k, v in previous.items():
+                jax.config.update(k, v)
+
     def evaluate_value(self, jit: bool):
         """Evaluate the output of the operation."""
+        with self._apply_config_overrides():
+            return self._evaluate_value(jit)
+
+    def _evaluate_value(self, jit: bool):
         key = random.key(self.seed)
         args_key, kwargs_key = random.split(key)
         args = self.get_args(args_key)
@@ -185,6 +209,10 @@ class OperationTestConfig:
     def evaluate_grad(self, argnum: int, jit: bool) -> tuple[jnp.ndarray]:
         """Evaluate the gradient of the operation. If the operation returns a tuple of
         values, gradients are evaluated for each element."""
+        with self._apply_config_overrides():
+            return self._evaluate_grad(argnum, jit)
+
+    def _evaluate_grad(self, argnum: int, jit: bool) -> tuple[jnp.ndarray]:
         key = random.key(self.seed)
         args_key, kwargs_key = random.split(key)
         args = self.get_args(args_key)
