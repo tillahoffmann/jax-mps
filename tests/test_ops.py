@@ -371,7 +371,9 @@ def test_threefry2x32_lowers_to_custom_call() -> None:
     with jax.default_device(device):
         key = random.key(0)
         ir_text = str(
-            jax.jit(lambda k: random.bits(k, shape=(16,))).lower(key).as_text()
+            jax.jit(lambda k: random.bits(k, shape=(16,)))
+            .lower(key)
+            .compiler_ir(dialect="stablehlo")
         )
     assert "@mps.threefry2x32" in ir_text, (
         f"Expected `@mps.threefry2x32` in lowered IR; got:\n{ir_text}"

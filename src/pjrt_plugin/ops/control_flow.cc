@@ -1643,6 +1643,16 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             values.emplace(ToKey(op->getResult(1)), mlx::core::zeros(outShape, mlx::core::uint32));
             return true;
         }
+        // The flat length and 1-D grid extent are int32; a larger element count
+        // would silently truncate. Fail loudly instead (a >2^31-element RNG draw
+        // is ~8+ GiB and not something the Metal dispatch can address anyway).
+        if (total > std::numeric_limits<int32_t>::max()) {
+            MPS_LOG_ERROR(
+                "mps.threefry2x32: output element count %lld exceeds the "
+                "maximum addressable by the Metal dispatch (2^31-1)\n",
+                static_cast<long long>(total));
+            return false;
+        }
 
         // Broadcast every operand to the output shape so the kernel is a flat
         // elementwise map (keys are typically scalars, counts the full shape).

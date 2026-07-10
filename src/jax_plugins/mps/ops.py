@@ -735,11 +735,11 @@ def _threefry2x32_lowering(ctx, k1, k2, x1, x2):
     if 0 in aval_out.shape:
         zeros = mlir.full_like_aval(ctx, 0, aval_out)
         return [zeros, zeros]
-    out_type = _aval_to_ir_type(aval_out)
     return mlir.custom_call(
         call_target_name="mps.threefry2x32",
-        result_types=[out_type, out_type],
+        result_types=[_aval_to_ir_type(a) for a in ctx.avals_out],
         operands=[k1, k2, x1, x2],
+        backend_config="",
     ).results
 
 
