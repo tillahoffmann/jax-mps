@@ -7,6 +7,7 @@
 #include <mlx/ops.h>
 #include <mlx/primitives.h>
 #include <mlx/random.h>
+#include <mlx/scheduler.h>
 #include <mlx/transforms.h>
 
 #include <algorithm>
@@ -29,6 +30,21 @@
 namespace jax_mps {
 
 namespace {
+
+// Complete all in-flight GPU work before a control-flow primitive touches
+// its inputs (jax-mps#195). WhileLoopPrimitive / CasePrimitive run on the
+// CPU stream *inside* an enclosing eval pass; their inputs typically have
+// status == evaluated, which only means the producing kernels were ENCODED —
+// the GPU command buffer may not have been committed, let alone completed.
+// MLX's eval fences only inputs that were unscheduled within the same pass,
+// so nothing orders the primitive's re-entrant evals and scalar readbacks
+// (case index, while cond, trip count) after the producing GPU work. The
+// race was caught red-handed on the jax-mps#195 MRE: the case branch index
+// read garbage (e.g. 73, or a float bit-pattern) before a GPU sync and the
+// true 0/1 after, silently selecting the wrong branch.
+void SyncGpuStream() {
+    mlx::core::synchronize(mlx::core::default_stream(mlx::core::Device::gpu));
+}
 
 // Shared unary op table used by both the mhlo.* custom_call path (HandleCustomCall)
 // and the chlo.* composite path (HandleComposite). Keyed by the bare op name as a
@@ -424,6 +440,11 @@ public:
 private:
     void eval_impl(const std::vector<mlx::core::array>& inputs,
                    std::vector<mlx::core::array>& outputs) {
+        // Order this loop's readbacks and body evals after all in-flight GPU
+        // work (see SyncGpuStream): the trip-count scalars and the first
+        // iteration's body read the primitive's inputs, which the enclosing
+        // eval pass may still be producing.
+        SyncGpuStream();
         // inputs = loopVars (nLoopVars_) + external values (nExt_)
         std::vector<mlx::core::array> current(inputs.begin(), inputs.end());
 
@@ -474,6 +495,10 @@ private:
                         mlx::core::eval(vars);
                     else
                         mlx::core::async_eval(vars);
+                    // Surface exceptions parked by stream worker threads (MLX
+                    // patch 10): a failed body kernel otherwise feeds garbage
+                    // into subsequent iterations while the error stays hidden.
+                    mlx::core::scheduler::rethrow_pending_exception();
                 }
             }
         } else {
@@ -497,6 +522,10 @@ private:
                 // Synchronous eval — bounded graph, no accumulation, safe
                 // re-entry for nested WhileLoopPrimitives.
                 mlx::core::eval(combined);
+                // Surface parked stream-thread exceptions before reading the
+                // cond scalar: a failed body kernel would otherwise yield a
+                // garbage condition and can spin the loop indefinitely.
+                mlx::core::scheduler::rethrow_pending_exception();
 
                 // Update loop vars from combined[1..nLoopVars]
                 for (size_t j = 0; j < nLoopVars_; ++j)
@@ -511,6 +540,7 @@ private:
         std::vector<mlx::core::array> finalVars(current.begin(),
                                                 current.begin() + static_cast<Diff>(nLoopVars_));
         mlx::core::eval(finalVars);
+        mlx::core::scheduler::rethrow_pending_exception();
 
         for (size_t i = 0; i < nLoopVars_; ++i)
             outputs[i].copy_shared_buffer(current[i]);
@@ -626,6 +656,10 @@ private:
             throw std::runtime_error("CasePrimitive: expected " + std::to_string(nExt_) +
                                      " inputs, got " + std::to_string(inputs.size()));
 
+        // Order the index readback and branch eval after all in-flight GPU
+        // work (see SyncGpuStream): both read this primitive's inputs, which
+        // the enclosing eval pass may still be producing (jax-mps#195).
+        SyncGpuStream();
         // Evaluate the index via the compiled index function.
         // This correctly re-computes the index from function arguments at
         // runtime, avoiding stale values from mx::compile's graph caching.
@@ -649,6 +683,9 @@ private:
 
         // Synchronous eval — single branch execution, bounded graph.
         mlx::core::eval(branchResults);
+        // Surface parked stream-thread exceptions (MLX patch 10) instead of
+        // copying never-written buffers into the case outputs.
+        mlx::core::scheduler::rethrow_pending_exception();
 
         for (size_t i = 0; i < nOutputs_; ++i)
             outputs[i].copy_shared_buffer(branchResults[i]);

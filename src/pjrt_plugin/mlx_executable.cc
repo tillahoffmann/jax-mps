@@ -7,6 +7,7 @@
 #include <mlx/memory.h>
 #include <mlx/mlx.h>
 #include <mlx/primitives.h>
+#include <mlx/scheduler.h>
 
 #include <cctype>
 #include <chrono>
@@ -870,6 +871,16 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
                 auto test_outputs = compiled_fn_(inputArrays);
                 if (!test_outputs.empty()) {
                     mlx::core::eval(test_outputs);
+                    // An exception thrown by a primitive's eval on a stream
+                    // worker thread is caught there (MLX patch 10) and parked;
+                    // eval() above can complete without traversing an
+                    // array::wait() that would rethrow it. Probe explicitly so
+                    // a failed trace run triggers the catch below (falling back
+                    // to the eager path) instead of returning outputs whose
+                    // producing task died — i.e. never-written buffers. Also
+                    // consumes the parked exception so it cannot poison the
+                    // eager fallback run.
+                    mlx::core::scheduler::rethrow_pending_exception();
                     compile_succeeded_ = true;
                     outputs = std::move(test_outputs);
                     MPS_LOG_INFO("MLX compile() succeeded - using compiled execution path\n");
@@ -933,6 +944,14 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
             } else {
                 mlx::core::eval(outputs);
             }
+            // Surface exceptions parked by stream worker threads (MLX patch
+            // 10) that the eval above did not traverse an array::wait() for.
+            // Without this, a primitive whose eval threw (e.g. an unencodable
+            // kernel) leaves its outputs as never-written buffers and the
+            // Execute "succeeds" with garbage. Async note: work still in
+            // flight after async_eval surfaces later parked exceptions at the
+            // buffer/event wait, which goes through array::wait().
+            mlx::core::scheduler::rethrow_pending_exception();
         } catch (const std::exception& e) {
             MPS_LOG_ERROR("MLX evaluation failed: %s\n", e.what());
             result.error_message = std::string("eval: ") + e.what();

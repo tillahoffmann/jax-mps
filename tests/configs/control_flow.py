@@ -261,6 +261,31 @@ def make_control_flow_op_configs():
                 differentiable_argnums=(),
                 name="lax.while_loop.one_iter",
             ),
+            # Many live carries: the compiled body+cond function emits fused
+            # elementwise segments with ~30 outputs. MLX must split these to
+            # respect Metal's 31-argument-buffer kernel limit (vendored MLX
+            # patch 13); before that guard, fusion produced an unencodable
+            # kernel whose eval-time throw on a stream worker thread was
+            # swallowed, silently leaving the loop outputs as never-written
+            # buffers (the numpyro.Binomial first-call corruption).
+            OperationTestConfig(
+                lambda init: sum(
+                    lax.while_loop(
+                        lambda state: state[0] < 3,
+                        lambda state: (
+                            (state[0] + 1,)
+                            + tuple(
+                                x + (state[1] * 0.5 + 1.0) * (k + 1)
+                                for k, x in enumerate(state[1:])
+                            )
+                        ),
+                        (numpy.int32(0),) + tuple(init + k for k in range(28)),
+                    )[1:]
+                ),
+                numpy.linspace(0.0, 1.0, 4, dtype=numpy.float32),
+                differentiable_argnums=(),
+                name="lax.while_loop.many_carries",
+            ),
             # Array operations along axis 1
             OperationTestConfig(
                 lambda init: lax.while_loop(
@@ -425,12 +450,10 @@ def make_control_flow_op_configs():
                     x,
                 ),
                 numpy.float32(1.0),
-                # Grad through fori+nested cond produces nondeterministic wrong
-                # values on MPS — pre-existing miscompile also present on main
-                # (branch residuals appear to be dropped in the backward pass),
-                # unrelated to the counted-loop fast path. Tracked in issue #195;
-                # enabling grads here is the regression test once fixed.
-                differentiable_argnums=(),
+                # Grads exercise the issue-#195 fix: the backward scan's
+                # nested-cond branch index was read before the GPU work
+                # producing it completed (control-flow primitives now
+                # synchronize the GPU stream at eval entry).
                 name="lax.fori_loop.long_nested_cond",
             ),
             # fori_loop with a traced (runtime) upper bound — the while cond's

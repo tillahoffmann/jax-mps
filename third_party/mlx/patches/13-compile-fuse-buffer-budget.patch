@@ -1,0 +1,67 @@
+Enforce the Metal argument-buffer budget at fusion time.
+
+mx::compile's greedy kernel fusion (compile_fuse) bounds only the number
+of segment INPUTS (max_compile_arrays, leakily), but the generated Metal
+kernel binds non-constant inputs AND outputs AND up to three auxiliary
+buffers (in_strides, output_shape/size, ndim) against Metal's 31-buffer
+limit. A segment with many outputs (e.g. a compiled while-loop body whose
+loop carries and cond intermediates are all segment outputs) produces a
+kernel that backend/metal/compiled.cpp rejects with "[compile] Too many
+inputs/outputs fused in the Metal Compiled primitive ..." -- but only at
+EVAL time, on a stream worker thread. In jax-mps that exception is caught
+by the scheduler (patch 10) and can be effectively swallowed by fallback
+paths, leaving the primitive's outputs as never-written buffers: silent
+nondeterministic garbage instead of an error (jax-mps#170, #195, and the
+numpyro.Binomial first-call corruption found while fixing #196).
+
+This patch computes the worst-case buffer count when the segment is
+finalized and skips fusing the segment root if it cannot be encoded. The
+interior nodes are revisited later in the reverse-tape walk and fuse into
+smaller, encodable segments, so this only splits over-budget kernels.
+
+Candidate for upstreaming (the runtime error message itself asks for an
+issue to be filed).
+
+diff --git a/mlx/compile.cpp b/mlx/compile.cpp
+index 14d1a64..14feacc 100644
+--- a/mlx/compile.cpp
++++ b/mlx/compile.cpp
+@@ -966,6 +966,38 @@ void compile_fuse(
+     };
+     recurse_tape(arr);
+ 
++    // jax-mps: reject fused segments whose Metal kernel cannot be encoded.
++    // The Compiled kernel binds every non-constant input and every output as
++    // an argument buffer, plus up to three auxiliary buffers (in_strides,
++    // output_shape or size, ndim), against Metal's 31-buffer limit (see
++    // backend/metal/compiled.cpp). The greedy segment search above bounds
++    // inputs only, so a segment with many outputs previously produced a
++    // kernel that throws at eval time -- on a stream worker thread, where the
++    // error can be swallowed and the outputs silently left as never-written
++    // buffers (jax-mps#170/#195/#196). Skipping fusion for this root is
++    // always safe: its interior nodes are revisited later in the reverse-tape
++    // walk and fuse into smaller, encodable segments.
++    {
++      int n_outputs = 1; // arr itself is always a segment output
++      for (int j = 0; j + 1 < static_cast<int>(fused_tape.size()); ++j) {
++        if (output_map.find(fused_tape[j].id()) != output_map.end()) {
++          n_outputs++;
++        }
++      }
++      int n_buffers = n_outputs + 3;
++      for (auto& in : inputs) {
++        bool is_const = in.size() == 1 && !in.has_primitive() &&
++            input_ids.find(in.id()) == input_ids.end();
++        if (!is_const) {
++          n_buffers++;
++        }
++      }
++      if (n_buffers > 31) {
++        new_tape.push_back(arr);
++        continue;
++      }
++    }
++
+     std::vector<array> old_outputs;
+     // Add to global cache and add any global outputs to outputs
+     // of new primitive
