@@ -354,3 +354,48 @@ def test_rng_bit_generator() -> None:
         new_state2, output2 = lax.rng_bit_generator(state, (8,))
         assert jnp.array_equal(output2, output)
         assert jnp.array_equal(new_state2, new_state)
+
+
+def test_threefry2x32_lowers_to_custom_call() -> None:
+    """Regression: jax.random must lower to our fused @mps.threefry2x32 custom
+    call (issue #196) rather than JAX's ~140-op inline PRNG expansion. A future
+    JAX change that drops the mps-platform lowering would make this fail."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    device = jax.devices("mps")[0]
+    with jax.default_device(device):
+        key = random.key(0)
+        ir_text = str(
+            jax.jit(lambda k: random.bits(k, shape=(16,))).lower(key).as_text()
+        )
+    assert "@mps.threefry2x32" in ir_text, (
+        f"Expected `@mps.threefry2x32` in lowered IR; got:\n{ir_text}"
+    )
+
+
+@pytest.mark.parametrize("partitionable", [True, False])
+def test_threefry_partitionable(partitionable: bool) -> None:
+    """threefry2x32 is bit-exact with the CPU backend under both settings of
+    jax_threefry_partitionable, which selects different count-packing lowerings
+    around the same primitive (issue #196)."""
+    if TEST_MODE != "compare":
+        pytest.skip("Requires both CPU and MPS to compare")
+
+    def fn(key):
+        k1, k2 = random.split(key)
+        return random.randint(k1, (257,), 0, 2**31 - 1), random.bits(k2, shape=(257,))
+
+    prev = jax.config.jax_threefry_partitionable  # pyright: ignore[reportAttributeAccessIssue]
+    jax.config.update("jax_threefry_partitionable", partitionable)
+    try:
+        results = []
+        for platform in ("cpu", "mps"):
+            with jax.default_device(jax.devices(platform)[0]):
+                results.append(jax.jit(fn)(random.key(21)))
+        for cpu_arr, mps_arr in zip(*results):
+            numpy.testing.assert_array_equal(
+                numpy.asarray(cpu_arr), numpy.asarray(mps_arr)
+            )
+    finally:
+        jax.config.update("jax_threefry_partitionable", prev)

@@ -11,6 +11,8 @@ decompose to standard JAX ops.
 # pyright: reportArgumentType=false, reportOptionalCall=false
 # pyright: reportFunctionMemberAccess=false, reportCallIssue=false
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 from jax._src import core
@@ -715,6 +717,32 @@ def _make_native_unary_lowering(call_target_name):
     return _lowering
 
 
+def _threefry2x32_lowering(ctx, k1, k2, x1, x2):
+    """MPS lowering for JAX's threefry2x32 PRNG primitive.
+
+    Emits a ``stablehlo.custom_call @mps.threefry2x32`` that the C++ backend
+    dispatches to a single fused Metal kernel, instead of JAX's default inline
+    expansion into ~140 tiny elementwise ops (issue #196). Inside a compiled
+    loop body those ops each cost ~1.5us of dispatch, so a single random.split
+    in a fori_loop body ran ~30x slower than an arithmetic-only body.
+
+    The primitive is elementwise-with-broadcasting over four equal-dtype uint32
+    operands; the backend broadcasts them to the (shared) output shape, so we
+    can hand the operands through unchanged. Only the zero-sized case is special
+    (nothing to hash), mirroring JAX's CUDA lowering.
+    """
+    aval_out, _ = ctx.avals_out
+    if 0 in aval_out.shape:
+        zeros = mlir.full_like_aval(ctx, 0, aval_out)
+        return [zeros, zeros]
+    out_type = _aval_to_ir_type(aval_out)
+    return mlir.custom_call(
+        call_target_name="mps.threefry2x32",
+        result_types=[out_type, out_type],
+        operands=[k1, k2, x1, x2],
+    ).results
+
+
 def _logistic_lowering(ctx, x, *, accuracy=None):
     """MPS lowering for logistic_p: emit a native stablehlo.logistic op.
 
@@ -1167,6 +1195,25 @@ def register_fused_ops():
     # logistic_p decomposes to 1/(1+exp(-x)) upstream; on MPS keep it as a
     # single stablehlo.logistic that dispatches to mlx::core::sigmoid.
     mlir.register_lowering(lax_lax.logistic_p, _logistic_lowering, platform="mps")
+
+    # threefry2x32: JAX inlines the PRNG round schedule as ~140 elementwise ops
+    # (no mps-platform lowering exists, unlike CUDA's cu_threefry2x32 custom
+    # call). Route it to a fused Metal kernel so jax.random inside a loop body
+    # stays on the counted-loop fast path (issue #196). prng is private jax
+    # internals; if the import ever breaks, fall back to the generic inline
+    # expansion — correct, just slower.
+    try:
+        from jax._src import prng
+
+        mlir.register_lowering(
+            prng.threefry2x32_p, _threefry2x32_lowering, platform="mps"
+        )
+    except Exception as e:  # pragma: no cover - defensive against jax internals
+        warnings.warn(
+            f"jax-mps: could not register fused threefry2x32 lowering ({e}); "
+            "jax.random will use the slower default expansion.",
+            stacklevel=2,
+        )
 
     # Fallback lowerings for non-MPS platforms (CPU, GPU).
     mlir.register_lowering(

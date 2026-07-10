@@ -31,6 +31,19 @@ def make_random_op_configs():
                 OperationTestConfig(
                     random.split, random.key(18), 5, static_argnums=(1,)
                 ),
+                # Exercises threefry2x32 directly (issue #196): integer outputs
+                # are compared MPS-vs-CPU exactly, so these pin bit-exactness of
+                # the fused Metal kernel to JAX's CPU backend.
+                OperationTestConfig(
+                    random.bits, random.key(19), shape, static_argnums=(1,)
+                ),
+                OperationTestConfig(
+                    lambda key, shape: random.randint(key, shape, 0, 1_000_000),
+                    random.key(20),
+                    shape,
+                    static_argnums=(1,),
+                    name="randint",
+                ),
             ]
         # Bug: indexing into split result differs on MPS vs CPU in eager mode.
         # JIT compiles around the bug; only eager exposes it.
