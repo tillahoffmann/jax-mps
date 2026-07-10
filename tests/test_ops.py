@@ -374,28 +374,51 @@ def test_threefry2x32_lowers_to_custom_call() -> None:
     )
 
 
-@pytest.mark.parametrize("partitionable", [True, False])
-def test_threefry_partitionable(partitionable: bool) -> None:
-    """threefry2x32 is bit-exact with the CPU backend under both settings of
-    jax_threefry_partitionable, which selects different count-packing lowerings
-    around the same primitive (issue #196)."""
+@pytest.mark.parametrize("partitionable", [False, True])
+@pytest.mark.parametrize(
+    "shape",
+    [(), (4,), (7,), (3, 5), (257,)],
+    ids=["scalar", "even", "odd", "2d", "big"],
+)
+def test_threefry_bit_exact(partitionable: bool, shape) -> None:
+    """threefry RNG must be bit-exact with the CPU backend across shapes
+    (scalar, even, odd, multi-dim, and a large odd size that exercises the
+    odd/even split boundary), bit widths (uint8/16/32), and both settings of
+    ``jax_threefry_partitionable`` (which select different count-packing
+    lowerings around the same primitive — issue #196).
+
+    This is the regression net for any future kernel that absorbs the packing
+    wrapper (issue #210): today it passes because JAX still owns the layout, so
+    it will light up the moment a layout-owning kernel gets a variant wrong.
+    64-bit (uint64) is not covered here — it needs JAX_ENABLE_X64 (otherwise it
+    truncates to uint32); the #210 64-bit kernel should add an x64 test.
+    """
     if TEST_MODE != "compare":
         pytest.skip("Requires both CPU and MPS to compare")
 
     def fn(key):
-        k1, k2 = random.split(key)
-        return random.randint(k1, (257,), 0, 2**31 - 1), random.bits(k2, shape=(257,))
+        outs = {
+            # split exercises the key-derivation path (shape-independent, but
+            # its own count layout differs between the two flag settings).
+            "split": random.key_data(random.split(key, 3)),
+            "randint": random.randint(key, shape, 0, 2**31 - 1),
+        }
+        for dt in (jnp.uint8, jnp.uint16, jnp.uint32):
+            outs[f"bits_{dt.__name__}"] = random.bits(key, shape, dtype=dt)
+        return outs
 
     prev = jax.config.jax_threefry_partitionable  # pyright: ignore[reportAttributeAccessIssue]
     jax.config.update("jax_threefry_partitionable", partitionable)
     try:
-        results = []
+        results = {}
         for platform in ("cpu", "mps"):
             with jax.default_device(jax.devices(platform)[0]):
-                results.append(jax.jit(fn)(random.key(21)))
-        for cpu_arr, mps_arr in zip(*results):
+                results[platform] = jax.jit(fn)(random.key(21))
+        for name in results["cpu"]:
             numpy.testing.assert_array_equal(
-                numpy.asarray(cpu_arr), numpy.asarray(mps_arr)
+                numpy.asarray(results["cpu"][name]),
+                numpy.asarray(results["mps"][name]),
+                err_msg=f"{name} mismatch (partitionable={partitionable}, shape={shape})",
             )
     finally:
         jax.config.update("jax_threefry_partitionable", prev)
