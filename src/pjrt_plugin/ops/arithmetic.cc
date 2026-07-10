@@ -5,6 +5,29 @@
 
 namespace jax_mps {
 
+std::optional<int64_t> GetSplatIntConstant(mlir::Value v) {
+    // Look through broadcasts: splat constants commonly reach consumers as
+    // broadcast_in_dim(constant).
+    while (auto bcast = v.getDefiningOp<mlir::stablehlo::BroadcastInDimOp>())
+        v = bcast.getOperand();
+    auto constOp = v.getDefiningOp<mlir::stablehlo::ConstantOp>();
+    if (!constOp)
+        return std::nullopt;
+    auto attr = mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+    if (!attr || !attr.isSplat())
+        return std::nullopt;
+    auto intType = mlir::dyn_cast<mlir::IntegerType>(attr.getElementType());
+    if (!intType)
+        return std::nullopt;
+    llvm::APInt val = attr.getSplatValue<llvm::APInt>();
+    if (intType.isUnsigned()) {
+        if (val.getActiveBits() > 63)
+            return std::nullopt;
+        return static_cast<int64_t>(val.getZExtValue());
+    }
+    return val.getSExtValue();
+}
+
 namespace {
 
 // Handler for stablehlo.clamp
@@ -42,7 +65,9 @@ bool HandleRemainder(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
         // For signed integers, Python remainder (rounds toward -inf) needs correction
         // to C-style remainder (truncates toward zero)
         auto py_rem = mlx::core::remainder(*a, *b);
-        auto zero = mlx::core::zeros_like(*a);
+        // Scalar constant (not zeros_like): a Full node is not fusable by
+        // mx::compile, so it would cost a kernel dispatch per evaluation.
+        auto zero = mlx::core::array(0, a->dtype());
         auto diff_sign = mlx::core::not_equal(mlx::core::less(*a, zero), mlx::core::less(*b, zero));
         auto needs_fix = mlx::core::logical_and(mlx::core::not_equal(py_rem, zero), diff_sign);
         result = mlx::core::where(needs_fix, mlx::core::subtract(py_rem, *b), py_rem);
@@ -79,9 +104,7 @@ bool HandleNot(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::arr
     if (x->dtype() == mlx::core::bool_) {
         values.emplace(ToKey(op->getResult(0)), mlx::core::logical_not(*x));
     } else {
-        // Bitwise NOT for integers: ~x = x XOR all-ones
-        auto all_ones = mlx::core::full(x->shape(), -1, x->dtype());
-        values.emplace(ToKey(op->getResult(0)), mlx::core::bitwise_xor(*x, all_ones));
+        values.emplace(ToKey(op->getResult(0)), mlx::core::bitwise_invert(*x));
     }
     return true;
 }
@@ -96,15 +119,26 @@ bool HandleShiftRightArithmetic(mlir::Operation* op, ValueMap& values,
     // StableHLO spec: shift < 0 or shift >= bit_width for arithmetic right shift:
     // positive values -> 0, negative values -> -1 (sign bit propagation)
     int bit_width = static_cast<int>(GetDtypeSize(lhs->dtype()) * 8);
+    // Fast path: in-range compile-time constant shift amount. A single MLX op
+    // (right_shift is sign-propagating for signed dtypes) instead of the OOB
+    // subgraph below — inside compiled loop bodies every extra graph node is
+    // a kernel dispatch (jax-mps#196).
+    if (auto amount = GetSplatIntConstant(op->getOperand(1));
+        amount && *amount >= 0 && *amount < bit_width) {
+        values.emplace(ToKey(op->getResult(0)), mlx::core::right_shift(*lhs, *rhs));
+        return true;
+    }
     auto oob = mlx::core::logical_or(
         mlx::core::less(*rhs, mlx::core::array(0, rhs->dtype())),
         mlx::core::greater_equal(*rhs, mlx::core::array(bit_width, rhs->dtype())));
     auto shifted =
         mlx::core::right_shift(*lhs, mlx::core::maximum(*rhs, mlx::core::array(0, rhs->dtype())));
-    // For arithmetic shift, oob result depends on sign: 0 for positive, -1 for negative
-    auto oob_val = mlx::core::where(mlx::core::less(*lhs, mlx::core::array(0, lhs->dtype())),
-                                    mlx::core::full(lhs->shape(), -1, lhs->dtype()),
-                                    mlx::core::zeros_like(*lhs));
+    // For arithmetic shift, oob result depends on sign: 0 for positive, -1 for
+    // negative. Scalar constants (not full/zeros_like): Full nodes are not
+    // fusable by mx::compile, so each would cost a kernel dispatch.
+    auto oob_val =
+        mlx::core::where(mlx::core::less(*lhs, mlx::core::array(0, lhs->dtype())),
+                         mlx::core::array(-1, lhs->dtype()), mlx::core::array(0, lhs->dtype()));
     values.emplace(ToKey(op->getResult(0)), mlx::core::where(oob, oob_val, shifted));
     return true;
 }

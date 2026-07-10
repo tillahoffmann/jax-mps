@@ -146,6 +146,13 @@ OpHandler MakeUnaryHandler(const char* opName, UnaryMlxFn fn);
 OpHandler MakeBinaryHandler(const char* opName, BinaryMlxFn fn);
 OpHandler MakeLogicalShiftHandler(const char* opName, BinaryMlxFn shiftFn);
 
+// Splat integer value of a compile-time constant (looking through
+// broadcast_in_dim), or nullopt if the value is not a splat integer constant.
+// Defined in arithmetic.cc. Lets handlers specialize on constant operands
+// (e.g. in-range shift amounts) and skip emitting defensive subgraphs that
+// cost per-node kernel dispatches inside compiled loop bodies (jax-mps#196).
+std::optional<int64_t> GetSplatIntConstant(mlir::Value v);
+
 // --- Cross-TU functions (defined in mlx_executable.cc, called by control_flow.cc) ---
 
 bool ExecuteRegion(mlir::Region& region, std::vector<mlx::core::array>& args,

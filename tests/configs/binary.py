@@ -283,6 +283,46 @@ def make_binary_op_configs():
                 differentiable_argnums=(),
                 name="lax.shift_right_arithmetic-negative-shift-count",
             ),
+            # Compile-time constant shift amounts exercise the constant fast
+            # path in the shift handlers (single MLX op, no OOB masking).
+            OperationTestConfig(
+                lambda x: lax.shift_left(x, 3),
+                numpy.array([1, 2, -4, 0x40000000], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_left-constant-count",
+            ),
+            OperationTestConfig(
+                lambda x: lax.shift_right_logical(x, jnp.uint32(7)),
+                numpy.array([1, 128, 0x80000000, 0xFFFFFFFF], dtype=numpy.uint32),
+                differentiable_argnums=(),
+                name="lax.shift_right_logical-constant-count",
+            ),
+            OperationTestConfig(
+                lambda x: lax.shift_right_arithmetic(x, 5),
+                numpy.array([-1024, 1024, -1, 0x7FFFFFFF], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_right_arithmetic-constant-count",
+            ),
+            # Constant but out-of-bounds shift amounts must fall back to the
+            # masked general path (result 0, or sign fill for arithmetic).
+            OperationTestConfig(
+                lambda x: lax.shift_left(x, 32),
+                numpy.array([1, -2, 0x40000000], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_left-constant-oob-count",
+            ),
+            OperationTestConfig(
+                lambda x: lax.shift_right_logical(x, jnp.uint32(32)),
+                numpy.array([1, 128, 0xFFFFFFFF], dtype=numpy.uint32),
+                differentiable_argnums=(),
+                name="lax.shift_right_logical-constant-oob-count",
+            ),
+            OperationTestConfig(
+                lambda x: lax.shift_right_arithmetic(x, 32),
+                numpy.array([-1024, 1024, -1, 0], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="lax.shift_right_arithmetic-constant-oob-count",
+            ),
             # Integer division: truncation toward zero (not float promotion)
             OperationTestConfig(
                 lax.div,

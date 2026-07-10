@@ -281,7 +281,19 @@ OpHandler MakeLogicalShiftHandler(const char* opName, BinaryMlxFn shiftFn) {
         auto& lhs = lhs_opt->get();
         auto& rhs = rhs_opt->get();
         int bit_width = static_cast<int>(GetDtypeSize(lhs.dtype()) * 8);
-        auto zero = mlx::core::zeros_like(lhs);
+        // Fast path: in-range compile-time constant shift amount. A single MLX
+        // op instead of the OOB-masking subgraph below — inside compiled loop
+        // bodies every extra graph node is a kernel dispatch, and threefry
+        // (jax.random) uses ~40 constant shifts per key op (jax-mps#196).
+        if (auto amount = GetSplatIntConstant(op->getOperand(1));
+            amount && *amount >= 0 && *amount < bit_width) {
+            values.emplace(ToKey(op->getResult(0)), shiftFn(lhs, rhs, {}));
+            return true;
+        }
+        // General path: mask OOB shift amounts to 0 (StableHLO semantics).
+        // Scalar constant (not zeros_like): a Full node is not fusable by
+        // mx::compile, so it would cost a kernel dispatch per evaluation.
+        auto zero = mlx::core::array(0, lhs.dtype());
         auto oob = mlx::core::logical_or(
             mlx::core::less(rhs, mlx::core::array(0, rhs.dtype())),
             mlx::core::greater_equal(rhs, mlx::core::array(bit_width, rhs.dtype())));
