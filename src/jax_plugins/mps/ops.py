@@ -606,8 +606,16 @@ _metal_kernel_jit_p.multiple_results = True
 
 
 def _metal_kernel_jit_abstract(
-    *inputs, name, source, header, input_names, output_names, grid, threadgroup,
-    out_shapes, out_dtypes,
+    *inputs,
+    name,
+    source,
+    header,
+    input_names,
+    output_names,
+    grid,
+    threadgroup,
+    out_shapes,
+    out_dtypes,
 ):
     return tuple(
         ShapedArray(shape, jnp.dtype(dtype))
@@ -629,8 +637,17 @@ _metal_kernel_jit_p.def_impl(_metal_kernel_jit_impl)
 
 
 def _metal_kernel_jit_lowering(
-    ctx, *inputs, name, source, header, input_names, output_names, grid,
-    threadgroup, out_shapes, out_dtypes,
+    ctx,
+    *inputs,
+    name,
+    source,
+    header,
+    input_names,
+    output_names,
+    grid,
+    threadgroup,
+    out_shapes,
+    out_dtypes,
 ):
     cfg = {
         "name": name,
@@ -658,8 +675,17 @@ def _dim3(x, name):
 
 
 def metal_kernel_jit(
-    name, inputs, *, output_shapes, output_dtypes, grid, threadgroup, source,
-    header="", input_names=None, output_names=None,
+    name,
+    inputs,
+    *,
+    output_shapes,
+    output_dtypes,
+    grid,
+    threadgroup,
+    source,
+    header="",
+    input_names=None,
+    output_names=None,
 ):
     """JIT-compile and launch a Metal kernel from MSL source.
 
@@ -703,8 +729,17 @@ _metal_kernel_lib_p.multiple_results = True
 
 
 def _metal_kernel_lib_abstract(
-    *inputs, name, metallib_path, hash_name, grid, threadgroup, dispatch,
-    buffers, function_constants, out_shapes, out_dtypes,
+    *inputs,
+    name,
+    metallib_path,
+    hash_name,
+    grid,
+    threadgroup,
+    dispatch,
+    buffers,
+    function_constants,
+    out_shapes,
+    out_dtypes,
 ):
     return tuple(
         ShapedArray(shape, jnp.dtype(dtype))
@@ -725,8 +760,18 @@ _metal_kernel_lib_p.def_impl(_metal_kernel_lib_impl)
 
 
 def _metal_kernel_lib_lowering(
-    ctx, *inputs, name, metallib_path, hash_name, grid, threadgroup, dispatch,
-    buffers, function_constants, out_shapes, out_dtypes,
+    ctx,
+    *inputs,
+    name,
+    metallib_path,
+    hash_name,
+    grid,
+    threadgroup,
+    dispatch,
+    buffers,
+    function_constants,
+    out_shapes,
+    out_dtypes,
 ):
     cfg = {
         "name": name,
@@ -766,17 +811,23 @@ def _canon_buffers(buffers, n_inputs, n_outputs):
         slot = int(b["slot"])
         kinds = [k for k in ("input", "output", "bytes") if k in b]
         if len(kinds) != 1:
-            raise ValueError("buffer spec needs exactly one of 'input'/'output'/'bytes'")
+            raise ValueError(
+                "buffer spec needs exactly one of 'input'/'output'/'bytes'"
+            )
         (kind,) = kinds
         if kind == "input":
             arg = int(b["input"])
             if not 0 <= arg < n_inputs:
-                raise ValueError(f"buffer input index {arg} out of range (0..{n_inputs - 1})")
+                raise ValueError(
+                    f"buffer input index {arg} out of range (0..{n_inputs - 1})"
+                )
             out.append((slot, "input", arg, None))
         elif kind == "output":
             arg = int(b["output"])
             if not 0 <= arg < n_outputs:
-                raise ValueError(f"buffer output index {arg} out of range (0..{n_outputs - 1})")
+                raise ValueError(
+                    f"buffer output index {arg} out of range (0..{n_outputs - 1})"
+                )
             out.append((slot, "output", arg, None))
         else:  # bytes
             out.append((slot, "bytes", None, bytes(b["bytes"])))
@@ -810,8 +861,17 @@ def _canon_function_constants(fcs):
 
 
 def metal_kernel_lib(
-    name, inputs, *, metallib_path, output_shapes, output_dtypes, grid,
-    threadgroup, dispatch="threads", hash_name=None, buffers=None,
+    name,
+    inputs,
+    *,
+    metallib_path,
+    output_shapes,
+    output_dtypes,
+    grid,
+    threadgroup,
+    dispatch="threads",
+    hash_name=None,
+    buffers=None,
     function_constants=None,
 ):
     """Dispatch a named kernel from a precompiled .metallib.
@@ -1401,8 +1461,12 @@ def register_fused_ops():
     primitives (sinh, cosh, asin, acos, atan, asinh, acosh, atanh, erf,
     erf_inv) that would otherwise decompose through CHLO.
     """
-    mlir.register_lowering(_metal_kernel_jit_p, _metal_kernel_jit_lowering, platform="mps")
-    mlir.register_lowering(_metal_kernel_lib_p, _metal_kernel_lib_lowering, platform="mps")
+    mlir.register_lowering(
+        _metal_kernel_jit_p, _metal_kernel_jit_lowering, platform="mps"
+    )
+    mlir.register_lowering(
+        _metal_kernel_lib_p, _metal_kernel_lib_lowering, platform="mps"
+    )
     mlir.register_lowering(_sdpa_p, _sdpa_lowering, platform="mps")
     mlir.register_lowering(_sdpa_causal_p, _sdpa_causal_lowering, platform="mps")
     mlir.register_lowering(_rms_norm_p, _rms_norm_lowering, platform="mps")

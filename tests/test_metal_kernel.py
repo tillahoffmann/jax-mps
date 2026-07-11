@@ -8,11 +8,10 @@ import shutil
 import subprocess
 import textwrap
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 from jax_plugins.mps.ops import metal_kernel_jit, metal_kernel_lib
 
@@ -85,8 +84,12 @@ def test_metal_kernel_jit_multiple_outputs():
     key = jax.random.PRNGKey(1)
     a, b = (jax.random.normal(k, (n,)) for k in jax.random.split(key, 2))
     s, p = _run_on_mps(fn, a, b)
-    np.testing.assert_allclose(np.asarray(s), np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(p), np.asarray(a) * np.asarray(b), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(s), np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(p), np.asarray(a) * np.asarray(b), rtol=1e-6, atol=1e-6
+    )
 
 
 _LIB_SOURCE = textwrap.dedent(
@@ -185,8 +188,12 @@ def test_metal_kernel_lib_multiple_outputs(vadd_metallib):
     key = jax.random.PRNGKey(3)
     a, b = (jax.random.normal(k, (n,)) for k in jax.random.split(key, 2))
     s, p = _run_on_mps(fn, a, b)
-    np.testing.assert_allclose(np.asarray(s), np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(p), np.asarray(a) * np.asarray(b), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(s), np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(p), np.asarray(a) * np.asarray(b), rtol=1e-6, atol=1e-6
+    )
 
 
 @pytest.mark.parametrize("add_bias", [False, True])
@@ -236,7 +243,7 @@ def test_metal_kernel_lib_dispatch_threadgroups(vadd_metallib):
             metallib_path=vadd_metallib,
             output_shapes=[(n,)],
             output_dtypes=[jnp.float32],
-            grid=(n, 1, 1),          # n threadgroups
+            grid=(n, 1, 1),  # n threadgroups
             threadgroup=(1, 1, 1),
             dispatch="threadgroups",
         )
