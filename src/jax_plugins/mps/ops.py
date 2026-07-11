@@ -649,6 +649,14 @@ def _metal_kernel_jit_lowering(
     ).results
 
 
+def _dim3(x, name):
+    """Coerce a launch dimension to an (x, y, z) int tuple, rejecting other lengths."""
+    dims = tuple(int(v) for v in x)
+    if len(dims) != 3:
+        raise ValueError(f"{name} must have 3 entries (x, y, z), got {len(dims)}")
+    return dims
+
+
 def metal_kernel_jit(
     name, inputs, *, output_shapes, output_dtypes, grid, threadgroup, source,
     header="", input_names=None, output_names=None,
@@ -663,8 +671,17 @@ def metal_kernel_jit(
     inputs = [jnp.asarray(x) for x in inputs]
     if input_names is None:
         input_names = tuple(f"in{i}" for i in range(len(inputs)))
+    if len(input_names) != len(inputs):
+        raise ValueError("input_names must match the number of inputs")
+
+    if len(output_shapes) != len(output_dtypes):
+        raise ValueError("output_shapes and output_dtypes must have the same length")
+
     if output_names is None:
         output_names = tuple(f"out{i}" for i in range(len(output_shapes)))
+    if len(output_names) != len(output_shapes):
+        raise ValueError("output_names must match the number of outputs")
+
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
     out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
     return _metal_kernel_jit_p.bind(
@@ -674,8 +691,8 @@ def metal_kernel_jit(
         header=str(header),
         input_names=tuple(input_names),
         output_names=tuple(output_names),
-        grid=(int(grid[0]), int(grid[1]), int(grid[2])),
-        threadgroup=(int(threadgroup[0]), int(threadgroup[1]), int(threadgroup[2])),
+        grid=_dim3(grid, "grid"),
+        threadgroup=_dim3(threadgroup, "threadgroup"),
         out_shapes=out_shapes,
         out_dtypes=out_dtypes,
     )
@@ -740,21 +757,29 @@ def _metal_kernel_lib_lowering(
     ).results
 
 
-def _canon_buffers(buffers):
+def _canon_buffers(buffers, n_inputs, n_outputs):
     """Normalize buffer specs to a hashable tuple of (slot, kind, arg, bytes)."""
     if buffers is None:
         return None
     out = []
     for b in buffers:
         slot = int(b["slot"])
-        if "input" in b:
-            out.append((slot, "input", int(b["input"]), None))
-        elif "output" in b:
-            out.append((slot, "output", int(b["output"]), None))
-        elif "bytes" in b:
+        kinds = [k for k in ("input", "output", "bytes") if k in b]
+        if len(kinds) != 1:
+            raise ValueError("buffer spec needs exactly one of 'input'/'output'/'bytes'")
+        (kind,) = kinds
+        if kind == "input":
+            arg = int(b["input"])
+            if not 0 <= arg < n_inputs:
+                raise ValueError(f"buffer input index {arg} out of range (0..{n_inputs - 1})")
+            out.append((slot, "input", arg, None))
+        elif kind == "output":
+            arg = int(b["output"])
+            if not 0 <= arg < n_outputs:
+                raise ValueError(f"buffer output index {arg} out of range (0..{n_outputs - 1})")
+            out.append((slot, "output", arg, None))
+        else:  # bytes
             out.append((slot, "bytes", None, bytes(b["bytes"])))
-        else:
-            raise ValueError("buffer spec needs one of 'input'/'output'/'bytes'")
     return tuple(out)
 
 
@@ -765,8 +790,21 @@ def _canon_function_constants(fcs):
     out = []
     for c in fcs:
         typ = str(c["type"])
+        if typ not in ("bool", "int", "uint", "float"):
+            raise ValueError(
+                f"function_constant type must be bool/int/uint/float, got {typ!r}"
+            )
         val = c["value"]
-        val = bool(val) if typ == "bool" else float(val) if typ == "float" else int(val)
+        if typ == "bool":
+            val = bool(val)
+        elif typ == "float":
+            val = float(val)
+        else:  # int or uint
+            val = int(val)
+            if typ == "uint" and val < 0:
+                raise ValueError(
+                    f"uint function_constant value must be non-negative, got {val}"
+                )
         out.append((int(c["index"]), typ, val))
     return tuple(out)
 
@@ -785,7 +823,7 @@ def metal_kernel_lib(
     ``buffers=None``: operands bind to buffers 0..N-1 and outputs
     to N..N+M-1, all row-contiguous.
 
-    Otherwise, ass `buffers` to place inputs/outputs/raw-bytes at explicit
+    Otherwise, pass `buffers` to place inputs/outputs/raw-bytes at explicit
     slots, and `function_constants` to specialize the pipeline.
 
     - `buffers`: list of dicts, each with ``"slot"`` and exactly one of
@@ -800,6 +838,8 @@ def metal_kernel_lib(
     """
     if dispatch not in ("threads", "threadgroups"):
         raise ValueError("dispatch must be 'threads' or 'threadgroups'")
+    if len(output_shapes) != len(output_dtypes):
+        raise ValueError("output_shapes and output_dtypes must have the same length")
     inputs = [jnp.asarray(x) for x in inputs]
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
     out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
@@ -808,10 +848,10 @@ def metal_kernel_lib(
         name=str(name),
         metallib_path=str(metallib_path),
         hash_name=str(hash_name) if hash_name else "",
-        grid=(int(grid[0]), int(grid[1]), int(grid[2])),
-        threadgroup=(int(threadgroup[0]), int(threadgroup[1]), int(threadgroup[2])),
+        grid=_dim3(grid, "grid"),
+        threadgroup=_dim3(threadgroup, "threadgroup"),
         dispatch=str(dispatch),
-        buffers=_canon_buffers(buffers),
+        buffers=_canon_buffers(buffers, len(inputs), len(out_shapes)),
         function_constants=_canon_function_constants(function_constants),
         out_shapes=out_shapes,
         out_dtypes=out_dtypes,

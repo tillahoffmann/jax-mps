@@ -1771,9 +1771,16 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         // "dispatch": "threads" (grid = total threads, default) or
         // "threadgroups" (grid = threadgroup count).
         bool by_threadgroups = false;
-        if (auto disp = bc.getString("dispatch"))
-            by_threadgroups = (*disp == "threadgroups");
-
+        if (auto disp = bc.getString("dispatch")) {
+            if (*disp == "threads") {
+                by_threadgroups = false;
+            } else if (*disp == "threadgroups") {
+                by_threadgroups = true;
+            } else {
+                MPS_LOG_ERROR("mps.metal_kernel_lib: unknown dispatch '%s'\n", disp->str().c_str());
+                return false;
+            }
+        }
         // Optional explicit buffer layout.
         std::vector<mlx::core::MklBuffer> buffers;
         if (auto* barr = bc.getArray("buffers")) {
@@ -1792,11 +1799,21 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 }
                 b.slot = static_cast<int>(*slot);
                 if (*kind == "input") {
+                    auto arg = obj->getInteger("arg");
+                    if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumOperands())) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: buffer input arg missing or out of range\n");
+                        return false;
+                    }
                     b.kind = mlx::core::MklBuffer::kInput;
-                    b.arg = static_cast<int>(obj->getInteger("arg").value_or(0));
+                    b.arg = static_cast<int>(*arg);
                 } else if (*kind == "output") {
+                    auto arg = obj->getInteger("arg");
+                    if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumResults())) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: buffer output arg missing or out of range\n");
+                        return false;
+                    }
                     b.kind = mlx::core::MklBuffer::kOutput;
-                    b.arg = static_cast<int>(obj->getInteger("arg").value_or(0));
+                    b.arg = static_cast<int>(*arg);
                 } else if (*kind == "bytes") {
                     b.kind = mlx::core::MklBuffer::kBytes;
                     auto* data = obj->getArray("bytes");
@@ -1805,8 +1822,14 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                         return false;
                     }
                     b.bytes.reserve(data->size());
-                    for (auto& v : *data)
-                        b.bytes.push_back(static_cast<uint8_t>(v.getAsInteger().value_or(0)));
+                    for (auto& v : *data) {
+                        auto byte = v.getAsInteger();
+                        if (!byte || *byte < 0 || *byte > 255) {
+                            MPS_LOG_ERROR("mps.metal_kernel_lib: bytes entry not an integer in [0, 255]\n");
+                            return false;
+                        }
+                        b.bytes.push_back(static_cast<uint8_t>(*byte));
+                    }
                 } else {
                     MPS_LOG_ERROR("mps.metal_kernel_lib: unknown buffer kind\n");
                     return false;
@@ -1829,24 +1852,43 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 mlx::core::MklConstant c;
                 c.index = static_cast<int>(*idx);
                 if (*type == "bool") {
+                    auto v = obj->getBoolean("value");
+                    if (!v) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: bool function_constant missing value\n");
+                        return false;
+                    }
                     c.type = mlx::core::MklConstant::kBool;
-                    uint8_t v = obj->getBoolean("value").value_or(false) ? 1 : 0;
-                    c.value = {v};
+                    c.value = {static_cast<uint8_t>(*v ? 1 : 0)};
                 } else if (*type == "int") {
+                    auto v = obj->getInteger("value");
+                    if (!v) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: int function_constant missing value\n");
+                        return false;
+                    }
                     c.type = mlx::core::MklConstant::kInt;
-                    int32_t v = static_cast<int32_t>(obj->getInteger("value").value_or(0));
-                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
-                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                    int32_t iv = static_cast<int32_t>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&iv),
+                                   reinterpret_cast<uint8_t*>(&iv) + sizeof(iv));
                 } else if (*type == "uint") {
+                    auto v = obj->getInteger("value");
+                    if (!v || *v < 0) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: uint function_constant missing or negative value\n");
+                        return false;
+                    }
                     c.type = mlx::core::MklConstant::kUint;
-                    uint32_t v = static_cast<uint32_t>(obj->getInteger("value").value_or(0));
-                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
-                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                    uint32_t uv = static_cast<uint32_t>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&uv),
+                                   reinterpret_cast<uint8_t*>(&uv) + sizeof(uv));
                 } else if (*type == "float") {
+                    auto v = obj->getNumber("value");
+                    if (!v) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: float function_constant missing value\n");
+                        return false;
+                    }
                     c.type = mlx::core::MklConstant::kFloat;
-                    float v = static_cast<float>(obj->getNumber("value").value_or(0.0));
-                    c.value.assign(reinterpret_cast<uint8_t*>(&v),
-                                   reinterpret_cast<uint8_t*>(&v) + sizeof(v));
+                    float fv = static_cast<float>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&fv),
+                                   reinterpret_cast<uint8_t*>(&fv) + sizeof(fv));
                 } else {
                     MPS_LOG_ERROR("mps.metal_kernel_lib: unknown constant type\n");
                     return false;
