@@ -19,17 +19,22 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Matchers.h"
 #include "pjrt_plugin/ops/handler_utils.h"
+#include "pjrt_plugin/ops/metal_kernel_lib.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
 namespace jax_mps {
 
 namespace {
+
+// Metal exposes buffer slots [[buffer(0)]]..[[buffer(30)]].
+constexpr unsigned kMaxMetalBuffers = 31;
 
 // Complete all in-flight GPU work before a control-flow primitive touches
 // its inputs (jax-mps#195). WhileLoopPrimitive / CasePrimitive run on the
@@ -1317,6 +1322,7 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 }
 
 // Handler for stablehlo.custom_call
+// NOLINTNEXTLINE(readability-function-size)
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
     auto customCallOp = CastOp<mlir::stablehlo::CustomCallOp>(op, "stablehlo.custom_call");
@@ -1512,6 +1518,378 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto out = mlx::core::quantized_matmul(*x, *packed, *scales, *biases, transpose, group_size,
                                                bits, "affine");
         values.emplace(ToKey(op->getResult(0)), std::move(out));
+        return true;
+    }
+
+    // Handle mps.metal_kernel_jit, run user-supplied MSL source via
+    // mlx::core::fast::metal_kernel with JIT runtime compilation.
+    // backend_config:
+    //   {"name": str, "source": str, "header": str,
+    //    "input_names": [str, ...], "output_names": [str, ...],
+    //    "grid": [x, y, z], "threadgroup": [x, y, z]}
+    // Operands map positionally to input_names; result types (shape + dtype) to
+    // output_names. `grid` is the total thread count per dim (MLX
+    // dispatchThreads); `threadgroup` is threads per group. Inputs are made
+    // row-contiguous so the source can index with baked strides.
+    if (callTargetName == "mps.metal_kernel_jit") {
+        auto bc = ParseBackendConfig(customCallOp);
+        auto nameOpt = bc.getString("name");
+        auto sourceOpt = bc.getString("source");
+        if (!nameOpt || !sourceOpt) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: backend_config missing name/source\n");
+            return false;
+        }
+        std::string header;
+        if (auto h = bc.getString("header"))
+            header = h->str();
+
+        auto readNames = [&](const char* key, std::vector<std::string>& out) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr)
+                return false;
+            for (auto& v : *arr) {
+                auto s = v.getAsString();
+                if (!s)
+                    return false;
+                out.emplace_back(s->str());
+            }
+            return true;
+        };
+        std::vector<std::string> input_names;
+        std::vector<std::string> output_names;
+        if (!readNames("input_names", input_names) || !readNames("output_names", output_names)) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: input_names/output_names missing or malformed\n");
+            return false;
+        }
+
+        auto readTriple = [&](const char* key, std::tuple<int, int, int>& out, int minv) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr || arr->size() != 3)
+                return false;
+            int vals[3];
+            for (int i = 0; i < 3; ++i) {
+                auto n = (*arr)[i].getAsInteger();
+                if (!n || *n < minv || *n > std::numeric_limits<int>::max())
+                    return false;
+                vals[i] = static_cast<int>(*n);
+            }
+            out = std::make_tuple(vals[0], vals[1], vals[2]);
+            return true;
+        };
+        std::tuple<int, int, int> grid;
+        std::tuple<int, int, int> threadgroup;
+        if (!readTriple("grid", grid, 1) || !readTriple("threadgroup", threadgroup, 1)) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: grid/threadgroup missing or out of range\n");
+            return false;
+        }
+
+        if (op->getNumOperands() != input_names.size()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: %u operands but %zu input_names\n",
+                          op->getNumOperands(), input_names.size());
+            return false;
+        }
+        if (op->getNumResults() != output_names.size()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: %u results but %zu output_names\n",
+                          op->getNumResults(), output_names.size());
+            return false;
+        }
+        if (op->getNumOperands() + op->getNumResults() > kMaxMetalBuffers) {
+            MPS_LOG_ERROR(
+                "mps.metal_kernel_jit: %u inputs + %u outputs needs more than the %u "
+                "buffer slots Metal provides\n",
+                op->getNumOperands(), op->getNumResults(), kMaxMetalBuffers);
+            return false;
+        }
+
+        std::vector<mlx::core::array> inputs;
+        inputs.reserve(op->getNumOperands());
+        for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+            auto* v = RequireValue(values, op->getOperand(i), "mps.metal_kernel_jit");
+            if (!v)
+                return false;
+            inputs.push_back(*v);
+        }
+
+        std::vector<mlx::core::Shape> out_shapes;
+        std::vector<mlx::core::Dtype> out_dtypes;
+        out_shapes.reserve(op->getNumResults());
+        out_dtypes.reserve(op->getNumResults());
+        for (unsigned i = 0; i < op->getNumResults(); ++i) {
+            auto rt = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+            if (!rt) {
+                MPS_LOG_ERROR("mps.metal_kernel_jit: result %u is not RankedTensorType\n", i);
+                return false;
+            }
+            out_shapes.push_back(GetShape(rt));
+            out_dtypes.push_back(MlirTypeToMlxDtype(rt.getElementType()));
+        }
+
+        // Hack: prevent MLX caching different kernels with same name by hashing
+        // see: https://github.com/ml-explore/mlx/issues/3832
+        std::string name = nameOpt->str();
+        uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
+        auto fold = [&h](const std::string& s) {
+            for (unsigned char c : s)
+                h = (h ^ c) * 0x100000001b3ULL;  // FNV-1a 64-bit prime
+        };
+        fold(name);
+        fold(sourceOpt->str());
+        fold(header);
+        for (const auto& n : input_names)
+            fold(n);
+        for (const auto& n : output_names)
+            fold(n);
+        std::string uniqueName = name + "_" + std::to_string(h);
+        auto kernel = mlx::core::fast::metal_kernel(uniqueName, input_names, output_names,
+                                                    sourceOpt->str(), header,
+                                                    /*ensure_row_contiguous=*/true,
+                                                    /*atomic_outputs=*/false);
+        auto results = kernel(inputs, out_shapes, out_dtypes, grid, threadgroup,
+                              /*template_args=*/{}, /*init_value=*/std::nullopt,
+                              /*verbose=*/false, {});
+        if (results.size() != op->getNumResults()) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: kernel produced %zu outputs, expected %u\n",
+                          results.size(), op->getNumResults());
+            return false;
+        }
+        for (unsigned i = 0; i < op->getNumResults(); ++i)
+            values.emplace(ToKey(op->getResult(i)), std::move(results[i]));
+        return true;
+    }
+
+    // Handle mps.metal_kernel_lib, dispatch a named kernel from a precompiled .metallib.
+    // backend_config:
+    //   {"name": str, "metallib_path": str, "hash_name": str?,
+    //    "grid": [x,y,z], "threadgroup": [x,y,z],
+    //    "buffers": [{"slot": int, "kind": "input"|"output"|"bytes",
+    //                 "arg": int?, "bytes": [uint8...]?}, ...]?,
+    //    "function_constants": [{"index": int,
+    //                            "type": "bool"|"int"|"uint"|"float",
+    //                            "value": number}, ...]?}
+    // Without "buffers", operands bind to buffers 0..N-1 and results to
+    // N..N+M-1 (all made row-contiguous). Result types give output shapes/dtypes.
+    if (callTargetName == "mps.metal_kernel_lib") {
+        auto bc = ParseBackendConfig(customCallOp);
+        auto nameOpt = bc.getString("name");
+        auto pathOpt = bc.getString("metallib_path");
+        if (!nameOpt || !pathOpt) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: backend_config missing name/metallib_path\n");
+            return false;
+        }
+        std::string hash_name;
+        if (auto h = bc.getString("hash_name"))
+            hash_name = h->str();
+
+        auto readTriple = [&](const char* key, std::array<int, 3>& out, int minv) -> bool {
+            auto* arr = bc.getArray(key);
+            if (!arr || arr->size() != 3)
+                return false;
+            for (int i = 0; i < 3; ++i) {
+                auto n = (*arr)[i].getAsInteger();
+                if (!n || *n < minv || *n > std::numeric_limits<int>::max())
+                    return false;
+                out[i] = static_cast<int>(*n);
+            }
+            return true;
+        };
+        std::array<int, 3> grid{};
+        std::array<int, 3> threadgroup{};
+        if (!readTriple("grid", grid, 1) || !readTriple("threadgroup", threadgroup, 1)) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: grid/threadgroup missing or out of range\n");
+            return false;
+        }
+        // "dispatch": "threads" (grid = total threads, default) or
+        // "threadgroups" (grid = threadgroup count).
+        bool by_threadgroups = false;
+        if (auto disp = bc.getString("dispatch")) {
+            if (*disp == "threads") {
+                by_threadgroups = false;
+            } else if (*disp == "threadgroups") {
+                by_threadgroups = true;
+            } else {
+                MPS_LOG_ERROR("mps.metal_kernel_lib: unknown dispatch '%s'\n", disp->str().c_str());
+                return false;
+            }
+        }
+        // Optional explicit buffer layout.
+        std::vector<mlx::core::MklBuffer> buffers;
+        if (auto* barr = bc.getArray("buffers")) {
+            for (auto& e : *barr) {
+                auto* obj = e.getAsObject();
+                if (!obj) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer entry not an object\n");
+                    return false;
+                }
+                mlx::core::MklBuffer b;
+                auto slot = obj->getInteger("slot");
+                auto kind = obj->getString("kind");
+                if (!slot || !kind) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer missing slot/kind\n");
+                    return false;
+                }
+                if (*slot < 0 || *slot >= kMaxMetalBuffers) {
+                    MPS_LOG_ERROR(
+                        "mps.metal_kernel_lib: buffer slot %lld outside Metal's "
+                        "0..%u range\n",
+                        static_cast<long long>(*slot), kMaxMetalBuffers - 1);
+                    return false;
+                }
+                b.slot = static_cast<int>(*slot);
+                if (*kind == "input") {
+                    auto arg = obj->getInteger("arg");
+                    if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumOperands())) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: buffer input arg missing or out of range\n");
+                        return false;
+                    }
+                    b.kind = mlx::core::MklBuffer::kInput;
+                    b.arg = static_cast<int>(*arg);
+                } else if (*kind == "output") {
+                    auto arg = obj->getInteger("arg");
+                    if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumResults())) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: buffer output arg missing or out of range\n");
+                        return false;
+                    }
+                    b.kind = mlx::core::MklBuffer::kOutput;
+                    b.arg = static_cast<int>(*arg);
+                } else if (*kind == "bytes") {
+                    b.kind = mlx::core::MklBuffer::kBytes;
+                    auto* data = obj->getArray("bytes");
+                    if (!data) {
+                        MPS_LOG_ERROR("mps.metal_kernel_lib: bytes buffer missing data\n");
+                        return false;
+                    }
+                    b.bytes.reserve(data->size());
+                    for (auto& v : *data) {
+                        auto byte = v.getAsInteger();
+                        if (!byte || *byte < 0 || *byte > 255) {
+                            MPS_LOG_ERROR(
+                                "mps.metal_kernel_lib: bytes entry not an integer in [0, 255]\n");
+                            return false;
+                        }
+                        b.bytes.push_back(static_cast<uint8_t>(*byte));
+                    }
+                } else {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: unknown buffer kind\n");
+                    return false;
+                }
+                buffers.push_back(std::move(b));
+            }
+        }
+        // Positional binding uses one slot per operand and result.
+        if (buffers.empty() && op->getNumOperands() + op->getNumResults() > kMaxMetalBuffers) {
+            MPS_LOG_ERROR(
+                "mps.metal_kernel_lib: %u inputs + %u outputs needs more than the %u "
+                "buffer slots Metal provides\n",
+                op->getNumOperands(), op->getNumResults(), kMaxMetalBuffers);
+            return false;
+        }
+
+        // Optional function constants.
+        std::vector<mlx::core::MklConstant> constants;
+        if (auto* carr = bc.getArray("function_constants")) {
+            for (auto& e : *carr) {
+                auto* obj = e.getAsObject();
+                auto idx = obj ? obj->getInteger("index") : std::nullopt;
+                auto type = obj ? obj->getString("type") : std::nullopt;
+                if (!obj || !idx || !type) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: function_constant missing index/type\n");
+                    return false;
+                }
+                if (*idx < 0 || *idx > std::numeric_limits<int>::max()) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: function_constant index out of range\n");
+                    return false;
+                }
+                mlx::core::MklConstant c;
+                c.index = static_cast<int>(*idx);
+                if (*type == "bool") {
+                    auto v = obj->getBoolean("value");
+                    if (!v) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: bool function_constant missing value\n");
+                        return false;
+                    }
+                    c.type = mlx::core::MklConstant::kBool;
+                    c.value = {static_cast<uint8_t>(*v ? 1 : 0)};
+                } else if (*type == "int") {
+                    auto v = obj->getInteger("value");
+                    if (!v || *v < std::numeric_limits<int32_t>::min() ||
+                        *v > std::numeric_limits<int32_t>::max()) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: int function_constant missing or out of 32-bit "
+                            "range\n");
+                        return false;
+                    }
+                    c.type = mlx::core::MklConstant::kInt;
+                    int32_t iv = static_cast<int32_t>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&iv),
+                                   reinterpret_cast<uint8_t*>(&iv) + sizeof(iv));
+                } else if (*type == "uint") {
+                    auto v = obj->getInteger("value");
+                    if (!v || *v < 0 ||
+                        *v > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: uint function_constant missing, negative, or "
+                            "out of 32-bit range\n");
+                        return false;
+                    }
+                    c.type = mlx::core::MklConstant::kUint;
+                    uint32_t uv = static_cast<uint32_t>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&uv),
+                                   reinterpret_cast<uint8_t*>(&uv) + sizeof(uv));
+                } else if (*type == "float") {
+                    auto v = obj->getNumber("value");
+                    if (!v) {
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: float function_constant missing value\n");
+                        return false;
+                    }
+                    c.type = mlx::core::MklConstant::kFloat;
+                    float fv = static_cast<float>(*v);
+                    c.value.assign(reinterpret_cast<uint8_t*>(&fv),
+                                   reinterpret_cast<uint8_t*>(&fv) + sizeof(fv));
+                } else {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: unknown constant type\n");
+                    return false;
+                }
+                constants.push_back(std::move(c));
+            }
+        }
+
+        std::vector<mlx::core::array> inputs;
+        inputs.reserve(op->getNumOperands());
+        for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+            auto* v = RequireValue(values, op->getOperand(i), "mps.metal_kernel_lib");
+            if (!v)
+                return false;
+            inputs.push_back(*v);
+        }
+
+        std::vector<mlx::core::Shape> out_shapes;
+        std::vector<mlx::core::Dtype> out_dtypes;
+        out_shapes.reserve(op->getNumResults());
+        out_dtypes.reserve(op->getNumResults());
+        for (unsigned i = 0; i < op->getNumResults(); ++i) {
+            auto rt = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+            if (!rt) {
+                MPS_LOG_ERROR("mps.metal_kernel_lib: result %u is not RankedTensorType\n", i);
+                return false;
+            }
+            out_shapes.push_back(GetShape(rt));
+            out_dtypes.push_back(MlirTypeToMlxDtype(rt.getElementType()));
+        }
+
+        auto results = mlx::core::metal_kernel_lib(
+            inputs, out_shapes, out_dtypes, pathOpt->str(), nameOpt->str(), hash_name, grid,
+            threadgroup, by_threadgroups, std::move(buffers), std::move(constants));
+        if (results.size() != op->getNumResults()) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: kernel produced %zu outputs, expected %u\n",
+                          results.size(), op->getNumResults());
+            return false;
+        }
+        for (unsigned i = 0; i < op->getNumResults(); ++i)
+            values.emplace(ToKey(op->getResult(i)), std::move(results[i]));
         return true;
     }
 
