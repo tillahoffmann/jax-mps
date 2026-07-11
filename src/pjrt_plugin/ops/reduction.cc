@@ -625,12 +625,47 @@ bool HandleSelectAndScatter(mlir::Operation* op, ValueMap& values,
     return true;
 }
 
+// Handler for stablehlo.all_reduce.
+//
+// This is a single-device/debug fallback: bypass the collective and forward each
+// operand as the corresponding result. Multi-device collectives must fail
+// loudly; treating them as identity would silently produce wrong values.
+bool HandleAllReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                     ExecContext& ctx) {
+    auto replicaGroups = op->getAttrOfType<mlir::DenseIntElementsAttr>("replica_groups");
+    if (replicaGroups && !replicaGroups.empty()) {
+        auto groupType = mlir::dyn_cast<mlir::RankedTensorType>(replicaGroups.getType());
+        bool isMultiDevice =
+            (!groupType || groupType.getRank() < 2) ? replicaGroups.getNumElements() > 1
+                                                    : groupType.getShape().back() > 1;
+        if (isMultiDevice) {
+            ctx.error_message = "stablehlo.all_reduce: multi-device all_reduce is not supported";
+            MPS_LOG_ERROR("%s\n", ctx.error_message.c_str());
+            return false;
+        }
+    }
+
+    if (op->getNumOperands() != op->getNumResults()) {
+        MPS_LOG_ERROR("stablehlo.all_reduce: operand/result count mismatch\n");
+        return false;
+    }
+
+    for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+        auto* input = RequireValue(values, op->getOperand(i), "stablehlo.all_reduce");
+        if (!input)
+            return false;
+        values.emplace(ToKey(op->getResult(i)), *input);
+    }
+    return true;
+}
+
 }  // namespace
 
 void RegisterReductionHandlers(std::unordered_map<std::string, OpHandler>& handlers) {
     handlers.insert({"stablehlo.reduce", HandleReduce});
     handlers.insert({"stablehlo.reduce_window", HandleReduceWindow});
     handlers.insert({"stablehlo.select_and_scatter", HandleSelectAndScatter});
+    handlers.insert({"stablehlo.all_reduce", HandleAllReduce});
 }
 
 }  // namespace jax_mps
