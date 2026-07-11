@@ -816,15 +816,19 @@ def _metal_kernel_lib_lowering(
 
 def _canon_buffers(buffers, n_inputs, n_outputs):
     """Normalize buffer specs to a hashable tuple of (slot, kind, arg, bytes)."""
-    if buffers is None:
+    if not buffers:  # None or empty => default positional binding
         return None
     out = []
+    seen_slots = set()
     for b in buffers:
         slot = int(b["slot"])
         if not 0 <= slot < _MAX_METAL_BUFFERS:
             raise ValueError(
                 f"buffer slot must be in 0..{_MAX_METAL_BUFFERS - 1}, got {slot}"
             )
+        if slot in seen_slots:
+            raise ValueError(f"buffer slot {slot} bound more than once")
+        seen_slots.add(slot)
         kinds = [k for k in ("input", "output", "bytes") if k in b]
         if len(kinds) != 1:
             raise ValueError(
@@ -852,13 +856,17 @@ def _canon_buffers(buffers, n_inputs, n_outputs):
 
 def _canon_function_constants(fcs):
     """Normalize function-constant specs to a hashable tuple."""
-    if fcs is None:
+    if not fcs:  # None or empty => no specialization
         return None
     out = []
+    seen_indices = set()
     for c in fcs:
         index = int(c["index"])
         if index < 0:
             raise ValueError(f"function_constant index must be >= 0, got {index}")
+        if index in seen_indices:
+            raise ValueError(f"function_constant index {index} set more than once")
+        seen_indices.add(index)
         typ = str(c["type"])
         if typ not in ("bool", "int", "uint", "float"):
             raise ValueError(

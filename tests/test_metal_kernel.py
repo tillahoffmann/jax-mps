@@ -252,3 +252,38 @@ def test_metal_kernel_lib_dispatch_threadgroups(vadd_metallib):
     a = jax.random.normal(jax.random.PRNGKey(5), (n,))
     out = np.asarray(_run_on_mps(fn, a))
     np.testing.assert_allclose(out, np.asarray(a) * 2.0, rtol=1e-6, atol=1e-6)
+
+
+def test_metal_kernel_lib_rejects_duplicate_slot():
+    """Two bindings on the same slot would silently last-win; reject up front."""
+    a = jnp.zeros((4,), jnp.float32)
+    with pytest.raises(ValueError, match="slot 0 bound more than once"):
+        metal_kernel_lib(
+            "k",
+            [a],
+            metallib_path="unused.metallib",
+            output_shapes=[(4,)],
+            output_dtypes=[jnp.float32],
+            grid=(4, 1, 1),
+            threadgroup=(1, 1, 1),
+            buffers=[{"slot": 0, "input": 0}, {"slot": 0, "output": 0}],
+        )
+
+
+def test_metal_kernel_lib_rejects_duplicate_constant_index():
+    """A function-constant index set twice is ambiguous; reject up front."""
+    a = jnp.zeros((4,), jnp.float32)
+    with pytest.raises(ValueError, match="index 7 set more than once"):
+        metal_kernel_lib(
+            "k",
+            [a],
+            metallib_path="unused.metallib",
+            output_shapes=[(4,)],
+            output_dtypes=[jnp.float32],
+            grid=(4, 1, 1),
+            threadgroup=(1, 1, 1),
+            function_constants=[
+                {"index": 7, "type": "bool", "value": True},
+                {"index": 7, "type": "int", "value": 3},
+            ],
+        )
