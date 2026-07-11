@@ -646,7 +646,8 @@ bool HandleAllReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     }
 
     if (op->getNumOperands() != op->getNumResults()) {
-        MPS_LOG_ERROR("stablehlo.all_reduce: operand/result count mismatch\n");
+        ctx.error_message = "stablehlo.all_reduce: operand/result count mismatch";
+        MPS_LOG_ERROR("%s\n", ctx.error_message.c_str());
         return false;
     }
 
