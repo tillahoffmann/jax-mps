@@ -658,11 +658,13 @@ def _metal_kernel_jit_lowering(
     ).results
 
 
-def _dim3(x, name):
+def _dim3(x, name, minimum):
     """Coerce a launch dimension to an (x, y, z) int tuple, rejecting other lengths."""
     dims = tuple(int(v) for v in x)
     if len(dims) != 3:
         raise ValueError(f"{name} must have 3 entries (x, y, z), got {len(dims)}")
+    if any(d < minimum for d in dims):
+        raise ValueError(f"{name} entries must be >= {minimum}, got {dims}")
     return dims
 
 
@@ -709,8 +711,8 @@ def metal_kernel_jit(
         header=str(header),
         input_names=tuple(input_names),
         output_names=tuple(output_names),
-        grid=_dim3(grid, "grid"),
-        threadgroup=_dim3(threadgroup, "threadgroup"),
+        grid=_dim3(grid, "grid", 0),
+        threadgroup=_dim3(threadgroup, "threadgroup", 1),
         out_shapes=out_shapes,
         out_dtypes=out_dtypes,
     )
@@ -801,6 +803,8 @@ def _canon_buffers(buffers, n_inputs, n_outputs):
     out = []
     for b in buffers:
         slot = int(b["slot"])
+        if slot < 0:
+            raise ValueError(f"buffer slot must be >= 0, got {slot}")
         kinds = [k for k in ("input", "output", "bytes") if k in b]
         if len(kinds) != 1:
             raise ValueError(
@@ -832,6 +836,9 @@ def _canon_function_constants(fcs):
         return None
     out = []
     for c in fcs:
+        index = int(c["index"])
+        if index < 0:
+            raise ValueError(f"function_constant index must be >= 0, got {index}")
         typ = str(c["type"])
         if typ not in ("bool", "int", "uint", "float"):
             raise ValueError(
@@ -848,7 +855,7 @@ def _canon_function_constants(fcs):
                 raise ValueError(
                     f"uint function_constant value must be non-negative, got {val}"
                 )
-        out.append((int(c["index"]), typ, val))
+        out.append((index, typ, val))
     return tuple(out)
 
 
@@ -900,8 +907,8 @@ def metal_kernel_lib(
         name=str(name),
         metallib_path=str(metallib_path),
         hash_name=str(hash_name) if hash_name else "",
-        grid=_dim3(grid, "grid"),
-        threadgroup=_dim3(threadgroup, "threadgroup"),
+        grid=_dim3(grid, "grid", 0),
+        threadgroup=_dim3(threadgroup, "threadgroup", 1),
         dispatch=str(dispatch),
         buffers=_canon_buffers(buffers, len(inputs), len(out_shapes)),
         function_constants=_canon_function_constants(function_constants),

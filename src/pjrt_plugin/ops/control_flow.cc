@@ -1559,14 +1559,14 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
         }
 
-        auto readTriple = [&](const char* key, std::tuple<int, int, int>& out) -> bool {
+        auto readTriple = [&](const char* key, std::tuple<int, int, int>& out, int minv) -> bool {
             auto* arr = bc.getArray(key);
             if (!arr || arr->size() != 3)
                 return false;
             int vals[3];
             for (int i = 0; i < 3; ++i) {
                 auto n = (*arr)[i].getAsInteger();
-                if (!n)
+                if (!n || *n < minv || *n > std::numeric_limits<int>::max())
                     return false;
                 vals[i] = static_cast<int>(*n);
             }
@@ -1575,8 +1575,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         };
         std::tuple<int, int, int> grid;
         std::tuple<int, int, int> threadgroup;
-        if (!readTriple("grid", grid) || !readTriple("threadgroup", threadgroup)) {
-            MPS_LOG_ERROR("mps.metal_kernel_jit: grid/threadgroup missing or malformed\n");
+        if (!readTriple("grid", grid, 0) || !readTriple("threadgroup", threadgroup, 1)) {
+            MPS_LOG_ERROR("mps.metal_kernel_jit: grid/threadgroup missing or out of range\n");
             return false;
         }
 
@@ -1654,13 +1654,13 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto h = bc.getString("hash_name"))
             hash_name = h->str();
 
-        auto readTriple = [&](const char* key, std::array<int, 3>& out) -> bool {
+        auto readTriple = [&](const char* key, std::array<int, 3>& out, int minv) -> bool {
             auto* arr = bc.getArray(key);
             if (!arr || arr->size() != 3)
                 return false;
             for (int i = 0; i < 3; ++i) {
                 auto n = (*arr)[i].getAsInteger();
-                if (!n)
+                if (!n || *n < minv || *n > std::numeric_limits<int>::max())
                     return false;
                 out[i] = static_cast<int>(*n);
             }
@@ -1668,8 +1668,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         };
         std::array<int, 3> grid{};
         std::array<int, 3> threadgroup{};
-        if (!readTriple("grid", grid) || !readTriple("threadgroup", threadgroup)) {
-            MPS_LOG_ERROR("mps.metal_kernel_lib: grid/threadgroup missing or malformed\n");
+        if (!readTriple("grid", grid, 0) || !readTriple("threadgroup", threadgroup, 1)) {
+            MPS_LOG_ERROR("mps.metal_kernel_lib: grid/threadgroup missing or out of range\n");
             return false;
         }
         // "dispatch": "threads" (grid = total threads, default) or
@@ -1699,6 +1699,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 auto kind = obj->getString("kind");
                 if (!slot || !kind) {
                     MPS_LOG_ERROR("mps.metal_kernel_lib: buffer missing slot/kind\n");
+                    return false;
+                }
+                if (*slot < 0 || *slot > std::numeric_limits<int>::max()) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer slot out of range\n");
                     return false;
                 }
                 b.slot = static_cast<int>(*slot);
@@ -1756,6 +1760,10 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                     MPS_LOG_ERROR("mps.metal_kernel_lib: function_constant missing index/type\n");
                     return false;
                 }
+                if (*idx < 0 || *idx > std::numeric_limits<int>::max()) {
+                    MPS_LOG_ERROR("mps.metal_kernel_lib: function_constant index out of range\n");
+                    return false;
+                }
                 mlx::core::MklConstant c;
                 c.index = static_cast<int>(*idx);
                 if (*type == "bool") {
@@ -1769,9 +1777,11 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                     c.value = {static_cast<uint8_t>(*v ? 1 : 0)};
                 } else if (*type == "int") {
                     auto v = obj->getInteger("value");
-                    if (!v) {
+                    if (!v || *v < std::numeric_limits<int32_t>::min() ||
+                        *v > std::numeric_limits<int32_t>::max()) {
                         MPS_LOG_ERROR(
-                            "mps.metal_kernel_lib: int function_constant missing value\n");
+                            "mps.metal_kernel_lib: int function_constant missing or out of 32-bit "
+                            "range\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kInt;
@@ -1780,10 +1790,11 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                                    reinterpret_cast<uint8_t*>(&iv) + sizeof(iv));
                 } else if (*type == "uint") {
                     auto v = obj->getInteger("value");
-                    if (!v || *v < 0) {
+                    if (!v || *v < 0 ||
+                        *v > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
                         MPS_LOG_ERROR(
-                            "mps.metal_kernel_lib: uint function_constant missing or negative "
-                            "value\n");
+                            "mps.metal_kernel_lib: uint function_constant missing, negative, or "
+                            "out of 32-bit range\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kUint;
