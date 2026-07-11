@@ -132,9 +132,13 @@ void MetalKernelLibKernel::eval_gpu(
     for (const auto& b : buffers_) {
       switch (b.kind) {
         case MklBuffer::kInput:
+          if (b.arg < 0 || static_cast<size_t>(b.arg) >= in_ptrs.size())
+            throw std::runtime_error("metal_kernel_lib: input buffer arg out of range");
           enc.set_input_array(*in_ptrs[b.arg], b.slot);
           break;
         case MklBuffer::kOutput:
+          if (b.arg < 0 || static_cast<size_t>(b.arg) >= outputs.size())
+            throw std::runtime_error("metal_kernel_lib: output buffer arg out of range");
           enc.set_output_array(outputs[b.arg], b.slot);
           break;
         case MklBuffer::kBytes:

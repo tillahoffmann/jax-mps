@@ -4,6 +4,7 @@ Tests are MPS-only and check the output against a NumPy reference,
 since raw user kernels have no host/CPU equivalent.
 """
 
+import shutil
 import subprocess
 import textwrap
 
@@ -133,11 +134,13 @@ _LIB_SOURCE = textwrap.dedent(
 @pytest.fixture(scope="module")
 def vadd_metallib(tmp_path_factory):
     """Compile a small .metallib for metal_kernel_lib tests."""
+    if shutil.which("xcrun") is None:
+        pytest.skip("requires xcrun (Xcode Command Line Tools) to build a .metallib")
     d = tmp_path_factory.mktemp("metallib")
     src, air, lib = d / "k.metal", d / "k.air", d / "k.metallib"
     src.write_text(_LIB_SOURCE)
     subprocess.run(
-        ["xcrun", "metal", "-std=metal3.1", "-O2", "-c", str(src), "-o", str(air)],
+        ["xcrun", "metal", "-O2", "-c", str(src), "-o", str(air)],
         check=True,
     )
     subprocess.run(["xcrun", "metallib", str(air), "-o", str(lib)], check=True)

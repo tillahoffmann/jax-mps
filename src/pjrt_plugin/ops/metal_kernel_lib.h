@@ -48,7 +48,7 @@ struct MklConstant {
 // `kname` when empty). `threadgroup` is threads per group. When
 // `by_threadgroups` is false, `grid` is the total thread count per dim (MLX
 // dispatch_threads); when true, `grid` is the number of threadgroups per dim
-// (dispatch_threadgroups for kernels that index by threadgroup_position_in_grid.
+// (dispatch_threadgroups, for kernels that index by threadgroup_position_in_grid).
 // `buffers` empty => positional binding.
 std::vector<array> metal_kernel_lib(
     const std::vector<array>& inputs,
