@@ -42,7 +42,7 @@ def make_random_op_configs(partitionable=None):
                     OperationTestConfig(
                         random.uniform,
                         random.key(17),
-                        (3,),
+                        shape,
                         None,
                         0.3,
                         0.5,
