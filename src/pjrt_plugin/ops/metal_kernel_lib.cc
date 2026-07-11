@@ -117,6 +117,8 @@ void MetalKernelLibKernel::eval_gpu(const std::vector<array>& inputs, std::vecto
         }
     } else {
         for (const auto& b : buffers_) {
+            if (b.slot < 0)
+                throw std::runtime_error("metal_kernel_lib: buffer slot must be non-negative");
             switch (b.kind) {
                 case MklBuffer::kInput:
                     if (b.arg < 0 || static_cast<size_t>(b.arg) >= in_ptrs.size())
