@@ -635,9 +635,9 @@ bool HandleAllReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
     auto replicaGroups = op->getAttrOfType<mlir::DenseIntElementsAttr>("replica_groups");
     if (replicaGroups && !replicaGroups.empty()) {
         auto groupType = mlir::dyn_cast<mlir::RankedTensorType>(replicaGroups.getType());
-        bool isMultiDevice =
-            (!groupType || groupType.getRank() < 2) ? replicaGroups.getNumElements() > 1
-                                                    : groupType.getShape().back() > 1;
+        bool isMultiDevice = (!groupType || groupType.getRank() < 2)
+                                 ? replicaGroups.getNumElements() > 1
+                                 : groupType.getShape().back() > 1;
         if (isMultiDevice) {
             ctx.error_message = "stablehlo.all_reduce: multi-device all_reduce is not supported";
             MPS_LOG_ERROR("%s\n", ctx.error_message.c_str());
