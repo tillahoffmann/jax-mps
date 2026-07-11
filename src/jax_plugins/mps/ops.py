@@ -658,6 +658,10 @@ def _metal_kernel_jit_lowering(
     ).results
 
 
+# Metal exposes buffer slots [[buffer(0)]]..[[buffer(30)]].
+_MAX_METAL_BUFFERS = 31
+
+
 def _dim3(x, name, minimum):
     """Coerce a launch dimension to an (x, y, z) int tuple, rejecting other lengths."""
     dims = tuple(int(v) for v in x)
@@ -685,8 +689,8 @@ def metal_kernel_jit(
 
     `source` is the MSL kernel body; reference inputs/outputs by their names
     (input_names/output_names, default in0.. / out0..) as row-contiguous device
-    pointers. `grid` is the total thread count per dim, `threadgroup` the threads
-    per group. Outputs are allocated by MLX from output_shapes/output_dtypes.
+    pointers. `grid` is the total thread count per dim, `threadgroup` the threads per group.
+    Outputs are allocated uninitialized by MLX from output_shapes/output_dtypes.
     """
     inputs = [jnp.asarray(x) for x in inputs]
     if input_names is None:
@@ -702,6 +706,12 @@ def metal_kernel_jit(
     if len(output_names) != len(output_shapes):
         raise ValueError("output_names must match the number of outputs")
 
+    if len(inputs) + len(output_shapes) > _MAX_METAL_BUFFERS:
+        raise ValueError(
+            f"metal_kernel_jit: {len(inputs)} inputs + {len(output_shapes)} outputs "
+            f"needs more than the {_MAX_METAL_BUFFERS} buffer slots Metal provides"
+        )
+
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
     out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
     return _metal_kernel_jit_p.bind(
@@ -711,7 +721,7 @@ def metal_kernel_jit(
         header=str(header),
         input_names=tuple(input_names),
         output_names=tuple(output_names),
-        grid=_dim3(grid, "grid", 0),
+        grid=_dim3(grid, "grid", 1),
         threadgroup=_dim3(threadgroup, "threadgroup", 1),
         out_shapes=out_shapes,
         out_dtypes=out_dtypes,
@@ -803,8 +813,10 @@ def _canon_buffers(buffers, n_inputs, n_outputs):
     out = []
     for b in buffers:
         slot = int(b["slot"])
-        if slot < 0:
-            raise ValueError(f"buffer slot must be >= 0, got {slot}")
+        if not 0 <= slot < _MAX_METAL_BUFFERS:
+            raise ValueError(
+                f"buffer slot must be in 0..{_MAX_METAL_BUFFERS - 1}, got {slot}"
+            )
         kinds = [k for k in ("input", "output", "bytes") if k in b]
         if len(kinds) != 1:
             raise ValueError(
@@ -877,7 +889,7 @@ def metal_kernel_lib(
 
     `name` is the kernel function's name inside the library at `metallib_path`.
     `grid` is the total thread count per dim, `threadgroup` the threads per group.
-    Outputs are allocated from output_shapes/output_dtypes.
+    Outputs are allocated uninitialized by MLX from output_shapes/output_dtypes.
 
     ``buffers=None``: operands bind to buffers 0..N-1 and outputs
     to N..N+M-1, all row-contiguous.
@@ -902,12 +914,17 @@ def metal_kernel_lib(
     inputs = [jnp.asarray(x) for x in inputs]
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
     out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
+    if buffers is None and len(inputs) + len(out_shapes) > _MAX_METAL_BUFFERS:
+        raise ValueError(
+            f"metal_kernel_lib: {len(inputs)} inputs + {len(out_shapes)} outputs "
+            f"needs more than the {_MAX_METAL_BUFFERS} buffer slots Metal provides"
+        )
     return _metal_kernel_lib_p.bind(
         *inputs,
         name=str(name),
         metallib_path=str(metallib_path),
         hash_name=str(hash_name) if hash_name else "",
-        grid=_dim3(grid, "grid", 0),
+        grid=_dim3(grid, "grid", 1),
         threadgroup=_dim3(threadgroup, "threadgroup", 1),
         dispatch=str(dispatch),
         buffers=_canon_buffers(buffers, len(inputs), len(out_shapes)),

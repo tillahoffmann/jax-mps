@@ -33,6 +33,9 @@ namespace jax_mps {
 
 namespace {
 
+// Metal exposes buffer slots [[buffer(0)]]..[[buffer(30)]].
+constexpr unsigned kMaxMetalBuffers = 31;
+
 // Complete all in-flight GPU work before a control-flow primitive touches
 // its inputs (jax-mps#195). WhileLoopPrimitive / CasePrimitive run on the
 // CPU stream *inside* an enclosing eval pass; their inputs typically have
@@ -1575,7 +1578,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         };
         std::tuple<int, int, int> grid;
         std::tuple<int, int, int> threadgroup;
-        if (!readTriple("grid", grid, 0) || !readTriple("threadgroup", threadgroup, 1)) {
+        if (!readTriple("grid", grid, 1) || !readTriple("threadgroup", threadgroup, 1)) {
             MPS_LOG_ERROR("mps.metal_kernel_jit: grid/threadgroup missing or out of range\n");
             return false;
         }
@@ -1588,6 +1591,13 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (op->getNumResults() != output_names.size()) {
             MPS_LOG_ERROR("mps.metal_kernel_jit: %u results but %zu output_names\n",
                           op->getNumResults(), output_names.size());
+            return false;
+        }
+        if (op->getNumOperands() + op->getNumResults() > kMaxMetalBuffers) {
+            MPS_LOG_ERROR(
+                "mps.metal_kernel_jit: %u inputs + %u outputs needs more than the %u "
+                "buffer slots Metal provides\n",
+                op->getNumOperands(), op->getNumResults(), kMaxMetalBuffers);
             return false;
         }
 
@@ -1668,7 +1678,7 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         };
         std::array<int, 3> grid{};
         std::array<int, 3> threadgroup{};
-        if (!readTriple("grid", grid, 0) || !readTriple("threadgroup", threadgroup, 1)) {
+        if (!readTriple("grid", grid, 1) || !readTriple("threadgroup", threadgroup, 1)) {
             MPS_LOG_ERROR("mps.metal_kernel_lib: grid/threadgroup missing or out of range\n");
             return false;
         }
@@ -1701,8 +1711,11 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                     MPS_LOG_ERROR("mps.metal_kernel_lib: buffer missing slot/kind\n");
                     return false;
                 }
-                if (*slot < 0 || *slot > std::numeric_limits<int>::max()) {
-                    MPS_LOG_ERROR("mps.metal_kernel_lib: buffer slot out of range\n");
+                if (*slot < 0 || *slot >= kMaxMetalBuffers) {
+                    MPS_LOG_ERROR(
+                        "mps.metal_kernel_lib: buffer slot %lld outside Metal's "
+                        "0..%u range\n",
+                        static_cast<long long>(*slot), kMaxMetalBuffers - 1);
                     return false;
                 }
                 b.slot = static_cast<int>(*slot);
@@ -1747,6 +1760,14 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 }
                 buffers.push_back(std::move(b));
             }
+        }
+        // Positional binding uses one slot per operand and result.
+        if (buffers.empty() && op->getNumOperands() + op->getNumResults() > kMaxMetalBuffers) {
+            MPS_LOG_ERROR(
+                "mps.metal_kernel_lib: %u inputs + %u outputs needs more than the %u "
+                "buffer slots Metal provides\n",
+                op->getNumOperands(), op->getNumResults(), kMaxMetalBuffers);
+            return false;
         }
 
         // Optional function constants.
