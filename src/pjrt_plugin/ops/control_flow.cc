@@ -1416,6 +1416,7 @@ inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
 }
 
 // Handler for stablehlo.custom_call
+// NOLINTNEXTLINE(readability-function-size)
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
     auto customCallOp = CastOp<mlir::stablehlo::CustomCallOp>(op, "stablehlo.custom_call");
@@ -1801,7 +1802,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 if (*kind == "input") {
                     auto arg = obj->getInteger("arg");
                     if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumOperands())) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: buffer input arg missing or out of range\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: buffer input arg missing or out of range\n");
                         return false;
                     }
                     b.kind = mlx::core::MklBuffer::kInput;
@@ -1809,7 +1811,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 } else if (*kind == "output") {
                     auto arg = obj->getInteger("arg");
                     if (!arg || *arg < 0 || *arg >= static_cast<int64_t>(op->getNumResults())) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: buffer output arg missing or out of range\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: buffer output arg missing or out of range\n");
                         return false;
                     }
                     b.kind = mlx::core::MklBuffer::kOutput;
@@ -1825,7 +1828,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                     for (auto& v : *data) {
                         auto byte = v.getAsInteger();
                         if (!byte || *byte < 0 || *byte > 255) {
-                            MPS_LOG_ERROR("mps.metal_kernel_lib: bytes entry not an integer in [0, 255]\n");
+                            MPS_LOG_ERROR(
+                                "mps.metal_kernel_lib: bytes entry not an integer in [0, 255]\n");
                             return false;
                         }
                         b.bytes.push_back(static_cast<uint8_t>(*byte));
@@ -1854,7 +1858,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 if (*type == "bool") {
                     auto v = obj->getBoolean("value");
                     if (!v) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: bool function_constant missing value\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: bool function_constant missing value\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kBool;
@@ -1862,7 +1867,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 } else if (*type == "int") {
                     auto v = obj->getInteger("value");
                     if (!v) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: int function_constant missing value\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: int function_constant missing value\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kInt;
@@ -1872,7 +1878,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 } else if (*type == "uint") {
                     auto v = obj->getInteger("value");
                     if (!v || *v < 0) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: uint function_constant missing or negative value\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: uint function_constant missing or negative "
+                            "value\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kUint;
@@ -1882,7 +1890,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 } else if (*type == "float") {
                     auto v = obj->getNumber("value");
                     if (!v) {
-                        MPS_LOG_ERROR("mps.metal_kernel_lib: float function_constant missing value\n");
+                        MPS_LOG_ERROR(
+                            "mps.metal_kernel_lib: float function_constant missing value\n");
                         return false;
                     }
                     c.type = mlx::core::MklConstant::kFloat;
@@ -1921,9 +1930,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         }
 
         auto results = mlx::core::metal_kernel_lib(
-            inputs, out_shapes, out_dtypes, pathOpt->str(), nameOpt->str(),
-            hash_name, grid, threadgroup, by_threadgroups, std::move(buffers),
-            std::move(constants));
+            inputs, out_shapes, out_dtypes, pathOpt->str(), nameOpt->str(), hash_name, grid,
+            threadgroup, by_threadgroups, std::move(buffers), std::move(constants));
         if (results.size() != op->getNumResults()) {
             MPS_LOG_ERROR("mps.metal_kernel_lib: kernel produced %zu outputs, expected %u\n",
                           results.size(), op->getNumResults());
