@@ -1721,7 +1721,23 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             out_dtypes.push_back(MlirTypeToMlxDtype(rt.getElementType()));
         }
 
-        auto kernel = mlx::core::fast::metal_kernel(nameOpt->str(), input_names, output_names,
+        // Hack: prevent MLX caching different kernels with same name by hashing
+        // see: https://github.com/ml-explore/mlx/issues/3832
+        std::string name = nameOpt->str();
+        uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
+        auto fold = [&h](const std::string& s) {
+            for (unsigned char c : s)
+                h = (h ^ c) * 0x100000001b3ULL;  // FNV-1a 64-bit prime
+        };
+        fold(name);
+        fold(sourceOpt->str());
+        fold(header);
+        for (const auto& n : input_names)
+            fold(n);
+        for (const auto& n : output_names)
+            fold(n);
+        std::string uniqueName = name + "_" + std::to_string(h);
+        auto kernel = mlx::core::fast::metal_kernel(uniqueName, input_names, output_names,
                                                     sourceOpt->str(), header,
                                                     /*ensure_row_contiguous=*/true,
                                                     /*atomic_outputs=*/false);
