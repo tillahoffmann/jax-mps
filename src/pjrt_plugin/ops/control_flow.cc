@@ -1633,25 +1633,30 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return false;
         const mlx::core::Shape& outShape = *shapeOpt;
 
+        // Product of the output dims. The flat length and 1-D grid extent below
+        // are int32, so reject anything larger than 2^31-1 (a >2^31-element RNG
+        // draw is ~8+ GiB and not addressable by the Metal dispatch anyway).
+        // Check inside the loop: each MLX dim is int32, so bailing the instant
+        // the running product exceeds int32 max keeps `total` itself from
+        // overflowing int64 and slipping past the bound (int32max*int32max fits
+        // int64). A zero dim yields total 0 (handled below), never a spurious
+        // reject, since a single dim can never exceed int32 max on its own.
         int64_t total = 1;
-        for (auto d : outShape)
+        for (auto d : outShape) {
             total *= d;
+            if (total > std::numeric_limits<int32_t>::max()) {
+                MPS_LOG_ERROR(
+                    "mps.threefry2x32: output element count exceeds the "
+                    "maximum addressable by the Metal dispatch (2^31-1)\n");
+                return false;
+            }
+        }
         // Zero-sized output: nothing to hash, and a zero-thread dispatch is
         // meaningless. Emit correctly-shaped empty arrays.
         if (total == 0) {
             values.emplace(ToKey(op->getResult(0)), mlx::core::zeros(outShape, mlx::core::uint32));
             values.emplace(ToKey(op->getResult(1)), mlx::core::zeros(outShape, mlx::core::uint32));
             return true;
-        }
-        // The flat length and 1-D grid extent are int32; a larger element count
-        // would silently truncate. Fail loudly instead (a >2^31-element RNG draw
-        // is ~8+ GiB and not something the Metal dispatch can address anyway).
-        if (total > std::numeric_limits<int32_t>::max()) {
-            MPS_LOG_ERROR(
-                "mps.threefry2x32: output element count %lld exceeds the "
-                "maximum addressable by the Metal dispatch (2^31-1)\n",
-                static_cast<long long>(total));
-            return false;
         }
 
         // Broadcast every operand to the output shape so the kernel is a flat
