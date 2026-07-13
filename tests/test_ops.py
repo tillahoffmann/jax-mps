@@ -57,7 +57,11 @@ OPERATION_TEST_CONFIGS = [
     *make_misc_op_configs(),
     *make_numpyro_op_configs(),
     *make_quantized_op_configs(),
-    *make_random_op_configs(),
+    # Run every random config under both jax_threefry_partitionable settings —
+    # they select different count-packing lowerings around the same threefry2x32
+    # primitive, so both must stay MPS-vs-CPU equivalent (issue #196).
+    *make_random_op_configs(partitionable=False),
+    *make_random_op_configs(partitionable=True),
     *make_reduction_op_configs(),
     *make_shape_op_configs(),
     *make_slice_op_configs(),
@@ -354,3 +358,23 @@ def test_rng_bit_generator() -> None:
         new_state2, output2 = lax.rng_bit_generator(state, (8,))
         assert jnp.array_equal(output2, output)
         assert jnp.array_equal(new_state2, new_state)
+
+
+def test_threefry2x32_lowers_to_custom_call() -> None:
+    """Regression: jax.random must lower to our fused @mps.threefry2x32 custom
+    call (issue #196) rather than JAX's ~140-op inline PRNG expansion. A future
+    JAX change that drops the mps-platform lowering would make this fail."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    device = jax.devices("mps")[0]
+    with jax.default_device(device):
+        key = random.key(0)
+        ir_text = str(
+            jax.jit(lambda k: random.bits(k, shape=(16,)))
+            .lower(key)
+            .compiler_ir(dialect="stablehlo")
+        )
+    assert "@mps.threefry2x32" in ir_text, (
+        f"Expected `@mps.threefry2x32` in lowered IR; got:\n{ir_text}"
+    )

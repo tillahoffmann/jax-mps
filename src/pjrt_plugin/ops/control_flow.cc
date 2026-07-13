@@ -1316,6 +1316,103 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
     return true;
 }
 
+// Evaluate JAX's threefry2x32 PRNG primitive as a single fused Metal kernel.
+//
+// threefry2x32-20 is pure integer arithmetic (add / rotate / xor) with the
+// standard Threefish rotation schedule {13,15,26,6}/{17,29,16,24}, parity
+// constant 0x1BD11BDA, and a key injection after every four rounds. This is
+// byte-for-byte the same schedule JAX's CPU lowering runs (see
+// jax/_src/prng.py `_threefry2x32_lowering`), so the outputs are bit-exact with
+// the CPU backend by construction — which the test harness relies on (it
+// compares MPS vs CPU integer outputs exactly). Do NOT swap in MLX's own RNG:
+// it uses a modified splittable variant that would not reproduce user seeds.
+//
+// Without this kernel, jax.random inlines threefry as ~140 tiny elementwise
+// StableHLO ops per key op; inside a compiled loop body every surviving MLX
+// node costs ~1.5us of dispatch, so a single random.split in a fori_loop body
+// ran ~30x slower than the arithmetic-only body (jax-mps#196). One kernel call
+// removes that per-node cost.
+//
+// Inputs (all uint32, broadcast to the output shape here): key0, key1, count0,
+// count1. Outputs: out0, out1 (uint32, output shape).
+std::vector<mlx::core::array> Threefry2x32Kernel(const mlx::core::array& k0,
+                                                 const mlx::core::array& k1,
+                                                 const mlx::core::array& x0,
+                                                 const mlx::core::array& x1,
+                                                 const mlx::core::Shape& outShape, int64_t total) {
+    static const char* kHeader = R"(
+inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
+    return (x << n) | (x >> (32u - n));
+}
+)";
+    // Body of the [[kernel]]; MLX declares key0/key1/count0/count1 as inputs,
+    // out0/out1 as outputs, and provides thread_position_in_grid. Inputs are
+    // row-contiguous (ensure_row_contiguous), so a flat 1-D index suffices.
+    static const char* kSource = R"(
+    uint idx = thread_position_in_grid.x;
+    uint32_t ks0 = key0[idx];
+    uint32_t ks1 = key1[idx];
+    uint32_t ks2 = ks0 ^ ks1 ^ 0x1BD11BDAu;
+    uint32_t X0 = count0[idx] + ks0;
+    uint32_t X1 = count1[idx] + ks1;
+    // block 0 — rotations {13,15,26,6}, inject (ks1, ks2 + 1)
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 13u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 15u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 26u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 6u);
+    X0 += ks1; X1 += ks2 + 1u;
+    // block 1 — rotations {17,29,16,24}, inject (ks2, ks0 + 2)
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 17u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 29u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 16u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 24u);
+    X0 += ks2; X1 += ks0 + 2u;
+    // block 2 — rotations {13,15,26,6}, inject (ks0, ks1 + 3)
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 13u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 15u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 26u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 6u);
+    X0 += ks0; X1 += ks1 + 3u;
+    // block 3 — rotations {17,29,16,24}, inject (ks1, ks2 + 4)
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 17u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 29u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 16u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 24u);
+    X0 += ks1; X1 += ks2 + 4u;
+    // block 4 — rotations {13,15,26,6}, inject (ks2, ks0 + 5)
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 13u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 15u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 26u);
+    X0 += X1; X1 = X0 ^ tfry_rotl(X1, 6u);
+    X0 += ks2; X1 += ks0 + 5u;
+    out0[idx] = X0;
+    out1[idx] = X1;
+)";
+    // Building the CustomKernelFunction only assembles a std::function; the
+    // Metal library is compiled lazily and cached by MLX keyed on the kernel
+    // name, so a function-local static is safe and avoids re-wrapping per call.
+    static const mlx::core::fast::CustomKernelFunction kernel = mlx::core::fast::metal_kernel(
+        "threefry2x32", /*input_names=*/{"key0", "key1", "count0", "count1"},
+        /*output_names=*/{"out0", "out1"}, kSource, kHeader,
+        /*ensure_row_contiguous=*/true);
+
+    // Flatten to 1-D before dispatch: MLX declares rank-0 kernel inputs as
+    // scalar references (not pointers), so `count0[idx]` would not compile for
+    // a scalar output shape. A single flat axis also matches the 1-D grid.
+    mlx::core::Shape flat{static_cast<int32_t>(total)};
+    int threads = static_cast<int>(std::min<int64_t>(total, 256));
+    auto outs = kernel({mlx::core::reshape(k0, flat), mlx::core::reshape(k1, flat),
+                        mlx::core::reshape(x0, flat), mlx::core::reshape(x1, flat)},
+                       /*output_shapes=*/{flat, flat},
+                       /*output_dtypes=*/{mlx::core::uint32, mlx::core::uint32},
+                       /*grid=*/{static_cast<int>(total), 1, 1},
+                       /*threadgroup=*/{threads, 1, 1}, /*template_args=*/{},
+                       /*init_value=*/std::nullopt, /*verbose=*/false, /*s=*/{});
+    outs[0] = mlx::core::reshape(outs[0], outShape);
+    outs[1] = mlx::core::reshape(outs[1], outShape);
+    return outs;
+}
+
 // Handler for stablehlo.custom_call
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -1512,6 +1609,64 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         auto out = mlx::core::quantized_matmul(*x, *packed, *scales, *biases, transpose, group_size,
                                                bits, "affine");
         values.emplace(ToKey(op->getResult(0)), std::move(out));
+        return true;
+    }
+
+    // Handle mps.threefry2x32 — JAX's threefry2x32 PRNG primitive as one fused
+    // Metal kernel (see Threefry2x32Kernel above and jax-mps#196). Inputs
+    // key0, key1, count0, count1 are uint32 and broadcastable to the (shared)
+    // output shape; outputs out0, out1 have that shape.
+    if (callTargetName == "mps.threefry2x32") {
+        if (op->getNumOperands() != 4 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("mps.threefry2x32: expected 4 inputs and 2 outputs\n");
+            return false;
+        }
+        auto* k0 = RequireValue(values, op->getOperand(0), "mps.threefry2x32");
+        auto* k1 = RequireValue(values, op->getOperand(1), "mps.threefry2x32");
+        auto* x0 = RequireValue(values, op->getOperand(2), "mps.threefry2x32");
+        auto* x1 = RequireValue(values, op->getOperand(3), "mps.threefry2x32");
+        if (!k0 || !k1 || !x0 || !x1)
+            return false;
+
+        auto shapeOpt = GetResultShape(op, "mps.threefry2x32");
+        if (!shapeOpt)
+            return false;
+        const mlx::core::Shape& outShape = *shapeOpt;
+
+        // Product of the output dims. The flat length and 1-D grid extent below
+        // are int32, so reject anything larger than 2^31-1 (a >2^31-element RNG
+        // draw is ~8+ GiB and not addressable by the Metal dispatch anyway).
+        // Check inside the loop: each MLX dim is int32, so bailing the instant
+        // the running product exceeds int32 max keeps `total` itself from
+        // overflowing int64 and slipping past the bound (int32max*int32max fits
+        // int64). A zero dim yields total 0 (handled below), never a spurious
+        // reject, since a single dim can never exceed int32 max on its own.
+        int64_t total = 1;
+        for (auto d : outShape) {
+            total *= d;
+            if (total > std::numeric_limits<int32_t>::max()) {
+                MPS_LOG_ERROR(
+                    "mps.threefry2x32: output element count exceeds the "
+                    "maximum addressable by the Metal dispatch (2^31-1)\n");
+                return false;
+            }
+        }
+        // Zero-sized output: nothing to hash, and a zero-thread dispatch is
+        // meaningless. Emit correctly-shaped empty arrays.
+        if (total == 0) {
+            values.emplace(ToKey(op->getResult(0)), mlx::core::zeros(outShape, mlx::core::uint32));
+            values.emplace(ToKey(op->getResult(1)), mlx::core::zeros(outShape, mlx::core::uint32));
+            return true;
+        }
+
+        // Broadcast every operand to the output shape so the kernel is a flat
+        // elementwise map (keys are typically scalars, counts the full shape).
+        auto outs = Threefry2x32Kernel(mlx::core::broadcast_to(*k0, outShape),
+                                       mlx::core::broadcast_to(*k1, outShape),
+                                       mlx::core::broadcast_to(*x0, outShape),
+                                       mlx::core::broadcast_to(*x1, outShape), outShape, total);
+        values.emplace(ToKey(op->getResult(0)), std::move(outs[0]));
+        values.emplace(ToKey(op->getResult(1)), std::move(outs[1]));
         return true;
     }
 
