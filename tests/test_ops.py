@@ -9,6 +9,7 @@ from jax import numpy as jnp
 from .configs import (
     OperationTestConfig,
     make_binary_op_configs,
+    make_collectives_op_configs,
     make_control_flow_op_configs,
     make_conv_op_configs,
     make_conversion_op_configs,
@@ -48,6 +49,7 @@ def get_test_platforms() -> list[str]:
 
 OPERATION_TEST_CONFIGS = [
     *make_binary_op_configs(),
+    *make_collectives_op_configs(),
     *make_control_flow_op_configs(),
     *make_conv_op_configs(),
     *make_conversion_op_configs(),

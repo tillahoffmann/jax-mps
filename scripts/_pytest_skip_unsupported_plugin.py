@@ -72,8 +72,8 @@ _UNSUPPORTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"Unsupported operation\(s\): stablehlo\."
-            r"(all_reduce|all_gather|all_to_all|collective_permute|"
-            r"collective_broadcast|reduce_scatter|partition_id|replica_id)"
+            r"(all_gather|all_to_all|collective_permute|"
+            r"collective_broadcast|reduce_scatter)"
         ),
         "collective ops require a multi-device mesh; MPS is single-device",
     ),
