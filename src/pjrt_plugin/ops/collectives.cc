@@ -53,8 +53,8 @@ bool HandleAllReduce(mlir::Operation* op, ValueMap& values, std::vector<mlx::cor
 // zero so pmap axis_index lowerings work on one MPS device. Multi-partition
 // execution must fail loudly; returning zero there would silently produce wrong
 // values.
-bool HandlePartitionId(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
-                       ExecContext& ctx) {
+bool HandlePartitionId(mlir::Operation* op, ValueMap& values,
+                       std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
     if (auto numPartitions = ctx.module->getAttrOfType<mlir::IntegerAttr>("mhlo.num_partitions")) {
         if (numPartitions.getInt() != 1) {
             ctx.error_message =

@@ -27,9 +27,7 @@ def _partition_id_axis_index(x):
     pmapped axis index is 0 and this function is an identity.
     """
     dev = getattr(jax.config, "jax_default_device", None) or jax.devices()[0]
-    return jax.pmap(
-        lambda y: y + lax.axis_index("i"), axis_name="i", devices=[dev]
-    )(x)
+    return jax.pmap(lambda y: y + lax.axis_index("i"), axis_name="i", devices=[dev])(x)
 
 
 def make_collectives_op_configs():
