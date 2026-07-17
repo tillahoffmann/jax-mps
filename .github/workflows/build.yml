@@ -419,7 +419,11 @@ jobs:
             latest)
               uv pip install --upgrade "jax<0.11" "jaxlib<0.11" ;;
             nightly)
-              uv pip install --prerelease=allow --pre jax jaxlib \
+              # --upgrade is required: jax/jaxlib are already installed at the
+              # pinned version by `uv sync`, and without it uv leaves them in
+              # place (the bare requirement is already satisfied) instead of
+              # pulling the nightly pre-release.
+              uv pip install --upgrade --prerelease=allow --pre jax jaxlib \
                 --index https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
                 --index-strategy unsafe-best-match ;;
           esac

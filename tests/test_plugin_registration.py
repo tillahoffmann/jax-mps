@@ -16,9 +16,8 @@ on CPU-only CI where the MPS-gated suite is skipped.
 
 from __future__ import annotations
 
-from jax._src.interpreters import mlir
-
 import jax_plugins.mps
+from jax_plugins.mps import ops
 
 
 def test_plugin_initializes_without_degradation():
@@ -28,5 +27,6 @@ def test_plugin_initializes_without_degradation():
 
     # Sanity that initialize() actually registered the platform rather than
     # no-opping -- so a future change that stops registering entirely (without
-    # warning) still fails here.
-    assert "mps" in mlir._platform_specific_lowerings
+    # warning) still fails here. Reuse the mlir handle already imported (and
+    # justified) in ops rather than adding another jax._src import surface.
+    assert "mps" in ops.mlir._platform_specific_lowerings
