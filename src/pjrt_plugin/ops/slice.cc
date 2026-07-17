@@ -83,26 +83,40 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
 
     auto sliceSizes = dynamicSliceOp.getSliceSizes();
 
-    // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
-    auto result = *input;
-    for (size_t i = 1; i < op->getNumOperands(); ++i) {
-        auto* idx = RequireValue(values, op->getOperand(i), "stablehlo.dynamic_slice");
+    // Lower to MLX's dynamic slice(a, start, axes, slice_size): one lazy
+    // primitive whose eval is a view/copy of just the slice, instead of the
+    // previous per-axis take chain (ndim gathers plus index arithmetic per
+    // call — a real cost inside while-loop bodies, where scan reads one
+    // xs[i] every iteration).
+    const int ndim = static_cast<int>(input->ndim());
+    if (ndim == 0) {
+        values.emplace(ToKey(op->getResult(0)), *input);
+        return true;
+    }
+
+    std::vector<mlx::core::array> startParts;
+    std::vector<int> axes;
+    mlx::core::Shape outSize;
+    startParts.reserve(static_cast<size_t>(ndim));
+    axes.reserve(static_cast<size_t>(ndim));
+    for (int d = 0; d < ndim; ++d) {
+        auto* idx = RequireValue(values, op->getOperand(static_cast<unsigned>(d + 1)),
+                                 "stablehlo.dynamic_slice");
         if (!idx)
             return false;
-        auto start_idx = mlx::core::astype(*idx, mlx::core::int32);
-        int size = static_cast<int>(sliceSizes[i - 1]);
-        int axis = static_cast<int>(i - 1);
-        int dim_size = input->shape(axis);
-
-        // Clamp start index per StableHLO spec: max(0, min(start, dim_size - size))
-        start_idx = mlx::core::maximum(
-            mlx::core::array(0), mlx::core::minimum(start_idx, mlx::core::array(dim_size - size)));
-
-        auto offsets = mlx::core::arange(0, size, mlx::core::int32);
-        auto indices = mlx::core::add(start_idx, offsets);
-        result = mlx::core::take(result, indices, axis);
+        const int size = static_cast<int>(sliceSizes[static_cast<unsigned>(d)]);
+        const int dimSize = input->shape(d);
+        // Clamp start per StableHLO spec: max(0, min(start, dim_size - size)).
+        auto start =
+            mlx::core::clip(mlx::core::astype(mlx::core::reshape(*idx, {1}), mlx::core::int32),
+                            mlx::core::array(0), mlx::core::array(dimSize - size));
+        startParts.push_back(std::move(start));
+        axes.push_back(d);
+        outSize.push_back(size);
     }
-    values.emplace(ToKey(op->getResult(0)), std::move(result));
+    auto startArr = startParts.size() == 1 ? startParts[0] : mlx::core::concatenate(startParts, 0);
+    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(*input, std::move(startArr),
+                                                             std::move(axes), std::move(outSize)));
     return true;
 }
 
