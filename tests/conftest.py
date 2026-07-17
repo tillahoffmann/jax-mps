@@ -16,8 +16,12 @@ def mps_device():
 
     Any test that needs an MPS device -- whether for the device instance or just
     its presence -- should request this fixture instead of re-deriving the
-    device and its skip guard at module scope.
+    device and its skip guard at module scope. Also skips under
+    ``JAX_TEST_MODE=cpu``, which forces CPU-only runs even on MPS machines, so
+    MPS-specific tests do not run (and spuriously fail) in that mode.
     """
+    if os.environ.get("JAX_TEST_MODE", "compare").lower() == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
     try:
         return jax.devices("mps")[0]
     except (RuntimeError, IndexError):
