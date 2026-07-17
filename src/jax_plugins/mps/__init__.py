@@ -125,7 +125,8 @@ def initialize() -> None:
         jax.config.update("jax_use_shardy_partitioner", False)
     except Exception as e:
         warnings.warn(
-            f"Failed to disable shardy partitioner: {e}. Some operations may not work correctly.",
+            f"jax-mps: failed to disable shardy partitioner: {e}. "
+            "Some operations may not work correctly.",
             stacklevel=2,
         )
 

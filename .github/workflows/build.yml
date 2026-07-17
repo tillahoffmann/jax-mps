@@ -369,18 +369,28 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_TEST_MODE: cpu
 
-  test-jax-latest:
-    name: Test (jax/jaxlib latest)
+  test-jax-canary:
+    name: Test (jax ${{ matrix.channel }})
     needs: build
     runs-on: macos-26
-    # Canary: install the newest jax/jaxlib allowed by pyproject so we learn
-    # about upstream-breaking patch releases (e.g. #162) before users do.
-    # Informational only — does not block PRs.
+    # Forward-looking canary: run the device-free plugin-registration test
+    # against the newest in-range jax and the nightly pre-release, so a
+    # jax-internal move that silently breaks fused-op registration (e.g. the
+    # jax._src.prng removal in 0.10.2, #216) is caught before users hit it.
+    # #216 slipped through precisely because the range allowed 0.10.2 while CI
+    # only tested the pinned version.
+    #
+    # Informational only (continue-on-error) — the runner has no MPS GPU, so
+    # this verifies registration, not the mps compute path. The full suite runs
+    # on the pinned version in the `test` job; registration is checked there too
+    # (tests/test_plugin_registration.py), so this only adds the version spread.
     continue-on-error: true
-    # Disabled until an MPS-capable runner is available: the affected
-    # lowerings register only for platform="mps", so a CPU-only run would
-    # not actually exercise them. Re-enable by removing this `if: false`.
-    if: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # latest  = newest release still inside `jax>=0.10.0,<0.11`;
+        # nightly = jax pre-release wheel (ahead of the range — next-major warning).
+        channel: [latest, nightly]
     steps:
       - uses: actions/checkout@v6
 
@@ -395,17 +405,46 @@ jobs:
           name: wheel
           path: dist/
 
-      - name: Install wheel and test dependencies (jax/jaxlib upgraded)
+      - name: Install test dependencies and wheel
+        # --no-deps on the wheel so the channel-selected jax/jaxlib (below) is
+        # not overridden by the wheel's own `<0.11` pin — needed for nightly,
+        # which is ahead of that range.
         run: |
-          uv sync --all-groups --no-install-project --upgrade-package jax --upgrade-package jaxlib
-          uv pip install dist/*.whl
+          uv sync --all-groups --no-install-project
+          uv pip install --no-deps dist/*.whl
+
+      - name: Select jax/jaxlib (${{ matrix.channel }})
+        run: |
+          case "${{ matrix.channel }}" in
+            latest)
+              uv pip install --upgrade "jax<0.11" "jaxlib<0.11" ;;
+            nightly)
+              # --upgrade is required: jax/jaxlib are already installed at the
+              # pinned version by `uv sync`, and without it uv leaves them in
+              # place (the bare requirement is already satisfied) instead of
+              # pulling the nightly pre-release.
+              uv pip install --upgrade --prerelease=allow --pre jax jaxlib \
+                --index https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+                --index-strategy unsafe-best-match ;;
+          esac
           .venv/bin/python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
 
-      - name: Run tests on CPU
-        run: .venv/bin/pytest tests/ -v
+      - name: Plugin registration check (device-free)
+        # Run the check as plain python, not pytest: the canary installs a
+        # newest/pre-release jax, and conftest.py imports the config helpers
+        # (tests/configs/*), which import flax -- pinned for the pinned-jax
+        # suite and not yet compatible here (flax touches jax.core.Effect,
+        # removed in jax 0.11), so pytest aborts at collection before our code
+        # runs. Plain python skips conftest entirely. This exercises the same
+        # device-free initialize() path; the -W filters mirror pytest.ini's
+        # filterwarnings (promote jax-mps degradation warnings to errors, exempt
+        # the expected jaxlib build/runtime mismatch). The pytest form
+        # (tests/test_plugin_registration.py) still runs on the pinned jax in
+        # the `test` job.
+        run: |
+          .venv/bin/python -W "error:jax-mps" -W "ignore:jax-mps was built for jaxlib" -c "import jax_plugins.mps; from jax_plugins.mps import ops; jax_plugins.mps.initialize(); assert 'mps' in ops.mlir._platform_specific_lowerings; print('registration OK')"
         env:
           JAX_PLATFORMS: cpu
-          JAX_TEST_MODE: cpu
 
   release:
     name: Release
