@@ -369,28 +369,28 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_TEST_MODE: cpu
 
-  test-jax-matrix:
+  test-jax-canary:
     name: Test (jax ${{ matrix.channel }})
     needs: build
     runs-on: macos-26
-    # Canary matrix over the supported jax/jaxlib range plus the nightly
-    # pre-release, so we learn about upstream-breaking releases (e.g. #162, the
-    # jax._src.prng removal in 0.10.2 / #216) before users do. Informational
-    # only — does not block PRs — since the runner has no MPS GPU.
+    # Forward-looking canary: run the device-free plugin-registration test
+    # against the newest in-range jax and the nightly pre-release, so a
+    # jax-internal move that silently breaks fused-op registration (e.g. the
+    # jax._src.prng removal in 0.10.2, #216) is caught before users hit it.
+    # #216 slipped through precisely because the range allowed 0.10.2 while CI
+    # only tested the pinned version.
     #
-    # The runner can't run the platform="mps" compute path, but registration is
-    # device-free: scripts/check_jax_compat.py drives the plugin's initialize()
-    # and asserts the fused lowerings actually registered, which is exactly the
-    # kind of jax-internal breakage this matrix exists to catch. The CPU suite
-    # then checks the platform-agnostic paths still import and run.
+    # Informational only (continue-on-error) — the runner has no MPS GPU, so
+    # this verifies registration, not the mps compute path. The full suite runs
+    # on the pinned version in the `test` job; registration is checked there too
+    # (tests/test_plugin_registration.py), so this only adds the version spread.
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        # minimum = floor of the pyproject `jax>=0.10.0,<0.11` range;
-        # latest   = newest release still inside that range;
-        # nightly  = jax pre-release wheel (may be ahead of the range).
-        channel: [minimum, latest, nightly]
+        # latest  = newest release still inside `jax>=0.10.0,<0.11`;
+        # nightly = jax pre-release wheel (ahead of the range — next-major warning).
+        channel: [latest, nightly]
     steps:
       - uses: actions/checkout@v6
 
@@ -416,8 +416,6 @@ jobs:
       - name: Select jax/jaxlib (${{ matrix.channel }})
         run: |
           case "${{ matrix.channel }}" in
-            minimum)
-              uv pip install "jax==0.10.0" "jaxlib==0.10.0" ;;
             latest)
               uv pip install --upgrade "jax<0.11" "jaxlib<0.11" ;;
             nightly)
@@ -427,11 +425,8 @@ jobs:
           esac
           .venv/bin/python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
 
-      - name: Check fused-op registration (device-free)
-        run: .venv/bin/python scripts/check_jax_compat.py
-
-      - name: Run tests on CPU
-        run: .venv/bin/pytest tests/ -v
+      - name: Plugin registration check (device-free)
+        run: .venv/bin/pytest tests/test_plugin_registration.py -v
         env:
           JAX_PLATFORMS: cpu
           JAX_TEST_MODE: cpu
