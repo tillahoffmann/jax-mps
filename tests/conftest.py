@@ -4,9 +4,25 @@ import os
 import re
 from pathlib import Path
 
+import jax
 import pytest
 
 from .configs import OperationTestConfig
+
+
+@pytest.fixture(scope="session")
+def mps_device():
+    """The MPS device, or skip the requesting test if none is available.
+
+    Any test that needs an MPS device -- whether for the device instance or just
+    its presence -- should request this fixture instead of re-deriving the
+    device and its skip guard at module scope.
+    """
+    try:
+        return jax.devices("mps")[0]
+    except (RuntimeError, IndexError):
+        pytest.skip("MPS device required")
+
 
 # Aggregated ops from all xdist workers (controller only).
 _aggregated_exercised_ops: set[str] = set()

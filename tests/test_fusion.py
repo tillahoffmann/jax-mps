@@ -26,13 +26,6 @@ from .configs import FusionTestConfig, make_fusion_configs
 
 CUSTOM_CALL_RE = re.compile(r"stablehlo\.custom_call\s+@(mps\.[\w\.]+)")
 
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
-
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required")
-
 
 @pytest.fixture(params=make_fusion_configs(), ids=lambda c: c.name)
 def config(request: pytest.FixtureRequest) -> FusionTestConfig:
@@ -50,6 +43,7 @@ def _count_custom_calls(dump_dir: Path) -> dict[str, int]:
 def _run_mps(
     config: FusionTestConfig,
     *,
+    device,
     dump_dir: Path | None,
     disable_fusions: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -67,16 +61,20 @@ def _run_mps(
     # regardless of our env vars. Clear the cache so the plugin actually
     # re-parses under the current JAX_MPS_NO_OPTIMIZE setting.
     jax.clear_caches()
-    args = jax.device_put(config.make_args(), MPS_DEVICE)
+    args = jax.device_put(config.make_args(), device)
     result = jax.jit(config.func)(*args)
     jax.block_until_ready(result)
     return result
 
 
-def test_fusion(config: FusionTestConfig, tmp_path: Path, monkeypatch):
+def test_fusion(config: FusionTestConfig, tmp_path: Path, monkeypatch, mps_device):
     # 1. Fused path: dump post-pass IR and capture result.
     fused = _run_mps(
-        config, dump_dir=tmp_path, disable_fusions=False, monkeypatch=monkeypatch
+        config,
+        device=mps_device,
+        dump_dir=tmp_path,
+        disable_fusions=False,
+        monkeypatch=monkeypatch,
     )
 
     # 2. IR-level check: the dumped modules must contain the expected
@@ -99,7 +97,11 @@ def test_fusion(config: FusionTestConfig, tmp_path: Path, monkeypatch):
     #    hardware, only the fused kernel differs. Catches regressions
     #    introduced specifically by the fusion.
     unfused = _run_mps(
-        config, dump_dir=None, disable_fusions=True, monkeypatch=monkeypatch
+        config,
+        device=mps_device,
+        dump_dir=None,
+        disable_fusions=True,
+        monkeypatch=monkeypatch,
     )
     numpy.testing.assert_allclose(
         numpy.asarray(fused),

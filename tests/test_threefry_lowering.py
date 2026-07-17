@@ -18,18 +18,10 @@ this fails loudly instead of degrading silently.
 from __future__ import annotations
 
 import jax
-import pytest
 from jax import random
 
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
 
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required")
-
-
-def test_random_lowers_to_fused_threefry_custom_call():
+def test_random_lowers_to_fused_threefry_custom_call(mps_device):
     """jax.random on MPS emits @mps.threefry2x32, not the inline expansion."""
 
     def f(key):
@@ -38,7 +30,7 @@ def test_random_lowers_to_fused_threefry_custom_call():
     # Place the key on the MPS device so lowering targets MPS specifically --
     # otherwise, with multiple platforms available, jit could lower for CPU and
     # miss the custom_call even when the MPS lowering is correctly registered.
-    key = jax.device_put(random.key(0), MPS_DEVICE)
+    key = jax.device_put(random.key(0), mps_device)
     lowered = jax.jit(f).lower(key)
     text = lowered.as_text()
     assert "mps.threefry2x32" in text, (
@@ -48,7 +40,7 @@ def test_random_lowers_to_fused_threefry_custom_call():
     )
 
 
-def test_threefry_primitive_registered_for_mps_platform():
+def test_threefry_primitive_registered_for_mps_platform(mps_device):
     """The threefry2x32 primitive has an MPS-platform lowering registered."""
     import jax.extend.random
     from jax._src.interpreters import mlir

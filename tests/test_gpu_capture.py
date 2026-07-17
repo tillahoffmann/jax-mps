@@ -17,16 +17,6 @@ import os
 import subprocess
 import sys
 
-import jax
-import pytest
-
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
-
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required")
-
 # A minimal on-device computation: force the work onto MPS and block so the
 # matmul actually dispatches (and so the captured command buffer is non-empty).
 _WORKLOAD = (
@@ -47,7 +37,7 @@ def _run_workload(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_gpu_capture_writes_trace(tmp_path):
+def test_gpu_capture_writes_trace(tmp_path, mps_device):
     trace = tmp_path / "capture.gputrace"
     env = {
         **os.environ,
@@ -64,7 +54,7 @@ def test_gpu_capture_writes_trace(tmp_path):
         assert trace.stat().st_size > 0, "trace file is empty"
 
 
-def test_gpu_capture_without_mtl_enabled_is_graceful(tmp_path):
+def test_gpu_capture_without_mtl_enabled_is_graceful(tmp_path, mps_device):
     trace = tmp_path / "capture.gputrace"
     env = {**os.environ, "JAX_MPS_GPU_CAPTURE": str(trace)}
     env.pop("MTL_CAPTURE_ENABLED", None)
