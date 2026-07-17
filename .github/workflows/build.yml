@@ -430,10 +430,20 @@ jobs:
           .venv/bin/python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
 
       - name: Plugin registration check (device-free)
-        run: .venv/bin/pytest tests/test_plugin_registration.py -v
+        # Run the check as plain python, not pytest: the canary installs a
+        # newest/pre-release jax, and the suite's harness deps (flax, numpyro,
+        # pinned for the pinned-jax suite) do not yet import under it — e.g.
+        # flax touches jax.core.Effect, removed in jax 0.11 — which fails pytest
+        # collection (conftest + auto-loaded plugins) before our code runs. This
+        # exercises the same device-free initialize() path; the -W filters
+        # mirror pytest.ini's filterwarnings (promote jax-mps degradation
+        # warnings to errors, exempt the expected jaxlib build/runtime mismatch).
+        # The pytest form (tests/test_plugin_registration.py) still runs on the
+        # pinned jax in the `test` job.
+        run: |
+          .venv/bin/python -W "error:jax-mps" -W "ignore:jax-mps was built for jaxlib" -c "import jax_plugins.mps; from jax_plugins.mps import ops; jax_plugins.mps.initialize(); assert 'mps' in ops.mlir._platform_specific_lowerings; print('registration OK')"
         env:
           JAX_PLATFORMS: cpu
-          JAX_TEST_MODE: cpu
 
   release:
     name: Release
