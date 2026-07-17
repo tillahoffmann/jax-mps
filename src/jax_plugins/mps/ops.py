@@ -1557,10 +1557,18 @@ def patch_jax_functions():
         nn_functions.dot_product_attention = _patched_dot_product_attention
         jnn.dot_product_attention = _patched_dot_product_attention
 
-    # --- Flax LayerNorm ---
+    # --- Flax LayerNorm (best-effort) ---
+    # Importing flax is optional; skip patching if flax is absent OR present but
+    # incompatible with the installed jax. A flax built against a different jax
+    # can raise at import from touching jax internals that moved or were removed
+    # (e.g. jax.core.Effect, gone in jax 0.11) -- an AttributeError, not an
+    # ImportError -- so catch broadly. Only the import is guarded; the patching
+    # below stays unguarded so real bugs in it still surface.
     try:
         from flax import nnx as _nnx
-
+    except Exception:
+        _nnx = None
+    if _nnx is not None:
         _original_ln_call = _nnx.LayerNorm.__call__
         if not getattr(_original_ln_call, "_mps_patched", False):
 
@@ -1580,5 +1588,3 @@ def patch_jax_functions():
 
             _patched_layer_norm_call._mps_patched = True
             _nnx.LayerNorm.__call__ = _patched_layer_norm_call  # type: ignore[assignment]
-    except ImportError:
-        pass

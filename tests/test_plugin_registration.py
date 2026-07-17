@@ -16,6 +16,8 @@ on CPU-only CI where the MPS-gated suite is skipped.
 
 from __future__ import annotations
 
+import builtins
+
 import jax_plugins.mps
 from jax_plugins.mps import ops
 
@@ -30,3 +32,29 @@ def test_plugin_initializes_without_degradation():
     # warning) still fails here. Reuse the mlir handle already imported (and
     # justified) in ops rather than adding another jax._src import surface.
     assert "mps" in ops.mlir._platform_specific_lowerings
+
+
+def test_patch_jax_functions_survives_incompatible_flax(monkeypatch):
+    """A present-but-incompatible flax must be skipped, not crash patching.
+
+    The flax LayerNorm patch is best-effort. A flax built against a different
+    jax can raise at import from touching jax internals that moved -- e.g.
+    ``jax.core.Effect``, removed in jax 0.11 -- which is an AttributeError, not
+    an ImportError. ``patch_jax_functions`` must degrade to skipping flax rather
+    than letting that escape and crash ``initialize()`` (this happened on the
+    jax-nightly canary).
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "flax" or name.startswith("flax."):
+            raise AttributeError(
+                "jax.core.Effect was deprecated in JAX v0.10.0 and removed in "
+                "JAX v0.11.0."
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    # Must not raise: the incompatible flax import is skipped like an absent one.
+    ops.patch_jax_functions()
