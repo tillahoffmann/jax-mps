@@ -16,18 +16,24 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-from jax._src import core
+from jax import lax
+
+# The jax._src imports below are kept only because no public jax.* / jax.extend.*
+# equivalent exists on the supported jax range -- prefer a public path for
+# anything new (see CLAUDE.md). jax.interpreters.mlir omits the custom_call /
+# full_like_aval / dialects helpers we use; the MLIR ir/hlo bindings and _jax
+# are jaxlib C-extensions with no jax-level surface. (register_plugin, used in
+# __init__.py, likewise lives only on jax._src.xla_bridge.)
 from jax._src.interpreters import mlir
-from jax._src.lax import ann as lax_ann
-from jax._src.lax import lax as lax_lax
-from jax._src.lax import linalg as lax_linalg
-from jax._src.lax import special as lax_special
 from jax._src.lib import _jax  # pyright: ignore[reportPrivateImportUsage]
 from jax._src.lib.mlir import ir  # pyright: ignore[reportPrivateImportUsage]
 from jax._src.lib.mlir.dialects import hlo
+from jax.core import ShapedArray
+from jax.extend.core import Primitive
+from jax.lax import linalg as lax_linalg
 
 
-def _aval_to_ir_type(aval: core.ShapedArray) -> ir.Type:
+def _aval_to_ir_type(aval: ShapedArray) -> ir.Type:
     """Construct an MLIR ranked-tensor type for a ShapedArray.
 
     Avoids ``mlir.aval_to_ir_type`` whose signature is unstable across jax
@@ -43,12 +49,12 @@ def _aval_to_ir_type(aval: core.ShapedArray) -> ir.Type:
 # Two primitives: mps.sdpa (with boolean mask operand) and mps.sdpa_causal.
 # Unmasked attention is just the masked primitive with an all-True mask.
 
-_sdpa_p = core.Primitive("mps.sdpa")
+_sdpa_p = Primitive("mps.sdpa")
 _sdpa_p.multiple_results = False
 
 
 def _sdpa_abstract(q, k, v, mask, *, scale):
-    return core.ShapedArray(q.shape, q.dtype)
+    return ShapedArray(q.shape, q.dtype)
 
 
 _sdpa_p.def_abstract_eval(_sdpa_abstract)
@@ -83,10 +89,10 @@ def _sdpa_lowering(ctx, q, k, v, mask, *, scale):
 
 
 # Causal variant — uses MLX's mask_mode="causal" string, not an array.
-_sdpa_causal_p = core.Primitive("mps.sdpa_causal")
+_sdpa_causal_p = Primitive("mps.sdpa_causal")
 _sdpa_causal_p.multiple_results = False
 _sdpa_causal_p.def_abstract_eval(
-    lambda q, k, v, *, scale: core.ShapedArray(q.shape, q.dtype)
+    lambda q, k, v, *, scale: ShapedArray(q.shape, q.dtype)
 )
 
 
@@ -150,13 +156,13 @@ def sdpa(q, k, v, *, scale=None, is_causal=False, mask=None):
     return _sdpa_with_grad(q, k, v, mask, scale)
 
 
-_sdpa_bwd_p = core.Primitive("mps.sdpa_bwd")
+_sdpa_bwd_p = Primitive("mps.sdpa_bwd")
 _sdpa_bwd_p.multiple_results = True
 _sdpa_bwd_p.def_abstract_eval(
     lambda q, k, v, mask, g, *, scale: (
-        core.ShapedArray(q.shape, q.dtype),
-        core.ShapedArray(k.shape, k.dtype),
-        core.ShapedArray(v.shape, v.dtype),
+        ShapedArray(q.shape, q.dtype),
+        ShapedArray(k.shape, k.dtype),
+        ShapedArray(v.shape, v.dtype),
     )
 )
 _sdpa_bwd_p.def_impl(
@@ -165,13 +171,13 @@ _sdpa_bwd_p.def_impl(
     )[1](g)
 )
 
-_sdpa_causal_bwd_p = core.Primitive("mps.sdpa_causal_bwd")
+_sdpa_causal_bwd_p = Primitive("mps.sdpa_causal_bwd")
 _sdpa_causal_bwd_p.multiple_results = True
 _sdpa_causal_bwd_p.def_abstract_eval(
     lambda q, k, v, g, *, scale: (
-        core.ShapedArray(q.shape, q.dtype),
-        core.ShapedArray(k.shape, k.dtype),
-        core.ShapedArray(v.shape, v.dtype),
+        ShapedArray(q.shape, q.dtype),
+        ShapedArray(k.shape, k.dtype),
+        ShapedArray(v.shape, v.dtype),
     )
 )
 _sdpa_causal_bwd_p.def_impl(
@@ -238,12 +244,12 @@ def _sdpa_causal_with_grad(q, k, v, scale):
 # RMS Normalization (mps.rms_norm)
 # ---------------------------------------------------------------------------
 
-_rms_norm_p = core.Primitive("mps.rms_norm")
+_rms_norm_p = Primitive("mps.rms_norm")
 _rms_norm_p.multiple_results = False
 
 
 def _rms_norm_abstract(x, weight, *, eps):
-    return core.ShapedArray(x.shape, x.dtype)
+    return ShapedArray(x.shape, x.dtype)
 
 
 _rms_norm_p.def_abstract_eval(_rms_norm_abstract)
@@ -269,12 +275,12 @@ def _rms_norm_lowering(ctx, x, weight, *, eps):
     ).results
 
 
-_rms_norm_bwd_p = core.Primitive("mps.rms_norm_bwd")
+_rms_norm_bwd_p = Primitive("mps.rms_norm_bwd")
 _rms_norm_bwd_p.multiple_results = True
 _rms_norm_bwd_p.def_abstract_eval(
     lambda x, w, g, *, eps: (
-        core.ShapedArray(x.shape, x.dtype),
-        core.ShapedArray(w.shape, w.dtype),
+        ShapedArray(x.shape, x.dtype),
+        ShapedArray(w.shape, w.dtype),
     )
 )
 _rms_norm_bwd_p.def_impl(
@@ -317,12 +323,12 @@ def rms_norm(x, weight, *, eps=1e-6):
 # Layer Normalization (mps.layer_norm)
 # ---------------------------------------------------------------------------
 
-_layer_norm_p = core.Primitive("mps.layer_norm")
+_layer_norm_p = Primitive("mps.layer_norm")
 _layer_norm_p.multiple_results = False
 
 
 def _layer_norm_abstract(x, weight, bias, *, eps):
-    return core.ShapedArray(x.shape, x.dtype)
+    return ShapedArray(x.shape, x.dtype)
 
 
 _layer_norm_p.def_abstract_eval(_layer_norm_abstract)
@@ -349,13 +355,13 @@ def _layer_norm_lowering(ctx, x, weight, bias, *, eps):
     ).results
 
 
-_layer_norm_bwd_p = core.Primitive("mps.layer_norm_bwd")
+_layer_norm_bwd_p = Primitive("mps.layer_norm_bwd")
 _layer_norm_bwd_p.multiple_results = True
 _layer_norm_bwd_p.def_abstract_eval(
     lambda x, w, b, g, *, eps: (
-        core.ShapedArray(x.shape, x.dtype),
-        core.ShapedArray(w.shape, w.dtype),
-        core.ShapedArray(b.shape, b.dtype),
+        ShapedArray(x.shape, x.dtype),
+        ShapedArray(w.shape, w.dtype),
+        ShapedArray(b.shape, b.dtype),
     )
 )
 _layer_norm_bwd_p.def_impl(
@@ -398,12 +404,12 @@ def layer_norm(x, weight, bias, *, eps=1e-5):
 # Rotary Position Embeddings (mps.rope)
 # ---------------------------------------------------------------------------
 
-_rope_p = core.Primitive("mps.rope")
+_rope_p = Primitive("mps.rope")
 _rope_p.multiple_results = False
 
 
 def _rope_abstract(x, offset, *, dims, traditional, base, rope_scale):
-    return core.ShapedArray(x.shape, x.dtype)
+    return ShapedArray(x.shape, x.dtype)
 
 
 _rope_p.def_abstract_eval(_rope_abstract)
@@ -448,10 +454,10 @@ def _rope_lowering(ctx, x, offset, *, dims, traditional, base, rope_scale):
     ).results
 
 
-_rope_bwd_p = core.Primitive("mps.rope_bwd")
+_rope_bwd_p = Primitive("mps.rope_bwd")
 _rope_bwd_p.multiple_results = False
 _rope_bwd_p.def_abstract_eval(
-    lambda x, offset, g, *, dims, traditional, base, rope_scale: core.ShapedArray(
+    lambda x, offset, g, *, dims, traditional, base, rope_scale: ShapedArray(
         x.shape, x.dtype
     )
 )
@@ -519,12 +525,12 @@ def rope(x, *, dims, base=10000.0, scale=1.0, offset=0, traditional=False):
 # GELU approximate (mps.gelu)
 # ---------------------------------------------------------------------------
 
-_gelu_p = core.Primitive("mps.gelu")
+_gelu_p = Primitive("mps.gelu")
 _gelu_p.multiple_results = False
 
 
 def _gelu_abstract(x):
-    return core.ShapedArray(x.shape, x.dtype)
+    return ShapedArray(x.shape, x.dtype)
 
 
 _gelu_p.def_abstract_eval(_gelu_abstract)
@@ -556,9 +562,9 @@ def _gelu_lowering(ctx, x):
     ).results
 
 
-_gelu_bwd_p = core.Primitive("mps.gelu_bwd")
+_gelu_bwd_p = Primitive("mps.gelu_bwd")
 _gelu_bwd_p.multiple_results = False
-_gelu_bwd_p.def_abstract_eval(lambda x, g: core.ShapedArray(x.shape, x.dtype))
+_gelu_bwd_p.def_abstract_eval(lambda x, g: ShapedArray(x.shape, x.dtype))
 _gelu_bwd_p.def_impl(lambda x, g: jax.vjp(lambda x: _gelu_impl_dispatch(x), x)[1](g)[0])
 
 
@@ -918,7 +924,7 @@ def _unpack_uint32(packed, bits):
 
 
 # --- mps.quantize -----------------------------------------------------------
-_quantize_p = core.Primitive("mps.quantize")
+_quantize_p = Primitive("mps.quantize")
 _quantize_p.multiple_results = True
 
 
@@ -928,9 +934,9 @@ def _quantize_abstract(w, *, group_size, bits):
     packed_shape = w.shape[:-1] + (d // el,)
     group_shape = w.shape[:-1] + (d // group_size,)
     return (
-        core.ShapedArray(packed_shape, jnp.uint32),
-        core.ShapedArray(group_shape, w.dtype),
-        core.ShapedArray(group_shape, w.dtype),
+        ShapedArray(packed_shape, jnp.uint32),
+        ShapedArray(group_shape, w.dtype),
+        ShapedArray(group_shape, w.dtype),
     )
 
 
@@ -955,12 +961,12 @@ def _quantize_lowering(ctx, w, *, group_size, bits):
 
 
 # --- mps.dequantize ---------------------------------------------------------
-_dequantize_p = core.Primitive("mps.dequantize")
+_dequantize_p = Primitive("mps.dequantize")
 
 
 def _dequantize_abstract(packed, scales, biases, *, group_size, bits):
     d = packed.shape[-1] * _quant_pack_factor(bits)
-    return core.ShapedArray(packed.shape[:-1] + (d,), scales.dtype)
+    return ShapedArray(packed.shape[:-1] + (d,), scales.dtype)
 
 
 _dequantize_p.def_abstract_eval(_dequantize_abstract)
@@ -986,7 +992,7 @@ def _dequantize_lowering(ctx, packed, scales, biases, *, group_size, bits):
 
 
 # --- mps.quantized_matmul ---------------------------------------------------
-_quantized_matmul_p = core.Primitive("mps.quantized_matmul")
+_quantized_matmul_p = Primitive("mps.quantized_matmul")
 
 
 def _quantized_matmul_abstract(
@@ -996,7 +1002,7 @@ def _quantized_matmul_abstract(
         out = packed.shape[-2]  # w is [out, in], quantized along in
     else:
         out = packed.shape[-1] * _quant_pack_factor(bits)  # w is [in, out]
-    return core.ShapedArray(x.shape[:-1] + (out,), x.dtype)
+    return ShapedArray(x.shape[:-1] + (out,), x.dtype)
 
 
 _quantized_matmul_p.def_abstract_eval(_quantized_matmul_abstract)
@@ -1164,7 +1170,7 @@ def register_fused_ops():
     # with exact fallback) instead of JAX's exact non-TPU fallback. CPU/GPU keep
     # JAX's default lowering, so no fallback registration is needed here.
     mlir.register_lowering(
-        lax_ann.approx_top_k_p,
+        lax.approx_top_k_p,
         mlir.lower_fun(_approx_top_k_mps_impl, multiple_results=True),
         platform="mps",
     )
@@ -1177,16 +1183,16 @@ def register_fused_ops():
     # Ops that JAX already lowers to a native stablehlo primitive we handle
     # (tan, atan2) are deliberately NOT in this list.
     _mps_native_unary_ops = [
-        (lax_lax.sinh_p, "mhlo.sinh"),
-        (lax_lax.cosh_p, "mhlo.cosh"),
-        (lax_lax.asin_p, "mhlo.asin"),
-        (lax_lax.acos_p, "mhlo.acos"),
-        (lax_lax.atan_p, "mhlo.atan"),
-        (lax_lax.asinh_p, "mhlo.asinh"),
-        (lax_lax.acosh_p, "mhlo.acosh"),
-        (lax_lax.atanh_p, "mhlo.atanh"),
-        (lax_special.erf_p, "mhlo.erf"),
-        (lax_special.erf_inv_p, "mhlo.erf_inv"),
+        (lax.sinh_p, "mhlo.sinh"),
+        (lax.cosh_p, "mhlo.cosh"),
+        (lax.asin_p, "mhlo.asin"),
+        (lax.acos_p, "mhlo.acos"),
+        (lax.atan_p, "mhlo.atan"),
+        (lax.asinh_p, "mhlo.asinh"),
+        (lax.acosh_p, "mhlo.acosh"),
+        (lax.atanh_p, "mhlo.atanh"),
+        (lax.erf_p, "mhlo.erf"),
+        (lax.erf_inv_p, "mhlo.erf_inv"),
     ]
     for prim, target in _mps_native_unary_ops:
         mlir.register_lowering(
@@ -1195,7 +1201,7 @@ def register_fused_ops():
 
     # logistic_p decomposes to 1/(1+exp(-x)) upstream; on MPS keep it as a
     # single stablehlo.logistic that dispatches to mlx::core::sigmoid.
-    mlir.register_lowering(lax_lax.logistic_p, _logistic_lowering, platform="mps")
+    mlir.register_lowering(lax.logistic_p, _logistic_lowering, platform="mps")
 
     # threefry2x32: JAX inlines the PRNG round schedule as ~140 elementwise ops
     # (no mps-platform lowering exists, unlike CUDA's cu_threefry2x32 custom
@@ -1206,22 +1212,20 @@ def register_fused_ops():
     # for older jax where jax.extend.random may be absent. If neither resolves,
     # fall back to the generic inline expansion — correct, just slower.
     threefry2x32_p = None
-    for _import in (
-        lambda: importlib.import_module("jax.extend.random").threefry2x32_p,
-        lambda: importlib.import_module("jax._src.prng").threefry2x32_p,
-    ):
+    errors = []
+    for path in ("jax.extend.random", "jax._src.prng"):
         try:
-            threefry2x32_p = _import()
+            threefry2x32_p = importlib.import_module(path).threefry2x32_p
             break
-        except Exception:  # pragma: no cover - probe alternative jax API surface
-            continue
+        except Exception as e:  # probe alternative jax API surfaces in turn
+            errors.append(f"{path}: {e!r}")
     if threefry2x32_p is not None:
         mlir.register_lowering(threefry2x32_p, _threefry2x32_lowering, platform="mps")
     else:  # pragma: no cover - defensive against jax internals moving again
         warnings.warn(
-            "jax-mps: could not register fused threefry2x32 lowering "
-            "(neither jax.extend.random nor jax._src.prng exposes "
-            "threefry2x32_p); jax.random will use the slower default expansion.",
+            "jax-mps: could not register fused threefry2x32 lowering ("
+            + "; ".join(errors)
+            + "); jax.random will use the slower default expansion.",
             stacklevel=2,
         )
 

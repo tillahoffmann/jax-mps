@@ -35,7 +35,11 @@ def test_random_lowers_to_fused_threefry_custom_call():
     def f(key):
         return random.normal(key, (64,))
 
-    lowered = jax.jit(f).lower(random.key(0))
+    # Place the key on the MPS device so lowering targets MPS specifically --
+    # otherwise, with multiple platforms available, jit could lower for CPU and
+    # miss the custom_call even when the MPS lowering is correctly registered.
+    key = jax.device_put(random.key(0), MPS_DEVICE)
+    lowered = jax.jit(f).lower(key)
     text = lowered.as_text()
     assert "mps.threefry2x32" in text, (
         "jax.random did not lower to the fused @mps.threefry2x32 custom_call; "
