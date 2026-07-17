@@ -125,9 +125,18 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
         return true;
     }
 
-    // Use purely functional MLX ops (no eval) so this works inside mlx::core::compile() tracing.
-    auto gathered = *update;
-    auto combined_mask = mlx::core::array(true);
+    // A rank-0 update replaces the scalar operand.
+    if (operand->ndim() == 0) {
+        values.emplace(ToKey(op->getResult(0)), *update);
+        return true;
+    }
+
+    // Use MLX's native dynamic slice update so only the update region is written.
+    // Clamp starts explicitly to preserve StableHLO dynamic_update_slice semantics.
+    std::vector<mlx::core::array> start_indices;
+    std::vector<int> axes;
+    start_indices.reserve(operand->ndim());
+    axes.reserve(operand->ndim());
     for (int d = 0; d < static_cast<int>(operand->ndim()); ++d) {
         auto* start_val =
             RequireValue(values, dusOp.getStartIndices()[d], "stablehlo.dynamic_update_slice");
@@ -142,29 +151,13 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
         start_idx =
             mlx::core::maximum(mlx::core::array(0),
                                mlx::core::minimum(start_idx, mlx::core::array(op_size - up_size)));
-
-        // Relative position of each operand index w.r.t. the update region
-        auto arange_d = mlx::core::arange(0, op_size, mlx::core::int32);
-        auto relative = mlx::core::subtract(arange_d, start_idx);
-
-        // Per-dimension mask: position is inside update region
-        auto mask_d =
-            mlx::core::logical_and(mlx::core::greater_equal(relative, mlx::core::array(0)),
-                                   mlx::core::less(relative, mlx::core::array(up_size)));
-
-        // Reshape mask for broadcasting: [1, ..., op_size, ..., 1]
-        mlx::core::Shape shape(operand->ndim(), 1);
-        shape[d] = op_size;
-        mask_d = mlx::core::reshape(mask_d, shape);
-        combined_mask = mlx::core::logical_and(combined_mask, mask_d);
-
-        // Clamp relative indices for gathering from update
-        auto clamped = mlx::core::clip(relative, mlx::core::array(0),
-                                       mlx::core::array(std::max(0, up_size - 1)));
-        gathered = mlx::core::take(gathered, clamped, d);
+        start_indices.push_back(mlx::core::reshape(start_idx, {1}));
+        axes.push_back(d);
     }
 
-    values.emplace(ToKey(op->getResult(0)), mlx::core::where(combined_mask, gathered, *operand));
+    auto start = mlx::core::concatenate(start_indices, 0);
+    values.emplace(ToKey(op->getResult(0)),
+                   mlx::core::slice_update(*operand, *update, start, axes));
     return true;
 }
 
