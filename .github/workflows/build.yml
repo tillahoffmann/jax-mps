@@ -369,18 +369,28 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_TEST_MODE: cpu
 
-  test-jax-latest:
-    name: Test (jax/jaxlib latest)
+  test-jax-matrix:
+    name: Test (jax ${{ matrix.channel }})
     needs: build
     runs-on: macos-26
-    # Canary: install the newest jax/jaxlib allowed by pyproject so we learn
-    # about upstream-breaking patch releases (e.g. #162) before users do.
-    # Informational only — does not block PRs.
+    # Canary matrix over the supported jax/jaxlib range plus the nightly
+    # pre-release, so we learn about upstream-breaking releases (e.g. #162, the
+    # jax._src.prng removal in 0.10.2 / #216) before users do. Informational
+    # only — does not block PRs — since the runner has no MPS GPU.
+    #
+    # The runner can't run the platform="mps" compute path, but registration is
+    # device-free: scripts/check_jax_compat.py drives the plugin's initialize()
+    # and asserts the fused lowerings actually registered, which is exactly the
+    # kind of jax-internal breakage this matrix exists to catch. The CPU suite
+    # then checks the platform-agnostic paths still import and run.
     continue-on-error: true
-    # Disabled until an MPS-capable runner is available: the affected
-    # lowerings register only for platform="mps", so a CPU-only run would
-    # not actually exercise them. Re-enable by removing this `if: false`.
-    if: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # minimum = floor of the pyproject `jax>=0.10.0,<0.11` range;
+        # latest   = newest release still inside that range;
+        # nightly  = jax pre-release wheel (may be ahead of the range).
+        channel: [minimum, latest, nightly]
     steps:
       - uses: actions/checkout@v6
 
@@ -395,11 +405,30 @@ jobs:
           name: wheel
           path: dist/
 
-      - name: Install wheel and test dependencies (jax/jaxlib upgraded)
+      - name: Install test dependencies and wheel
+        # --no-deps on the wheel so the channel-selected jax/jaxlib (below) is
+        # not overridden by the wheel's own `<0.11` pin — needed for nightly,
+        # which is ahead of that range.
         run: |
-          uv sync --all-groups --no-install-project --upgrade-package jax --upgrade-package jaxlib
-          uv pip install dist/*.whl
+          uv sync --all-groups --no-install-project
+          uv pip install --no-deps dist/*.whl
+
+      - name: Select jax/jaxlib (${{ matrix.channel }})
+        run: |
+          case "${{ matrix.channel }}" in
+            minimum)
+              uv pip install "jax==0.10.0" "jaxlib==0.10.0" ;;
+            latest)
+              uv pip install --upgrade "jax<0.11" "jaxlib<0.11" ;;
+            nightly)
+              uv pip install --prerelease=allow --pre jax jaxlib \
+                --index https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+                --index-strategy unsafe-best-match ;;
+          esac
           .venv/bin/python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
+
+      - name: Check fused-op registration (device-free)
+        run: .venv/bin/python scripts/check_jax_compat.py
 
       - name: Run tests on CPU
         run: .venv/bin/pytest tests/ -v
