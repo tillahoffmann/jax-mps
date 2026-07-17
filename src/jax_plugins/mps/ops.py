@@ -11,6 +11,7 @@ decompose to standard JAX ops.
 # pyright: reportArgumentType=false, reportOptionalCall=false
 # pyright: reportFunctionMemberAccess=false, reportCallIssue=false
 
+import importlib
 import warnings
 
 import jax
@@ -1199,19 +1200,28 @@ def register_fused_ops():
     # threefry2x32: JAX inlines the PRNG round schedule as ~140 elementwise ops
     # (no mps-platform lowering exists, unlike CUDA's cu_threefry2x32 custom
     # call). Route it to a fused Metal kernel so jax.random inside a loop body
-    # stays on the counted-loop fast path (issue #196). prng is private jax
-    # internals; if the import ever breaks, fall back to the generic inline
-    # expansion — correct, just slower.
-    try:
-        from jax._src import prng
-
-        mlir.register_lowering(
-            prng.threefry2x32_p, _threefry2x32_lowering, platform="mps"
-        )
-    except Exception as e:  # pragma: no cover - defensive against jax internals
+    # stays on the counted-loop fast path (issue #196). The primitive is exposed
+    # by the public, stability-promised jax.extend.random API; the private
+    # jax._src.prng path (dropped in jax 0.10.2, issue #216) is only a fallback
+    # for older jax where jax.extend.random may be absent. If neither resolves,
+    # fall back to the generic inline expansion — correct, just slower.
+    threefry2x32_p = None
+    for _import in (
+        lambda: importlib.import_module("jax.extend.random").threefry2x32_p,
+        lambda: importlib.import_module("jax._src.prng").threefry2x32_p,
+    ):
+        try:
+            threefry2x32_p = _import()
+            break
+        except Exception:  # pragma: no cover - probe alternative jax API surface
+            continue
+    if threefry2x32_p is not None:
+        mlir.register_lowering(threefry2x32_p, _threefry2x32_lowering, platform="mps")
+    else:  # pragma: no cover - defensive against jax internals moving again
         warnings.warn(
-            f"jax-mps: could not register fused threefry2x32 lowering ({e}); "
-            "jax.random will use the slower default expansion.",
+            "jax-mps: could not register fused threefry2x32 lowering "
+            "(neither jax.extend.random nor jax._src.prng exposes "
+            "threefry2x32_p); jax.random will use the slower default expansion.",
             stacklevel=2,
         )
 
