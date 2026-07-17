@@ -22,16 +22,9 @@ import pytest
 
 from .configs import OperationTestConfig
 
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
-
 # NumPyro is the reliable source of the nested-case pattern (it survives JAX's
 # own folding and only loses its index clamp in our simplification pass).
 numpyro = pytest.importorskip("numpyro")
-
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required")
 
 # Substring of the HandleCase compile-path bail (control_flow.cc). Its presence
 # means a case fell back to eager instead of compiling.
@@ -72,7 +65,7 @@ def _run_gp_nuts():
 
 
 @pytest.mark.timeout(180)
-def test_nested_case_compiles(capfd):
+def test_nested_case_compiles(capfd, mps_device):
     """A nested ``stablehlo.case`` must compile rather than bail to eager."""
     samples = _run_gp_nuts()
     captured = capfd.readouterr()
@@ -99,7 +92,7 @@ def test_nested_case_compiles(capfd):
 # follow-up.)
 
 
-def test_jit_returning_token():
+def test_jit_returning_token(mps_device):
     """A jit that returns a token must run (create_token is handled)."""
     # Tokens are opaque (no comparable value) and get DCE'd when disconnected,
     # so they can't be exercised via an OperationTestConfig value check; mark
@@ -111,7 +104,7 @@ def test_jit_returning_token():
     jax.block_until_ready(jax.jit(lambda t: jax.lax.after_all(t))(tok))
 
 
-def test_token_threaded_with_real_output():
+def test_token_threaded_with_real_output(mps_device):
     """A token threaded alongside a real result must not disturb the result."""
     import jax.numpy as jnp
 
@@ -122,7 +115,7 @@ def test_token_threaded_with_real_output():
     assert float(out) == 4.0
 
 
-def test_grad_with_live_token():
+def test_grad_with_live_token(mps_device):
     """Differentiating a jitted fn that keeps a token live must work.
 
     The token is returned as an aux output (``has_aux``) so it survives DCE and

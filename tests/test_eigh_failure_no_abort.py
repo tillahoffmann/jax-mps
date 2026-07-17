@@ -26,16 +26,6 @@ import os
 import subprocess
 import sys
 
-import jax
-import pytest
-
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
-
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required")
-
 # Drive MLX eigh to a non-convergent input via LOBPCG on a diagonal operator
 # with a geometric spectrum spanning 1..1e5 (condition number 1e5). The
 # Rayleigh-Ritz eigh on the float32 projection fails (syevd info != 0). The
@@ -59,7 +49,7 @@ _WORKLOAD = (
 )
 
 
-def test_failing_eigh_raises_instead_of_aborting():
+def test_failing_eigh_raises_instead_of_aborting(mps_device):
     result = subprocess.run(
         [sys.executable, "-c", _WORKLOAD],
         env={**os.environ, "JAX_PLATFORMS": "mps"},

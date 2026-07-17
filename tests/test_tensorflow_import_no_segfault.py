@@ -23,20 +23,11 @@ import os
 import subprocess
 import sys
 
-import jax
 import pytest
-
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
 
 _HAVE_TENSORFLOW = importlib.util.find_spec("tensorflow") is not None
 
-pytestmark = [
-    pytest.mark.skipif(MPS_DEVICE is None, reason="MPS device required"),
-    pytest.mark.skipif(not _HAVE_TENSORFLOW, reason="tensorflow not installed"),
-]
+pytestmark = pytest.mark.skipif(not _HAVE_TENSORFLOW, reason="tensorflow not installed")
 
 # Import TensorFlow first (pulling its MLIR libraries into the process), then
 # force a JAX MPS compile via PRNGKey (threefry). Post-fix the plugin's MLIR
@@ -52,7 +43,7 @@ _WORKLOAD = (
 )
 
 
-def test_tensorflow_import_before_compile_does_not_segfault():
+def test_tensorflow_import_before_compile_does_not_segfault(mps_device):
     result = subprocess.run(
         [sys.executable, "-c", _WORKLOAD],
         env={**os.environ, "JAX_PLATFORMS": "mps"},

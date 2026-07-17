@@ -8,6 +8,7 @@
 - You may NEVER delete operations or tests without my explicit approval.
 - For each op, you MUST register an `OperationTestConfig` for tests in `tests/test_ops.py`. See `tests/configs/unary.py` for an example and `tests/configs/util.py` for the signature of `OperationTestConfig`.
 - You may NEVER create new op registries. Use `OpRegistry` for all ops. See `src/pjrt_plugin/ops/registry.h`.
+- When importing from JAX, PREFER a public interface (`jax.*`, `jax.lax.*`, `jax.nn.*`, `jax.extend.*`) over `jax._src.*` whenever an equivalent one exists — private paths get removed without notice across patch releases. Only reach for `jax._src` when no public equivalent exists, and add a comment explaining why.
 
 # CI is Always Green
 
