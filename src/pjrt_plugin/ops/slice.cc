@@ -70,6 +70,42 @@ bool HandleSlice(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
     return true;
 }
 
+// Concatenated int32 start-index array plus the axes it applies to, ready to
+// hand to MLX's dynamic slice / slice_update.
+struct ClampedStarts {
+    mlx::core::array start;
+    std::vector<int> axes;
+};
+
+// Build the clamped start array shared by dynamic_slice and
+// dynamic_update_slice. For each axis d, apply StableHLO's clamp
+// max(0, min(start, dim_size - region_size)) — where region_size is the slice
+// extent (dynamic_slice) or the update extent (dynamic_update_slice) — cast to
+// int32, and concatenate the per-axis starts into a 1-D array of length
+// starts.size(). `ref` supplies the operand dimension sizes.
+//
+// The max(0, ...) on the upper bound keeps the clamp well-defined even if
+// region_size > dim_size. StableHLO forbids that, but without the guard MLX
+// would see a negative upper bound.
+ClampedStarts BuildClampedStarts(const mlx::core::array& ref,
+                                 llvm::ArrayRef<const mlx::core::array*> starts,
+                                 llvm::ArrayRef<int> regionSizes) {
+    const int n = static_cast<int>(starts.size());
+    std::vector<mlx::core::array> parts;
+    std::vector<int> axes;
+    parts.reserve(static_cast<size_t>(n));
+    axes.reserve(static_cast<size_t>(n));
+    for (int d = 0; d < n; ++d) {
+        const int maxStart = std::max(0, ref.shape(d) - regionSizes[d]);
+        parts.push_back(mlx::core::clip(
+            mlx::core::astype(mlx::core::reshape(*starts[d], {1}), mlx::core::int32),
+            mlx::core::array(0), mlx::core::array(maxStart)));
+        axes.push_back(d);
+    }
+    auto start = parts.size() == 1 ? std::move(parts[0]) : mlx::core::concatenate(parts, 0);
+    return ClampedStarts{std::move(start), std::move(axes)};
+}
+
 // Handler for stablehlo.dynamic_slice
 bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
                         std::vector<mlx::core::array>& outputs, ExecContext& ctx) {
@@ -94,29 +130,24 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
         return true;
     }
 
-    std::vector<mlx::core::array> startParts;
-    std::vector<int> axes;
+    std::vector<const mlx::core::array*> starts;
+    std::vector<int> regionSizes;
     mlx::core::Shape outSize;
-    startParts.reserve(static_cast<size_t>(ndim));
-    axes.reserve(static_cast<size_t>(ndim));
+    starts.reserve(static_cast<size_t>(ndim));
+    regionSizes.reserve(static_cast<size_t>(ndim));
     for (int d = 0; d < ndim; ++d) {
         auto* idx = RequireValue(values, op->getOperand(static_cast<unsigned>(d + 1)),
                                  "stablehlo.dynamic_slice");
         if (!idx)
             return false;
         const int size = static_cast<int>(sliceSizes[static_cast<unsigned>(d)]);
-        const int dimSize = input->shape(d);
-        // Clamp start per StableHLO spec: max(0, min(start, dim_size - size)).
-        auto start =
-            mlx::core::clip(mlx::core::astype(mlx::core::reshape(*idx, {1}), mlx::core::int32),
-                            mlx::core::array(0), mlx::core::array(dimSize - size));
-        startParts.push_back(std::move(start));
-        axes.push_back(d);
+        starts.push_back(idx);
+        regionSizes.push_back(size);
         outSize.push_back(size);
     }
-    auto startArr = startParts.size() == 1 ? startParts[0] : mlx::core::concatenate(startParts, 0);
+    auto [start, axes] = BuildClampedStarts(*input, starts, regionSizes);
     values.emplace(ToKey(op->getResult(0)),
-                   mlx::core::slice(*input, startArr, std::move(axes), std::move(outSize)));
+                   mlx::core::slice(*input, start, std::move(axes), std::move(outSize)));
     return true;
 }
 
@@ -147,31 +178,23 @@ bool HandleDynamicUpdateSlice(mlir::Operation* op, ValueMap& values,
 
     // Use MLX's native dynamic slice update so only the update region is written.
     // Clamp starts explicitly to preserve StableHLO dynamic_update_slice semantics.
-    std::vector<mlx::core::array> start_indices;
-    std::vector<int> axes;
-    start_indices.reserve(operand->ndim());
-    axes.reserve(operand->ndim());
-    for (int d = 0; d < static_cast<int>(operand->ndim()); ++d) {
+    const int ndim = static_cast<int>(operand->ndim());
+    std::vector<const mlx::core::array*> starts;
+    std::vector<int> regionSizes;
+    starts.reserve(static_cast<size_t>(ndim));
+    regionSizes.reserve(static_cast<size_t>(ndim));
+    for (int d = 0; d < ndim; ++d) {
         auto* start_val =
             RequireValue(values, dusOp.getStartIndices()[d], "stablehlo.dynamic_update_slice");
         if (!start_val)
             return false;
-        auto start_idx = mlx::core::astype(mlx::core::reshape(*start_val, {}), mlx::core::int32);
-
-        int op_size = operand->shape(d);
-        int up_size = update->shape(d);
-
-        // Clamp start index: max(0, min(start, op_size - up_size))
-        start_idx =
-            mlx::core::maximum(mlx::core::array(0),
-                               mlx::core::minimum(start_idx, mlx::core::array(op_size - up_size)));
-        start_indices.push_back(mlx::core::reshape(start_idx, {1}));
-        axes.push_back(d);
+        starts.push_back(start_val);
+        regionSizes.push_back(update->shape(d));
     }
 
-    auto start = mlx::core::concatenate(start_indices, 0);
+    auto [start, axes] = BuildClampedStarts(*operand, starts, regionSizes);
     values.emplace(ToKey(op->getResult(0)),
-                   mlx::core::slice_update(*operand, *update, start, axes));
+                   mlx::core::slice_update(*operand, *update, start, std::move(axes)));
     return true;
 }
 
