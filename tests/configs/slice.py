@@ -164,6 +164,14 @@ def make_slice_op_configs():
                 lambda key: random.randint(key, (), 0, 4, dtype=jnp.int32),
                 name="dynamic_update_slice_dynamic_idx",
             ),
+            # Rank-0 (scalar) operand exercises the scalar fast-path early
+            # return, where there are no start indices to concatenate.
+            OperationTestConfig(
+                lambda x, update: lax.dynamic_update_slice(x, update, ()),
+                lambda key: random.normal(key, ()),
+                lambda key: random.normal(key, ()),
+                name="dynamic_update_slice_scalar",
+            ),
             OperationTestConfig(
                 lambda x, idx, updates: x.at[idx].add(updates),
                 numpy.zeros((10, 4), dtype=numpy.float32),
