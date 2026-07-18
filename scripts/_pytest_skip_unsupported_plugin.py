@@ -69,11 +69,15 @@ _UNSUPPORTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Collective ops require a multi-device mesh; MPS presents a single device.
     # Match the specific collective op names inside the "Unsupported operation(s)"
     # message so generic missing-handler failures stay visible.
+    #
+    # replica_id has no handler: current JAX lowers axis_index to partition_id
+    # (handled), leaving replica_id unreachable, so it stays skip-listed as a
+    # forward-looking guard in case a future lowering revives the replica path.
     (
         re.compile(
             r"Unsupported operation\(s\): stablehlo\."
-            r"(all_reduce|all_gather|all_to_all|collective_permute|"
-            r"collective_broadcast|reduce_scatter|partition_id|replica_id)"
+            r"(all_gather|all_to_all|collective_permute|"
+            r"collective_broadcast|reduce_scatter|replica_id)"
         ),
         "collective ops require a multi-device mesh; MPS is single-device",
     ),

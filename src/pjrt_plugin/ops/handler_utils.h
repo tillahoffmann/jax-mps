@@ -190,6 +190,7 @@ void RegisterShapeHandlers(std::unordered_map<std::string, OpHandler>& handlers)
 void RegisterSliceHandlers(std::unordered_map<std::string, OpHandler>& handlers);
 void RegisterGatherScatterHandlers(std::unordered_map<std::string, OpHandler>& handlers);
 void RegisterReductionHandlers(std::unordered_map<std::string, OpHandler>& handlers);
+void RegisterCollectivesHandlers(std::unordered_map<std::string, OpHandler>& handlers);
 void RegisterLinalgHandlers(std::unordered_map<std::string, OpHandler>& handlers);
 void RegisterControlFlowHandlers(std::unordered_map<std::string, OpHandler>& handlers);
 void RegisterSortFftComplexHandlers(std::unordered_map<std::string, OpHandler>& handlers);

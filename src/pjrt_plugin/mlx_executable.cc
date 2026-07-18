@@ -573,6 +573,7 @@ const std::unordered_map<std::string, OpHandler>& GetOpHandlers() {
         RegisterSliceHandlers(h);
         RegisterGatherScatterHandlers(h);
         RegisterReductionHandlers(h);
+        RegisterCollectivesHandlers(h);
         RegisterLinalgHandlers(h);
         RegisterControlFlowHandlers(h);
         RegisterSortFftComplexHandlers(h);
