@@ -115,8 +115,8 @@ bool HandleDynamicSlice(mlir::Operation* op, ValueMap& values,
         outSize.push_back(size);
     }
     auto startArr = startParts.size() == 1 ? startParts[0] : mlx::core::concatenate(startParts, 0);
-    values.emplace(ToKey(op->getResult(0)), mlx::core::slice(*input, std::move(startArr),
-                                                             std::move(axes), std::move(outSize)));
+    values.emplace(ToKey(op->getResult(0)),
+                   mlx::core::slice(*input, startArr, std::move(axes), std::move(outSize)));
     return true;
 }
 
