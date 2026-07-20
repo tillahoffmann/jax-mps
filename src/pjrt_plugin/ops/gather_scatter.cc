@@ -359,13 +359,6 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     if (hasWindowScatter && insertedWindowDims.empty()) {
         // For multi-axis window scatter, use slice_update loop.
         if (scatterDimsToOperandDims.size() > 1) {
-            if (!inputBatchingDims.empty()) {
-                MPS_LOG_ERROR(
-                    "stablehlo.scatter: multi-axis window scatter with batching dims "
-                    "is not supported\n");
-                return false;
-            }
-
             std::vector<int> batchDims;
             int batchSize = 1;
             for (int d = 0; d < scatterIndices->ndim(); ++d) {
@@ -376,11 +369,23 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             }
 
             bool singleUpdate = (batchSize == 1);
-            auto axes = ToIntVec(scatterDimsToOperandDims);
-
             int numPositions = singleUpdate ? 1 : batchSize;
             mlx::core::array result = *operand;
             for (int b = 0; b < numPositions; ++b) {
+                // Decode the scatter-index position once. Batching dimensions
+                // are present in scatterIndices and identify the matching
+                // operand slice, but are intentionally absent from updates.
+                // Make them explicit dynamic-slice axes below.
+                std::vector<int> batchCoordinates(scatterIndices->ndim(), 0);
+                if (!singleUpdate) {
+                    int remaining = b;
+                    for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
+                        int dim = batchDims[bd];
+                        batchCoordinates[dim] = remaining % scatterIndices->shape(dim);
+                        remaining /= scatterIndices->shape(dim);
+                    }
+                }
+
                 std::vector<mlx::core::array> perAxisIdx;
                 for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
                     mlx::core::Shape starts(scatterIndices->ndim(), 0);
@@ -394,12 +399,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     if (hasIdxVecDim)
                         squeezeDims.push_back(indexVectorDim);
                     if (!singleUpdate) {
-                        int remaining = b;
-                        for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
-                            int dim = batchDims[bd];
-                            starts[dim] = remaining % scatterIndices->shape(dim);
+                        for (int dim : batchDims) {
+                            starts[dim] = batchCoordinates[dim];
                             stops[dim] = starts[dim] + 1;
-                            remaining /= scatterIndices->shape(dim);
                         }
                         for (int bd : batchDims)
                             squeezeDims.push_back(bd);
@@ -417,6 +419,19 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
                     }
                     perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
+                }
+                auto axes = ToIntVec(scatterDimsToOperandDims);
+                for (size_t i = 0; i < inputBatchingDims.size(); ++i) {
+                    int operandAxis = static_cast<int>(inputBatchingDims[i]);
+                    int indexAxis = static_cast<int>(scatterIndicesBatchingDims[i]);
+                    if (indexAxis < 0 || indexAxis >= static_cast<int>(batchCoordinates.size())) {
+                        MPS_LOG_ERROR(
+                            "stablehlo.scatter: invalid scatter index batching dimension\n");
+                        return false;
+                    }
+                    axes.push_back(operandAxis);
+                    perAxisIdx.push_back(mlx::core::reshape(
+                        mlx::core::array(batchCoordinates[indexAxis], mlx::core::int32), {1}));
                 }
                 auto startArr = mlx::core::concatenate(perAxisIdx, 0);
 
@@ -458,15 +473,17 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
                         break;
                     case ScatterType::Add: {
-                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
-                            MPS_LOG_ERROR(
-                                "stablehlo.scatter: multi-dim window scatter Add requires "
-                                "operand-rank updates\n");
-                            return false;
-                        }
                         mlx::core::Shape sliceSizes(operand->shape());
+                        int dimDiff = std::max(static_cast<int>(operand->ndim()) -
+                                                   static_cast<int>(updateVal.ndim()),
+                                               0);
+                        for (int d = dimDiff; d < static_cast<int>(operand->ndim()); ++d) {
+                            sliceSizes[d] = updateVal.shape(d - dimDiff);
+                        }
                         for (int axis : axes) {
-                            sliceSizes[axis] = updateVal.shape(axis);
+                            if (axis < dimDiff) {
+                                sliceSizes[axis] = 1;
+                            }
                         }
                         auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
                         result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
@@ -474,15 +491,17 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         break;
                     }
                     case ScatterType::Mul: {
-                        if (static_cast<int>(updateVal.ndim()) != operand->ndim()) {
-                            MPS_LOG_ERROR(
-                                "stablehlo.scatter: multi-dim window scatter Mul requires "
-                                "operand-rank updates\n");
-                            return false;
-                        }
                         mlx::core::Shape sliceSizes(operand->shape());
+                        int dimDiff = std::max(static_cast<int>(operand->ndim()) -
+                                                   static_cast<int>(updateVal.ndim()),
+                                               0);
+                        for (int d = dimDiff; d < static_cast<int>(operand->ndim()); ++d) {
+                            sliceSizes[d] = updateVal.shape(d - dimDiff);
+                        }
                         for (int axis : axes) {
-                            sliceSizes[axis] = updateVal.shape(axis);
+                            if (axis < dimDiff) {
+                                sliceSizes[axis] = 1;
+                            }
                         }
                         auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
                         result = mlx::core::slice_update(
