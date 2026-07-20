@@ -468,6 +468,19 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     }
                 }
 
+                // MLX aligns a lower-rank update by prepending dimensions. A
+                // StableHLO input-batching dimension can instead be interior
+                // to the operand (for example [batch, 1, rows, cols]), so
+                // retain an explicit singleton at every batching axis before
+                // calling dynamic slice_update.
+                std::vector<int> batchingAxes = ToIntVec(inputBatchingDims);
+                std::sort(batchingAxes.begin(), batchingAxes.end());
+                for (int axis : batchingAxes) {
+                    auto updateShape = updateVal.shape();
+                    updateShape.insert(updateShape.begin() + axis, 1);
+                    updateVal = mlx::core::reshape(updateVal, updateShape);
+                }
+
                 switch (scatterType) {
                     case ScatterType::Update:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
