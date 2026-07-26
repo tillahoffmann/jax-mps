@@ -134,6 +134,75 @@ def make_sort_op_configs():
         )
 
         # =============================================================
+        # Multi-key sort (lax.sort num_keys > 1, jnp.lexsort)
+        # Tie-heavy primary keys so secondary/tertiary keys matter.
+        # =============================================================
+
+        def tied_keys(shape, levels):
+            def factory(key):
+                return jnp.floor(random.uniform(key, shape) * levels)
+
+            return factory
+
+        # Two float keys, 1D (the reproducer from issue #224).
+        configs.append(
+            OperationTestConfig(
+                lambda v, w: lax.sort((v, w), num_keys=2, is_stable=True),
+                jnp.array([0, 0, 0, 1, 0, 1], dtype=jnp.float32),
+                jnp.array([0.4, 0.1, 0.3, 0.2, 0.2, 0.1], dtype=jnp.float32),
+                name="lax.sort.num_keys2.1d",
+            )
+        )
+
+        # Two keys plus a payload operand that is not a key.
+        configs.append(
+            OperationTestConfig(
+                lambda a, b, payload: lax.sort(
+                    (a, b, payload), num_keys=2, is_stable=True
+                ),
+                tied_keys((4, 8), 3),
+                tied_keys((4, 8), 3),
+                lambda key: random.normal(key, (4, 8)),
+                name="lax.sort.num_keys2.payload",
+            )
+        )
+
+        # Three keys on a non-last dimension.
+        configs.append(
+            OperationTestConfig(
+                lambda a, b, c: lax.sort(
+                    (a, b, c), dimension=0, num_keys=3, is_stable=True
+                ),
+                tied_keys((6, 4), 2),
+                tied_keys((6, 4), 2),
+                lambda key: random.normal(key, (6, 4)),
+                name="lax.sort.num_keys3.axis0",
+            )
+        )
+
+        # jnp.lexsort - 1D, primary key last.
+        configs.append(
+            OperationTestConfig(
+                lambda v, w: jnp.lexsort((w, v)),
+                jnp.array([0, 0, 0, 1, 0, 1], dtype=jnp.float32),
+                jnp.array([0.4, 0.1, 0.3, 0.2, 0.2, 0.1], dtype=jnp.float32),
+                differentiable_argnums=(),
+                name="jnp.lexsort.1d",
+            )
+        )
+
+        # jnp.lexsort - 2D along an explicit axis.
+        configs.append(
+            OperationTestConfig(
+                lambda a, b: jnp.lexsort((b, a), axis=0),
+                tied_keys((6, 4), 2),
+                tied_keys((6, 4), 3),
+                differentiable_argnums=(),
+                name="jnp.lexsort.2d.axis0",
+            )
+        )
+
+        # =============================================================
         # lax.top_k - top k elements and indices
         # Returns (values, indices) - values are differentiable
         # =============================================================

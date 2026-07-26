@@ -82,6 +82,132 @@ std::pair<mlx::core::array, mlx::core::array> TopKImplFn(const mlx::core::array&
     return {topValues, mlx::core::astype(partitionedIndices, mlx::core::int32)};
 }
 
+// One operand of a lexicographic sort comparator: which sort input acts as the
+// key, and whether it is compared ascending.
+struct SortKey {
+    int index;
+    bool ascending;
+};
+
+// Find the unique comparator block argument feeding `value`. JAX wraps each
+// argument in a canonicalization chain (select/compare against zero and NaN for
+// total-order float compares), so the argument is rarely the compare's direct
+// operand. Returns -1 if the cone reaches zero or more than one distinct
+// argument.
+int TraceBlockArg(mlir::Value value) {
+    llvm::SmallVector<mlir::Value, 8> worklist{value};
+    llvm::SmallPtrSet<mlir::Operation*, 8> visited;
+    int found = -1;
+    while (!worklist.empty()) {
+        mlir::Value current = worklist.pop_back_val();
+        if (auto arg = mlir::dyn_cast<mlir::BlockArgument>(current)) {
+            int number = static_cast<int>(arg.getArgNumber());
+            if (found != -1 && found != number)
+                return -1;
+            found = number;
+            continue;
+        }
+        auto* defOp = current.getDefiningOp();
+        if (!defOp || !visited.insert(defOp).second)
+            continue;
+        for (auto operand : defOp->getOperands())
+            worklist.push_back(operand);
+    }
+    return found;
+}
+
+// Decompose a comparator expression into its lexicographic key list.
+// `lax.sort(..., num_keys=n)` emits either
+//   or(lt_0, and(eq_0, <rest>))          or
+//   select(eq_0, <rest>, lt_0)
+// nested once per additional key. Returns false for any other shape.
+bool CollectSortKeys(mlir::Value value, std::vector<SortKey>& keys) {
+    auto* defOp = value.getDefiningOp();
+    if (!defOp)
+        return false;
+
+    if (auto orOp = mlir::dyn_cast<mlir::stablehlo::OrOp>(defOp)) {
+        if (!CollectSortKeys(orOp.getLhs(), keys))
+            return false;
+        auto* rhsDefOp = orOp.getRhs().getDefiningOp();
+        auto andOp = rhsDefOp ? mlir::dyn_cast<mlir::stablehlo::AndOp>(rhsDefOp) : nullptr;
+        if (!andOp)
+            return false;
+        // The equality operand is the tie test on the keys collected so far; the
+        // other operand describes the remaining keys.
+        for (auto operand : {andOp.getLhs(), andOp.getRhs()}) {
+            auto* operandDefOp = operand.getDefiningOp();
+            auto cmpOp =
+                operandDefOp ? mlir::dyn_cast<mlir::stablehlo::CompareOp>(operandDefOp) : nullptr;
+            if (cmpOp && cmpOp.getComparisonDirection() == mlir::stablehlo::ComparisonDirection::EQ)
+                continue;
+            if (!CollectSortKeys(operand, keys))
+                return false;
+        }
+        return true;
+    }
+
+    if (auto selOp = mlir::dyn_cast<mlir::stablehlo::SelectOp>(defOp)) {
+        // select(eq_i, tiebreak, primary): the false branch is the primary compare.
+        return CollectSortKeys(selOp.getOnFalse(), keys) &&
+               CollectSortKeys(selOp.getOnTrue(), keys);
+    }
+
+    auto cmpOp = mlir::dyn_cast<mlir::stablehlo::CompareOp>(defOp);
+    if (!cmpOp)
+        return false;
+    auto dir = cmpOp.getComparisonDirection();
+    if (dir == mlir::stablehlo::ComparisonDirection::EQ ||
+        dir == mlir::stablehlo::ComparisonDirection::NE)
+        return false;
+    int lhsArg = TraceBlockArg(cmpOp.getLhs());
+    int rhsArg = TraceBlockArg(cmpOp.getRhs());
+    // The two sides must be the lhs/rhs pair of the same sort input.
+    if (lhsArg < 0 || rhsArg < 0 || lhsArg / 2 != rhsArg / 2 || lhsArg == rhsArg)
+        return false;
+    bool isGtGe = (dir == mlir::stablehlo::ComparisonDirection::GT ||
+                   dir == mlir::stablehlo::ComparisonDirection::GE);
+    // GT(rhs_i, lhs_i) is equivalent to LT(lhs_i, rhs_i).
+    bool swapped = (lhsArg % 2 == 1);
+    keys.push_back({lhsArg / 2, swapped ? isGtGe : !isGtGe});
+    return true;
+}
+
+// Analyze a sort comparator to recover its lexicographic keys, in order of
+// decreasing significance. Returns an empty list when the comparator does not
+// match a recognized shape, in which case callers fall back to
+// `DetectAscending` and a single-key sort.
+std::vector<SortKey> DetectSortKeys(mlir::stablehlo::SortOp sortOp) {
+    std::vector<SortKey> keys;
+    auto& comparator = sortOp.getComparator();
+    if (comparator.empty())
+        return keys;
+    auto& returnOp = comparator.front().back();
+    if (returnOp.getNumOperands() == 0)
+        return keys;
+    if (!CollectSortKeys(returnOp.getOperand(0), keys))
+        keys.clear();
+    // The keys must be sort inputs 0..n-1 in order; anything else is a shape we
+    // do not model.
+    if (keys.size() > sortOp.getInputs().size())
+        keys.clear();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i].index != static_cast<int>(i)) {
+            keys.clear();
+            break;
+        }
+    }
+    return keys;
+}
+
+// Prepare a sort key for a stable ascending argsort. MLX's Metal block_sort
+// kernel has no bool variant, and a descending key is flipped rather than
+// reversed so ties still resolve to ascending original index.
+mlx::core::array PrepareSortKey(const mlx::core::array& key, bool ascending) {
+    auto prepared = key.dtype() == mlx::core::bool_ ? mlx::core::astype(key, mlx::core::int8) : key;
+    return ascending ? prepared : DescendingKey(prepared);
+}
+
 // Analyze a sort comparator to determine sort direction.
 // The comparator block has args (lhs0, rhs0, lhs1, rhs1, ...) where
 // lhs_i/rhs_i are the pair for input i. A "normal" ascending comparator
@@ -157,7 +283,8 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         return false;
 
     int dimension = static_cast<int>(sortOp.getDimension());
-    bool ascending = DetectAscending(sortOp);
+    auto sortKeys = DetectSortKeys(sortOp);
+    bool ascending = sortKeys.empty() ? DetectAscending(sortOp) : sortKeys[0].ascending;
     size_t numInputs = sortOp.getInputs().size();
 
     if (numInputs == 1) {
@@ -183,6 +310,35 @@ bool HandleSort(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
         auto* keys = RequireValue(values, sortOp.getInputs()[0], "stablehlo.sort");
         if (!keys)
             return false;
+
+        if (sortKeys.size() > 1) {
+            // Lexicographic sort: argsort by the least significant key, then
+            // re-sort stably by each more significant key in turn. MLX's argsort
+            // is stable, so each pass preserves the order established by the
+            // less significant keys.
+            mlx::core::array indices = mlx::core::array(0);
+            for (size_t i = sortKeys.size(); i-- > 0;) {
+                auto* key = RequireValue(values, sortOp.getInputs()[i], "stablehlo.sort");
+                if (!key)
+                    return false;
+                auto prepared = PrepareSortKey(*key, sortKeys[i].ascending);
+                if (i + 1 == sortKeys.size()) {
+                    indices = mlx::core::argsort(prepared, dimension);
+                    continue;
+                }
+                auto permuted = mlx::core::take_along_axis(prepared, indices, dimension);
+                auto order = mlx::core::argsort(permuted, dimension);
+                indices = mlx::core::take_along_axis(indices, order, dimension);
+            }
+            for (size_t i = 0; i < numInputs; ++i) {
+                auto* input = RequireValue(values, sortOp.getInputs()[i], "stablehlo.sort");
+                if (!input)
+                    return false;
+                values.emplace(ToKey(op->getResult(i)),
+                               mlx::core::take_along_axis(*input, indices, dimension));
+            }
+            return true;
+        }
 
         const bool keysAreBool = keys->dtype() == mlx::core::bool_;
         const auto argsortInput = keysAreBool ? mlx::core::astype(*keys, mlx::core::int8) : *keys;
