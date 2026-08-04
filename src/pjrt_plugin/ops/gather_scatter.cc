@@ -481,46 +481,37 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     updateVal = mlx::core::reshape(updateVal, updateShape);
                 }
 
+                // Add and Mul must read the current window back before
+                // combining. MLX right-aligns a lower-rank update against the
+                // operand, so map each update axis onto the trailing operand
+                // axes and keep the leading (batching) axes at extent 1.
+                auto readWindow = [&]() {
+                    mlx::core::Shape sliceSizes(operand->shape());
+                    int dimDiff = std::max(
+                        static_cast<int>(operand->ndim()) - static_cast<int>(updateVal.ndim()), 0);
+                    for (int d = dimDiff; d < static_cast<int>(operand->ndim()); ++d) {
+                        sliceSizes[d] = updateVal.shape(d - dimDiff);
+                    }
+                    for (int axis : axes) {
+                        if (axis < dimDiff) {
+                            sliceSizes[axis] = 1;
+                        }
+                    }
+                    return mlx::core::slice(result, startArr, axes, sliceSizes);
+                };
+
                 switch (scatterType) {
                     case ScatterType::Update:
                         result = mlx::core::slice_update(result, updateVal, startArr, axes);
                         break;
-                    case ScatterType::Add: {
-                        mlx::core::Shape sliceSizes(operand->shape());
-                        int dimDiff = std::max(static_cast<int>(operand->ndim()) -
-                                                   static_cast<int>(updateVal.ndim()),
-                                               0);
-                        for (int d = dimDiff; d < static_cast<int>(operand->ndim()); ++d) {
-                            sliceSizes[d] = updateVal.shape(d - dimDiff);
-                        }
-                        for (int axis : axes) {
-                            if (axis < dimDiff) {
-                                sliceSizes[axis] = 1;
-                            }
-                        }
-                        auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
-                        result = mlx::core::slice_update(result, mlx::core::add(current, updateVal),
-                                                         startArr, axes);
-                        break;
-                    }
-                    case ScatterType::Mul: {
-                        mlx::core::Shape sliceSizes(operand->shape());
-                        int dimDiff = std::max(static_cast<int>(operand->ndim()) -
-                                                   static_cast<int>(updateVal.ndim()),
-                                               0);
-                        for (int d = dimDiff; d < static_cast<int>(operand->ndim()); ++d) {
-                            sliceSizes[d] = updateVal.shape(d - dimDiff);
-                        }
-                        for (int axis : axes) {
-                            if (axis < dimDiff) {
-                                sliceSizes[axis] = 1;
-                            }
-                        }
-                        auto current = mlx::core::slice(result, startArr, axes, sliceSizes);
+                    case ScatterType::Add:
                         result = mlx::core::slice_update(
-                            result, mlx::core::multiply(current, updateVal), startArr, axes);
+                            result, mlx::core::add(readWindow(), updateVal), startArr, axes);
                         break;
-                    }
+                    case ScatterType::Mul:
+                        result = mlx::core::slice_update(
+                            result, mlx::core::multiply(readWindow(), updateVal), startArr, axes);
+                        break;
                     default:
                         MPS_LOG_ERROR(
                             "stablehlo.scatter: unsupported scatter update type "
