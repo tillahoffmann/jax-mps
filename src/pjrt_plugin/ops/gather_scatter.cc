@@ -359,13 +359,6 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
     if (hasWindowScatter && insertedWindowDims.empty()) {
         // For multi-axis window scatter, use slice_update loop.
         if (scatterDimsToOperandDims.size() > 1) {
-            if (!inputBatchingDims.empty()) {
-                MPS_LOG_ERROR(
-                    "stablehlo.scatter: multi-axis window scatter with batching dims "
-                    "is not supported\n");
-                return false;
-            }
-
             std::vector<int> batchDims;
             int batchSize = 1;
             for (int d = 0; d < scatterIndices->ndim(); ++d) {
@@ -378,9 +371,33 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             bool singleUpdate = (batchSize == 1);
             auto axes = ToIntVec(scatterDimsToOperandDims);
 
+            // A batching dim pairs an operand axis with a scatter_indices axis:
+            // index position k along the indices batching dim scatters into
+            // slice k of the operand along the paired operand axis. This loop
+            // already visits one index position at a time, so that operand
+            // coordinate is just the position's own coordinate along the paired
+            // indices dim -- append it as an extra (axis, start) pair. The
+            // point-scatter path expresses the same relationship as an iota
+            // index column (AddBatchingIotas), which slice_update cannot take.
+            std::vector<int> batchingOperandAxes = ToIntVec(inputBatchingDims);
+            axes.insert(axes.end(), batchingOperandAxes.begin(), batchingOperandAxes.end());
+
             int numPositions = singleUpdate ? 1 : batchSize;
             mlx::core::array result = *operand;
             for (int b = 0; b < numPositions; ++b) {
+                // Row-major decode of the flat position into one coordinate per
+                // scatter_indices dim. The index vector dim is not part of the
+                // batch space and keeps its placeholder 0.
+                std::vector<int> position(scatterIndices->ndim(), 0);
+                if (!singleUpdate) {
+                    int remaining = b;
+                    for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
+                        int dim = batchDims[bd];
+                        position[dim] = remaining % scatterIndices->shape(dim);
+                        remaining /= scatterIndices->shape(dim);
+                    }
+                }
+
                 std::vector<mlx::core::array> perAxisIdx;
                 for (size_t i = 0; i < scatterDimsToOperandDims.size(); ++i) {
                     mlx::core::Shape starts(scatterIndices->ndim(), 0);
@@ -394,12 +411,9 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     if (hasIdxVecDim)
                         squeezeDims.push_back(indexVectorDim);
                     if (!singleUpdate) {
-                        int remaining = b;
-                        for (int bd = static_cast<int>(batchDims.size()) - 1; bd >= 0; --bd) {
-                            int dim = batchDims[bd];
-                            starts[dim] = remaining % scatterIndices->shape(dim);
-                            stops[dim] = starts[dim] + 1;
-                            remaining /= scatterIndices->shape(dim);
+                        for (int dim : batchDims) {
+                            starts[dim] = position[dim];
+                            stops[dim] = position[dim] + 1;
                         }
                         for (int bd : batchDims)
                             squeezeDims.push_back(bd);
@@ -417,6 +431,10 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         axisIdx = mlx::core::astype(axisIdx, mlx::core::int32);
                     }
                     perAxisIdx.push_back(mlx::core::reshape(axisIdx, {1}));
+                }
+                for (auto idxBatchDim : scatterIndicesBatchingDims) {
+                    perAxisIdx.push_back(mlx::core::full(
+                        {1}, position[static_cast<int>(idxBatchDim)], mlx::core::int32));
                 }
                 auto startArr = mlx::core::concatenate(perAxisIdx, 0);
 
@@ -451,6 +469,16 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     if (!squeezeDims.empty()) {
                         updateVal = mlx::core::squeeze(updateVal, squeezeDims);
                     }
+                }
+
+                // Batching operand axes are collapsed out of `updates` (they are
+                // neither window dims nor index-vector components), so reinstate
+                // them as size-1 axes to restore operand rank. Without this MLX's
+                // dynamic slice_update left-pads the lower-rank update against the
+                // *leading* operand dims and broadcasts this position's update
+                // across the entire batch.
+                if (!batchingOperandAxes.empty()) {
+                    updateVal = mlx::core::expand_dims(updateVal, batchingOperandAxes);
                 }
 
                 switch (scatterType) {

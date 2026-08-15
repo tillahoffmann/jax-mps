@@ -543,4 +543,97 @@ def make_slice_op_configs():
                 lambda key: random.randint(key, (4,), 0, 8),
                 name="gather_non_contiguous_window_dims_grad",
             ),
+            # Batched window scatter: vmapping an op that writes a whole slice
+            # (rather than a point) over a batched index lowers to a scatter
+            # that carries input_batching_dims / scatter_indices_batching_dims
+            # AND has window extent > 1 on more than one scatter axis. The
+            # slice_update loop that serves multi-axis window scatter used to
+            # reject batching dims outright.
+            #
+            # vmap(dynamic_update_index_in_dim): the ring-buffer write pattern.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_index_in_dim(xi, ui, ii, 0)
+                )(x, u, idx),
+                lambda key: random.normal(key, (2, 4, 3)),
+                lambda key: random.normal(key, (2, 3)),
+                numpy.array([1, 3], dtype=numpy.int32),
+                name="batched_window_scatter_update_index",
+            ),
+            # Multi-dim window: the update slab spans two trailing axes.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_index_in_dim(xi, ui, ii, 0)
+                )(x, u, idx),
+                lambda key: random.normal(key, (2, 4, 3, 2)),
+                lambda key: random.normal(key, (2, 3, 2)),
+                numpy.array([3, 0], dtype=numpy.int32),
+                name="batched_window_scatter_multi_dim_window",
+            ),
+            # Scatter axis is an interior operand dim, not the one next to the
+            # batching dim, so the appended batching axis is not adjacent to
+            # the index-vector components.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_index_in_dim(xi, ui, ii, 1)
+                )(x, u, idx),
+                lambda key: random.normal(key, (2, 4, 3, 2)),
+                lambda key: random.normal(key, (2, 4, 2)),
+                numpy.array([2, 0], dtype=numpy.int32),
+                name="batched_window_scatter_interior_axis",
+            ),
+            # Two dynamic start axes per batch element, each with extent > 1.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_slice(xi, ui, (ii, ii))
+                )(x, u, idx),
+                lambda key: random.normal(key, (2, 4, 5)),
+                lambda key: random.normal(key, (2, 2, 3)),
+                numpy.array([1, 2], dtype=numpy.int32),
+                name="batched_window_scatter_dynamic_update_slice",
+            ),
+            # Out-of-bounds starts: -1 wraps to the last row and 9 clamps to the
+            # largest in-bounds start, matching dynamic_update_slice semantics
+            # on CPU.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_index_in_dim(xi, ui, ii, 0)
+                )(x, u, idx),
+                lambda key: random.normal(key, (2, 4, 3)),
+                lambda key: random.normal(key, (2, 3)),
+                numpy.array([-1, 9], dtype=numpy.int32),
+                name="batched_window_scatter_out_of_bounds",
+            ),
+            # Batching dims with a single index position: exercises the
+            # singleUpdate branch, where the update is squeezed rather than
+            # sliced before the batching axes are reinstated.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(
+                    lambda xi, ui, ii: lax.dynamic_update_index_in_dim(xi, ui, ii, 0)
+                )(x, u, idx),
+                lambda key: random.normal(key, (1, 4, 3)),
+                lambda key: random.normal(key, (1, 3)),
+                numpy.array([2], dtype=numpy.int32),
+                name="batched_window_scatter_single_position",
+            ),
+            # Point scatter under vmap already routed through the iota-based
+            # batching path; keep it covered so the two paths stay in sync.
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(lambda xi, ui, ii: xi.at[ii].set(ui))(
+                    x, u, idx
+                ),
+                lambda key: random.normal(key, (2, 4, 3)),
+                lambda key: random.normal(key, (2, 3)),
+                numpy.array([1, 3], dtype=numpy.int32),
+                name="batched_point_scatter_set",
+            ),
+            OperationTestConfig(
+                lambda x, u, idx: jax.vmap(lambda xi, ui, ii: xi.at[ii].add(ui))(
+                    x, u, idx
+                ),
+                lambda key: random.normal(key, (2, 4, 3)),
+                lambda key: random.normal(key, (2, 3)),
+                numpy.array([1, 3], dtype=numpy.int32),
+                name="batched_point_scatter_add",
+            ),
         ]
