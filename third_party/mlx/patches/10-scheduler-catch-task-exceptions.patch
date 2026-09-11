@@ -1,5 +1,5 @@
 diff --git a/mlx/array.cpp b/mlx/array.cpp
-index e694ccf..ecf6246 100644
+index 07d3acd..3b7a960 100644
 --- a/mlx/array.cpp
 +++ b/mlx/array.cpp
 @@ -5,6 +5,7 @@
@@ -10,7 +10,7 @@ index e694ccf..ecf6246 100644
  #include "mlx/transforms.h"
  #include "mlx/transforms_impl.h"
  
-@@ -147,6 +148,13 @@ void array::wait() {
+@@ -148,6 +149,13 @@ void array::wait() {
        event().wait();
        detach_event();
      }
@@ -25,7 +25,7 @@ index e694ccf..ecf6246 100644
    }
  }
 diff --git a/mlx/backend/cpu/encoder.h b/mlx/backend/cpu/encoder.h
-index 9a2c35a..ef24879 100644
+index cd01562..a58e605 100644
 --- a/mlx/backend/cpu/encoder.h
 +++ b/mlx/backend/cpu/encoder.h
 @@ -47,7 +47,14 @@ struct MLX_API CommandEncoder {
@@ -45,7 +45,7 @@ index 9a2c35a..ef24879 100644
        };
        scheduler::enqueue(stream_, std::move(task_wrap));
 diff --git a/mlx/scheduler.cpp b/mlx/scheduler.cpp
-index e0b467a..52e8849 100644
+index 7507917..c829fbc 100644
 --- a/mlx/scheduler.cpp
 +++ b/mlx/scheduler.cpp
 @@ -1,6 +1,11 @@
@@ -59,8 +59,8 @@ index e0b467a..52e8849 100644
 +
  #include "mlx/backend/cpu/eval.h"
  #include "mlx/backend/gpu/eval.h"
- 
-@@ -68,5 +73,51 @@ Scheduler& scheduler() {
+ #include "mlx/utils.h"
+@@ -70,5 +75,51 @@ Scheduler& scheduler() {
    return *scheduler;
  }
  
