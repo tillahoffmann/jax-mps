@@ -66,6 +66,15 @@ def make_shape_op_configs():
                 lambda x: jax.lax.pad(x, 0.0, [(1, 1, 1), (0, 0, 2)]),
                 lambda key: random.normal(key, (3, 4)),
             ),
+            # A reversed (negative-stride) view feeding a broadcast operand in
+            # the same fused kernel read as zeros past the first element until
+            # MLX v0.32.0 (ml-explore/mlx#3720); plain `jnp.flip` above stayed
+            # correct throughout, so it did not catch this. See #232.
+            OperationTestConfig(
+                lambda x: jnp.flip(x) * 2.0,
+                lambda key: random.normal(key, (16,)),
+                name="flip-times-scalar",
+            ),
             # Pad with negative edge padding (trimming)
             OperationTestConfig(
                 lambda x: jax.lax.pad(x, 0.0, [(-1, 2, 0), (0, -1, 0)]),
