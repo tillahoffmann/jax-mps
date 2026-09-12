@@ -7,11 +7,20 @@ an op throws on the worker thread the exception unwinds off the top of the
 thread -> ``std::terminate`` -> ``abort()``, killing the whole process. Our
 ``Execute`` try/catch only guards the dispatch thread and cannot catch this.
 
-The trigger here is ``eigh`` on a non-convergent input: LAPACK ``syevd`` returns
+The trigger here is ``eigh`` on a non-finite input: LAPACK ``syevd`` returns
 ``info != 0`` and ``eigh_impl`` throws ``std::runtime_error`` inside its
-dispatched lambda. LOBPCG reaches it via its Rayleigh-Ritz step on an
-ill-conditioned (cond 1e5) projection -- this is the exact computation that
-aborted the upstream JAX suite at ``lobpcg_test.py::...geom_cond_100k``.
+dispatched lambda.
+
+This used to drive the same failure through LOBPCG on an ill-conditioned
+(cond 1e5) operator, mirroring the upstream JAX suite's
+``lobpcg_test.py::...geom_cond_100k`` abort. That trigger turned out to be a
+symptom of #232 rather than genuine non-convergence: LOBPCG's Rayleigh-Ritz
+step reverses its basis (``jax/experimental/sparse/linalg.py``: ``V[:, ::-1]``),
+and a reversed view feeding a fused kernel read as zeros past the first
+element, so the *next* iteration got a degenerate projection. MLX v0.32.0
+fixed that, LOBPCG converges, and the test silently stopped exercising the
+worker-thread path. Feed ``eigh`` a matrix LAPACK must reject instead, so the
+trigger does not depend on a miscompile.
 
 A vendored MLX patch (``third_party/mlx/patches/10-...``) catches the worker
 exception and re-throws it at the next synchronization point, turning the abort
@@ -26,23 +35,20 @@ import os
 import subprocess
 import sys
 
-# Drive MLX eigh to a non-convergent input via LOBPCG on a diagonal operator
-# with a geometric spectrum spanning 1..1e5 (condition number 1e5). The
-# Rayleigh-Ritz eigh on the float32 projection fails (syevd info != 0). The
-# computation is wrapped in try/except: post-fix the failure is a catchable
-# Python exception, so the process exits 0 having printed NOABORT:RAISED with
-# the MLX error message; pre-fix the process aborts (SIGABRT) before any print.
+# Drive MLX eigh to a failure LAPACK cannot avoid: an all-NaN symmetric matrix
+# makes syevd return info != 0, and `Eigh::eval_cpu` throws inside its
+# dispatched lambda. The computation is wrapped in try/except: post-fix the
+# failure is a catchable Python exception, so the process exits 0 having
+# printed NOABORT:RAISED with the MLX error message; pre-fix the process
+# aborts (SIGABRT) before any print. A NaN on the diagonal alone is not
+# enough -- syevd converges and returns NaN eigenvalues.
 _WORKLOAD = (
     "import os; os.environ.setdefault('JAX_PLATFORMS', 'mps');"
     "import numpy as np, jax, jax.numpy as jnp;"
-    "from jax.experimental.sparse import linalg as splinalg;"
-    "n = 100;"
-    "diagonal = np.logspace(0, 5, n).astype(np.float32);"
-    "X = jax.random.normal(jax.random.PRNGKey(0), (n, 10), dtype=jnp.float32);"
-    "f = lambda Z: diagonal[:, None] * Z;"
+    "a = jnp.asarray(np.full((8, 8), np.nan, dtype=np.float32));"
     "\ntry:\n"
-    "    theta, _, _ = splinalg.lobpcg_standard(f, X, m=20);\n"
-    "    jax.block_until_ready(theta);\n"
+    "    w, v = jnp.linalg.eigh(a);\n"
+    "    jax.block_until_ready((w, v));\n"
     "    print('NOABORT:COMPLETED')\n"
     "except Exception as e:\n"
     "    print('NOABORT:RAISED', repr(str(e)))\n"
