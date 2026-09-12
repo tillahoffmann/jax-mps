@@ -197,10 +197,13 @@ jobs:
           key: deps-mlx-v1-${{ env.RUNNER_IMAGE }}-${{ hashFiles('macos-deployment-target', 'scripts/setup_deps_common.sh', 'scripts/setup_deps_mlx.sh', 'third_party/mlx/version.txt', 'third_party/mlx/patches/*') }}
           fail-on-cache-miss: true
 
+      # Pin the major version: clang-tidy gains new checks in every LLVM
+      # release, so an unpinned `llvm` turns a Homebrew bump into a red lint
+      # job on PRs that changed nothing. Bump this deliberately.
       - name: Install llvm
         uses: tecolicom/actions-use-homebrew-tools@v1
         with:
-          tools: llvm
+          tools: llvm@22
 
       - name: clang-format
         run: uvx pre-commit run clang-format --all-files
@@ -212,7 +215,7 @@ jobs:
 
       - name: clang-tidy
         run: |
-          export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+          export PATH="/opt/homebrew/opt/llvm@22/bin:$PATH"
           find src -type f -name "*.cc" ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) clang-tidy -p build
 
   lint-python:
