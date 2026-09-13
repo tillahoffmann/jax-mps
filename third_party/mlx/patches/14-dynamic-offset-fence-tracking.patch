@@ -1,0 +1,28 @@
+Register a dynamic-slice offset as an encoder temporary only when its
+storage was newly allocated.
+
+When the start indices are donatable, `compute_dynamic_offset` shares
+their buffer with the offset output. Registering that donated alias as an
+encoder temporary makes `CommandEncoder::end_encoding()` drop the shared
+pointer from the input and output dependency sets before producer fences
+are resolved, so a dynamic slice can read a stale start across a
+command-buffer boundary. This corrupts `lax.scan` stacked-output history
+when the read- and write-side start chains are CSE-shared.
+
+Upstreamed as ml-explore/mlx#4099 (merged 2026-08-11); drop this patch at
+the next MLX bump past that commit.
+
+diff --git a/mlx/backend/metal/slicing.cpp b/mlx/backend/metal/slicing.cpp
+--- a/mlx/backend/metal/slicing.cpp
++++ b/mlx/backend/metal/slicing.cpp
+@@ -57,9 +57,9 @@ array compute_dynamic_offset(
+   if (donate) {
+     offset.copy_shared_buffer(indices);
+   } else {
+     offset.set_data(allocator::malloc(offset.itemsize()));
++    compute_encoder.add_temporary(offset);
+   }
+-  compute_encoder.add_temporary(offset);
+ 
+   auto dtype = indices.dtype();
+   std::string lib_name = "compute_dynamic_offset_" + type_to_name(dtype);
