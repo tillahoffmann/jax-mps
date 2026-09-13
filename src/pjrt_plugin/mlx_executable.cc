@@ -158,6 +158,53 @@ std::optional<mlx::core::array> MaybeBitcastNonFiniteFloat(const void* data,
     return std::nullopt;
 }
 
+// jax-mps#231: MLX has no float64, so MlirTypeToMlxDtype narrows f64 -> float32
+// (and complex<f64> -> complex64). That changes only the dtype *tag*: the
+// attribute payload is still 8-byte doubles, and the readers below reinterpret
+// the raw bytes through a `const float*` / `const complex64_t*`. Narrow by value
+// here so they don't decode garbage (#231: pi came back as 3.37e12, because its
+// low four bytes read as a float are 3370280550400.0). Returns nullopt when the
+// element type needs no narrowing, so callers use the raw bytes unchanged.
+struct NarrowResult {
+    std::optional<std::vector<char>> data;  // narrowed bytes, if narrowing applied
+    bool malformed = false;                 // payload too short for its element width
+};
+
+NarrowResult NarrowF64Data(mlir::Type elemType, const void* data, size_t dataSize,
+                           size_t numElements) {
+    size_t doublesPerElement = 0;
+    if (elemType.isF64()) {
+        doublesPerElement = 1;
+    } else if (auto complexType = mlir::dyn_cast<mlir::ComplexType>(elemType);
+               complexType && complexType.getElementType().isF64()) {
+        doublesPerElement = 2;
+    } else {
+        return NarrowResult{std::nullopt, false};
+    }
+
+    const size_t numDoubles = numElements * doublesPerElement;
+    if (dataSize < numDoubles * sizeof(double)) {
+        // Cannot fall through to the size check below: `expectedSize` there is
+        // computed from the *narrowed* dtype (4 bytes for f64, 8 for
+        // complex<f64>), so a truncated payload would pass it and be
+        // reinterpreted as a plausible value. Report it here instead.
+        MPS_LOG_ERROR("Constant f64 data size mismatch: got %zu bytes, expected %zu\n", dataSize,
+                      numDoubles * sizeof(double));
+        return NarrowResult{std::nullopt, true};
+    }
+
+    // memcpy both ways: DenseElementsAttr::getRawData() is byte-oriented and not
+    // guaranteed to be element-aligned.
+    std::vector<char> narrowed(numDoubles * sizeof(float));
+    for (size_t i = 0; i < numDoubles; ++i) {
+        double value;
+        std::memcpy(&value, static_cast<const char*>(data) + i * sizeof(double), sizeof(double));
+        const float narrowedValue = static_cast<float>(value);
+        std::memcpy(narrowed.data() + i * sizeof(float), &narrowedValue, sizeof(float));
+    }
+    return NarrowResult{std::move(narrowed), false};
+}
+
 std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr attr) {
     auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(attr.getType());
     if (!tensorType) {
@@ -170,12 +217,31 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     auto mlxDtype = MlirTypeToMlxDtype(elemType);
     auto rawData = attr.getRawData();
 
+    size_t numElements = 1;
+    for (int dim : shape) {
+        numElements *= dim;
+    }
+
+    // jax-mps#231: f64/complex<f64> payloads must be narrowed by value before
+    // any of the typed reads below. `narrowed` owns the converted bytes for the
+    // rest of this function.
+    const void* dataPtr = rawData.data();
+    size_t dataSize = rawData.size();
+    auto narrowed = NarrowF64Data(elemType, dataPtr, dataSize, attr.isSplat() ? 1 : numElements);
+    if (narrowed.malformed) {
+        return std::nullopt;
+    }
+    if (narrowed.data) {
+        dataPtr = narrowed.data->data();
+        dataSize = narrowed.data->size();
+    }
+
     // Handle splat constants (single value broadcast to shape)
     if (attr.isSplat()) {
         // jax-mps#170: route non-finite floats through a bitcast (computed value).
-        auto scalar_opt = MaybeBitcastNonFiniteFloat(rawData.data(), {}, mlxDtype, 1);
+        auto scalar_opt = MaybeBitcastNonFiniteFloat(dataPtr, {}, mlxDtype, 1);
         if (!scalar_opt)
-            scalar_opt = CreateArrayWithTypedPtr(rawData.data(), {}, mlxDtype);
+            scalar_opt = CreateArrayWithTypedPtr(dataPtr, {}, mlxDtype);
         if (!scalar_opt) {
             MPS_LOG_ERROR("Unsupported dtype %d for splat constant\n",
                           static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
@@ -189,10 +255,6 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
 
     // Validate data size matches expected size
     size_t elemSize = GetDtypeSize(mlxDtype);
-    size_t numElements = 1;
-    for (int dim : shape) {
-        numElements *= dim;
-    }
     size_t expectedSize = numElements * elemSize;
 
     // MLIR's DenseElementsAttr stores i1 either bit-packed (1 bit per element,
@@ -201,14 +263,14 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     // Disambiguate by comparing the raw data size against both encodings.
     if (mlxDtype == mlx::core::bool_) {
         const size_t bitPackedSize = (numElements + 7) / 8;
-        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(rawData.data());
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(dataPtr);
         std::vector<uint8_t> unpacked(numElements);
-        if (rawData.size() >= numElements) {
+        if (dataSize >= numElements) {
             // One byte per element — value is a non-zero byte for true.
             for (size_t i = 0; i < numElements; ++i) {
                 unpacked[i] = bytes[i] != 0 ? 1 : 0;
             }
-        } else if (rawData.size() >= bitPackedSize) {
+        } else if (dataSize >= bitPackedSize) {
             for (size_t i = 0; i < numElements; ++i) {
                 unpacked[i] = (bytes[i / 8] >> (i % 8)) & 1;
             }
@@ -216,23 +278,23 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
             MPS_LOG_ERROR(
                 "Boolean constant data size mismatch: got %zu bytes, expected %zu (bit-packed) or "
                 "%zu (byte-per-element) for %zu elements\n",
-                rawData.size(), bitPackedSize, numElements, numElements);
+                dataSize, bitPackedSize, numElements, numElements);
             return std::nullopt;
         }
         auto arr = mlx::core::array(unpacked.data(), shape, mlx::core::uint8);
         return mlx::core::astype(arr, mlx::core::bool_);
     }
 
-    if (rawData.size() < expectedSize) {
-        MPS_LOG_ERROR("Constant data size mismatch: got %zu bytes, expected %zu\n", rawData.size(),
+    if (dataSize < expectedSize) {
+        MPS_LOG_ERROR("Constant data size mismatch: got %zu bytes, expected %zu\n", dataSize,
                       expectedSize);
         return std::nullopt;
     }
 
     // jax-mps#170: route non-finite floats through a bitcast (computed value).
-    auto result = MaybeBitcastNonFiniteFloat(rawData.data(), shape, mlxDtype, numElements);
+    auto result = MaybeBitcastNonFiniteFloat(dataPtr, shape, mlxDtype, numElements);
     if (!result)
-        result = CreateArrayWithTypedPtr(rawData.data(), shape, mlxDtype);
+        result = CreateArrayWithTypedPtr(dataPtr, shape, mlxDtype);
     if (!result) {
         MPS_LOG_ERROR("Unsupported dtype %d for constant\n",
                       static_cast<int>(static_cast<mlx::core::Dtype::Val>(mlxDtype)));
