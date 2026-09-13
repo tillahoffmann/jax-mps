@@ -165,8 +165,13 @@ std::optional<mlx::core::array> MaybeBitcastNonFiniteFloat(const void* data,
 // here so they don't decode garbage (#231: pi came back as 3.37e12, because its
 // low four bytes read as a float are 3370280550400.0). Returns nullopt when the
 // element type needs no narrowing, so callers use the raw bytes unchanged.
-std::optional<std::vector<char>> NarrowF64Data(mlir::Type elemType, const void* data,
-                                               size_t dataSize, size_t numElements) {
+struct NarrowResult {
+    std::optional<std::vector<char>> data;  // narrowed bytes, if narrowing applied
+    bool malformed = false;                 // payload too short for its element width
+};
+
+NarrowResult NarrowF64Data(mlir::Type elemType, const void* data, size_t dataSize,
+                           size_t numElements) {
     size_t doublesPerElement = 0;
     if (elemType.isF64()) {
         doublesPerElement = 1;
@@ -174,13 +179,18 @@ std::optional<std::vector<char>> NarrowF64Data(mlir::Type elemType, const void* 
                complexType && complexType.getElementType().isF64()) {
         doublesPerElement = 2;
     } else {
-        return std::nullopt;
+        return NarrowResult{std::nullopt, false};
     }
 
     const size_t numDoubles = numElements * doublesPerElement;
     if (dataSize < numDoubles * sizeof(double)) {
-        // Let the existing size-mismatch check below report this.
-        return std::nullopt;
+        // Cannot fall through to the size check below: `expectedSize` there is
+        // computed from the *narrowed* dtype (4 bytes for f64, 8 for
+        // complex<f64>), so a truncated payload would pass it and be
+        // reinterpreted as a plausible value. Report it here instead.
+        MPS_LOG_ERROR("Constant f64 data size mismatch: got %zu bytes, expected %zu\n", dataSize,
+                      numDoubles * sizeof(double));
+        return NarrowResult{std::nullopt, true};
     }
 
     // memcpy both ways: DenseElementsAttr::getRawData() is byte-oriented and not
@@ -192,7 +202,7 @@ std::optional<std::vector<char>> NarrowF64Data(mlir::Type elemType, const void* 
         const float narrowedValue = static_cast<float>(value);
         std::memcpy(narrowed.data() + i * sizeof(float), &narrowedValue, sizeof(float));
     }
-    return narrowed;
+    return NarrowResult{std::move(narrowed), false};
 }
 
 std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr attr) {
@@ -218,9 +228,12 @@ std::optional<mlx::core::array> CreateArrayFromDenseAttr(mlir::DenseElementsAttr
     const void* dataPtr = rawData.data();
     size_t dataSize = rawData.size();
     auto narrowed = NarrowF64Data(elemType, dataPtr, dataSize, attr.isSplat() ? 1 : numElements);
-    if (narrowed) {
-        dataPtr = narrowed->data();
-        dataSize = narrowed->size();
+    if (narrowed.malformed) {
+        return std::nullopt;
+    }
+    if (narrowed.data) {
+        dataPtr = narrowed.data->data();
+        dataSize = narrowed.data->size();
     }
 
     // Handle splat constants (single value broadcast to shape)
