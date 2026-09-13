@@ -40,6 +40,32 @@ def make_misc_op_configs():
                 ),
                 name="non-contiguous-fortran-order",
             ),
+            # jax-mps#234: reversed numpy views hand PJRT negative byte
+            # strides. `data` already points at the logical first element, so
+            # the offset arithmetic just has to be signed.
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.arange(8, dtype=numpy.float32)[::-1],
+                name="non-contiguous-reversed-1d",
+            ),
+            # Negative innermost stride: no contiguous row to fast-path, so
+            # every element goes through the offset loop.
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.arange(24, dtype=numpy.float32).reshape(2, 3, 4)[
+                    ::-1, :, ::-1
+                ],
+                name="non-contiguous-reversed-3d",
+            ),
+            # Negative outer stride with a contiguous innermost dim, which does
+            # take the row fast path.
+            OperationTestConfig(
+                lambda x: x,
+                lambda key: numpy.flip(
+                    numpy.arange(24, dtype=numpy.float32).reshape(4, 6), axis=0
+                ),
+                name="non-contiguous-flipped-rows",
+            ),
             OperationTestConfig(
                 lambda x: jnp.fft.fft(x),
                 lambda key: complex_standard_normal(key, (16,), complex=True),

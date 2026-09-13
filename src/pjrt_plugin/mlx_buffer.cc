@@ -4,6 +4,7 @@
 
 #include <xla/pjrt/c/pjrt_c_api.h>
 
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
 
@@ -152,16 +153,10 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
     // Declared in outer scope so it stays alive through array construction.
     std::vector<uint8_t> contiguous_buf;
     if (!is_contiguous) {
-        // Reject negative strides — these would require computing a base offset
-        // into the source buffer, which PJRT does not provide.
-        for (size_t i = 0; i < byte_strides.size(); ++i) {
-            if (byte_strides[i] < 0) {
-                MPS_LOG_ERROR("Negative byte stride (%lld) at dim %zu not supported\n",
-                              static_cast<long long>(byte_strides[i]), i);
-                return nullptr;
-            }
-        }
-
+        // Negative strides are fine: `data` addresses the logical first element
+        // (for a reversed numpy view that is the last element of the base
+        // allocation), so `data + sum(index[d] * byte_strides[d])` stays inside
+        // the allocation as long as the arithmetic is signed. See jax-mps#234.
         size_t num_elements = 1;
         for (auto d : dims)
             num_elements *= d;
@@ -181,9 +176,10 @@ std::unique_ptr<MlxBuffer> MlxBuffer::FromHostBuffer(const void* data, int dtype
 
         std::vector<int64_t> indices(outer_dims, 0);
         for (size_t row = 0; row < num_rows; ++row) {
-            size_t src_offset = 0;
+            std::ptrdiff_t src_offset = 0;
             for (size_t d = 0; d < outer_dims; ++d) {
-                src_offset += indices[d] * static_cast<size_t>(byte_strides[d]);
+                src_offset += static_cast<std::ptrdiff_t>(indices[d]) *
+                              static_cast<std::ptrdiff_t>(byte_strides[d]);
             }
             std::memcpy(contiguous_buf.data() + row * row_bytes, src + src_offset, row_bytes);
 
