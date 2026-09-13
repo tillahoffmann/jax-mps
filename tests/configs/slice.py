@@ -376,6 +376,34 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (3, 2)),
                 name="batched_window_scatter_add",
             ),
+            # Batched two-axis window scatter: vmap introduces an
+            # input_batching_dim that must become an explicit dynamic-slice
+            # axis alongside the two window starts (jax-mps#124).
+            OperationTestConfig(
+                lambda x, y, row, col: jax.vmap(
+                    lambda a, b, i, j: lax.dynamic_update_slice(a, b, (i, j))
+                )(x, y, row, col),
+                lambda key: jnp.zeros((3, 5, 6), dtype=jnp.float32),
+                lambda key: random.normal(key, (3, 2, 3)),
+                lambda key: jnp.array([0, 1, 2], dtype=jnp.int32),
+                lambda key: jnp.array([1, 2, 3], dtype=jnp.int32),
+                name="batched_multi_axis_window_scatter_set",
+            ),
+            # Same path in accumulate modes, which read the current window back
+            # before combining and so must right-align the lower-rank update
+            # against the operand (jax-mps#124).
+            OperationTestConfig(
+                lambda x, y: jax.vmap(lambda a, b: a.at[1:3, 2:5].add(b))(x, y),
+                lambda key: random.normal(key, (3, 5, 6)),
+                lambda key: random.normal(key, (3, 2, 3)),
+                name="batched_multi_axis_window_scatter_add",
+            ),
+            OperationTestConfig(
+                lambda x, y: jax.vmap(lambda a, b: a.at[1:3, 2:5].multiply(b))(x, y),
+                lambda key: random.normal(key, (3, 5, 6)),
+                lambda key: random.normal(key, (3, 2, 3)),
+                name="batched_multi_axis_window_scatter_mul",
+            ),
             # Window scatter gradient: backward pass of a slice gather creates
             # a scatter with non-inserted scatter dim and window size 1.
             OperationTestConfig(
