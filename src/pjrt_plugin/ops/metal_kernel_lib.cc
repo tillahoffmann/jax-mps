@@ -19,11 +19,12 @@ namespace {
 constexpr size_t kMaxMetalBuffers = 31;
 
 // Pipeline cache key. MLX caches a library's pipelines by this key alone, before
-// applying function constants, so the constant values must be part of it or two
-// specializations of one kernel would share the first compiled pipeline.
+// applying function constants, so the kernel name and constant values must be
+// part of it or two kernels sharing a hash_name, or two specializations of one
+// kernel, would share the first compiled pipeline.
 std::string PipelineKey(const std::string& kname, const std::string& hash_name,
                         const std::vector<MklConstant>& constants) {
-    std::string key = hash_name.empty() ? kname : hash_name;
+    std::string key = hash_name.empty() ? kname : kname + "_" + hash_name;
     for (const auto& c : constants) {
         key += "_fc" + std::to_string(c.index) + "t" + std::to_string(c.type) + "v";
         for (uint8_t byte : c.value) {
