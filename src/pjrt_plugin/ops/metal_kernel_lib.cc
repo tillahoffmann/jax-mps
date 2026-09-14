@@ -1,8 +1,10 @@
 #include "pjrt_plugin/ops/metal_kernel_lib.h"
 
+#include <array>
 #include <cstdio>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 
 #include "mlx/allocator.h"
 #include "mlx/backend/gpu/copy.h"
@@ -12,6 +14,9 @@
 namespace mlx::core {
 
 namespace {
+
+// Metal exposes buffer slots [[buffer(0)]]..[[buffer(30)]].
+constexpr size_t kMaxMetalBuffers = 31;
 
 // Pipeline cache key. MLX caches a library's pipelines by this key alone, before
 // applying function constants, so the constant values must be part of it or two
@@ -135,8 +140,6 @@ void MetalKernelLibKernel::eval_gpu(const std::vector<array>& inputs, std::vecto
         }
     } else {
         for (const auto& b : buffers_) {
-            if (b.slot < 0)
-                throw std::runtime_error("metal_kernel_lib: buffer slot must be non-negative");
             switch (b.kind) {
                 case MklBuffer::kInput:
                     if (b.arg < 0 || static_cast<size_t>(b.arg) >= in_ptrs.size())
@@ -176,6 +179,22 @@ std::vector<array> metal_kernel_lib(const std::vector<array>& inputs,
                                     std::array<int, 3> threadgroup, bool by_threadgroups,
                                     std::vector<MklBuffer> buffers,
                                     std::vector<MklConstant> constants, StreamOrDevice s_) {
+    // Validate before building the graph: a slot bound twice would let the later
+    // set_* call silently replace the earlier binding.
+    std::array<bool, kMaxMetalBuffers> bound_slots{};
+    for (const auto& b : buffers) {
+        if (b.slot < 0 || static_cast<size_t>(b.slot) >= kMaxMetalBuffers || bound_slots[b.slot])
+            throw std::invalid_argument(
+                "metal_kernel_lib: buffer slot out of range or bound more than once");
+        bound_slots[b.slot] = true;
+    }
+    std::unordered_set<int> constant_indices;
+    for (const auto& c : constants) {
+        if (c.index < 0 || !constant_indices.insert(c.index).second)
+            throw std::invalid_argument(
+                "metal_kernel_lib: function constant index negative or set more than once");
+    }
+
     auto s = to_stream(s_);
     return array::make_arrays(out_shapes, out_dtypes,
                               std::make_shared<MetalKernelLibKernel>(

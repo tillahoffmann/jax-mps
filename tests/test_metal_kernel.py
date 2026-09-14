@@ -389,3 +389,56 @@ def test_metal_kernel_lib_rejects_duplicate_constant_index():
                 {"index": 7, "type": "int", "value": 3},
             ],
         )
+
+
+def _bind_metal_kernel_lib_unchecked(a, metallib_path, *, buffers, function_constants):
+    """Bind the primitive directly, bypassing the Python canonicalizers, so the
+    backend's own validation is exercised."""
+    from jax_plugins.mps.ops import _metal_kernel_lib_p
+
+    (out,) = _metal_kernel_lib_p.bind(
+        a,
+        name="scaled",
+        metallib_path=metallib_path,
+        hash_name="",
+        grid=(4, 1, 1),
+        threadgroup=(1, 1, 1),
+        dispatch="threads",
+        buffers=buffers,
+        function_constants=function_constants,
+        out_shapes=((4,),),
+        out_dtypes=(jnp.dtype(jnp.float32),),
+    )
+    return out
+
+
+def test_metal_kernel_lib_backend_rejects_duplicate_slot(vadd_metallib):
+    """The backend must reject a slot bound twice even when the Python
+    canonicalizer is bypassed, instead of letting the later binding win."""
+
+    def fn(a):
+        return _bind_metal_kernel_lib_unchecked(
+            a,
+            vadd_metallib,
+            buffers=((0, "input", 0, None), (0, "output", 0, None)),
+            function_constants=None,
+        )
+
+    with pytest.raises(RuntimeError, match="slot out of range or bound more than once"):
+        np.asarray(_run_on_mps(fn, jnp.zeros((4,), jnp.float32)))
+
+
+def test_metal_kernel_lib_backend_rejects_duplicate_constant_index(vadd_metallib):
+    """The backend must reject a function-constant index set twice even when the
+    Python canonicalizer is bypassed."""
+
+    def fn(a):
+        return _bind_metal_kernel_lib_unchecked(
+            a,
+            vadd_metallib,
+            buffers=((0, "input", 0, None), (5, "output", 0, None)),
+            function_constants=((7, "bool", True), (7, "bool", False)),
+        )
+
+    with pytest.raises(RuntimeError, match="index negative or set more than once"):
+        np.asarray(_run_on_mps(fn, jnp.zeros((4,), jnp.float32)))
