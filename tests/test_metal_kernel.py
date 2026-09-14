@@ -54,6 +54,74 @@ def test_metal_kernel_jit_fused_multiply_add():
     np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_metal_kernel_jit_same_name_different_source():
+    """Two jitted kernels that share a name but differ in source must not alias."""
+    n = 256
+
+    def one(a, name, expr):
+        (out,) = metal_kernel_jit(
+            name,
+            [a],
+            output_shapes=[(n,)],
+            output_dtypes=[jnp.float32],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            source=f"uint i = thread_position_in_grid.x; if (i < {n}u) out[i] = {expr};",
+            input_names=["a"],
+            output_names=["out"],
+        )
+        return out
+
+    def fn(a):
+        # Same name "k", different source, in a single jitted program.
+        return one(a, "k", "a[i] + 1.0f"), one(a, "k", "a[i] * 2.0f")
+
+    a = jax.random.normal(jax.random.PRNGKey(0), (n,))
+    plus, times = _run_on_mps(fn, a)
+    np.testing.assert_allclose(
+        np.asarray(plus), np.asarray(a) + 1.0, rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(times), np.asarray(a) * 2.0, rtol=1e-6, atol=1e-6
+    )
+
+
+def test_metal_kernel_jit_same_name_and_source_different_dtypes():
+    """One name and source launched with float32 and float16 must each get a
+    pipeline compiled for its own dtype signature."""
+    n = 256
+
+    def one(a, dtype):
+        (out,) = metal_kernel_jit(
+            "dtype_generic",
+            [a],
+            output_shapes=[(n,)],
+            output_dtypes=[dtype],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            source=f"uint i = thread_position_in_grid.x; if (i < {n}u) out[i] = a[i] * 2;",
+            input_names=["a"],
+            output_names=["out"],
+        )
+        return out
+
+    def fn(a):
+        return one(a, jnp.float32), one(a.astype(jnp.float16), jnp.float16)
+
+    a = jax.random.normal(jax.random.PRNGKey(0), (n,))
+    f32, f16 = _run_on_mps(fn, a)
+    assert f16.dtype == jnp.float16
+    np.testing.assert_allclose(
+        np.asarray(f32), np.asarray(a) * 2.0, rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(f16, dtype=np.float32),
+        np.asarray(a).astype(np.float16).astype(np.float32) * 2.0,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
 def test_metal_kernel_jit_multiple_outputs():
     """A kernel producing two outputs (sum and product) in one launch."""
     n = 512
