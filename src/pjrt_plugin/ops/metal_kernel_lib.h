@@ -50,9 +50,9 @@ struct MklConstant {
 // `by_threadgroups` is false, `grid` is the total thread count per dim (MLX
 // dispatch_threads); when true, `grid` is the number of threadgroups per dim
 // (dispatch_threadgroups, for kernels that index by threadgroup_position_in_grid).
-// `buffers` empty => positional binding. Throws std::invalid_argument if a buffer
-// slot is outside 0..30 or bound twice, or a function-constant index is negative
-// or set twice.
+// `buffers` empty => positional binding. Throws std::invalid_argument if the
+// positional layout needs more than 31 slots, a buffer slot is outside 0..30 or
+// bound twice, or a function-constant index is negative or set twice.
 std::vector<array> metal_kernel_lib(const std::vector<array>& inputs,
                                     const std::vector<Shape>& out_shapes,
                                     const std::vector<Dtype>& out_dtypes,
