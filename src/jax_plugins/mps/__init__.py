@@ -7,7 +7,7 @@ from pathlib import Path
 
 # jaxlib version this plugin was built against (major.minor). Used for runtime
 # compatibility checking.
-_BUILT_FOR_JAXLIB = (0, 10)
+_BUILT_FOR_JAXLIB = (0, 11)
 _LIB_NAME = "libpjrt_plugin_mps.dylib"
 
 

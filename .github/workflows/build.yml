@@ -275,7 +275,7 @@ jobs:
       - name: Load wheel under each supported Python
         run: |
           WHEEL=$(ls dist/*.whl)
-          for PY in 3.11 3.12 3.13; do
+          for PY in 3.12 3.13; do
             echo "=== Python $PY ==="
             uv run --python "$PY" --no-project --with "$WHEEL" python scripts/smoke_test_wheel.py
           done
@@ -391,7 +391,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # latest  = newest release still inside `jax>=0.10.0,<0.11`;
+        # latest  = newest release still inside `jax>=0.11.0,<0.12`;
         # nightly = jax pre-release wheel (ahead of the range — next-major warning).
         channel: [latest, nightly]
     steps:
@@ -410,7 +410,7 @@ jobs:
 
       - name: Install test dependencies and wheel
         # --no-deps on the wheel so the channel-selected jax/jaxlib (below) is
-        # not overridden by the wheel's own `<0.11` pin — needed for nightly,
+        # not overridden by the wheel's own `<0.12` pin — needed for nightly,
         # which is ahead of that range.
         run: |
           uv sync --all-groups --no-install-project
@@ -420,7 +420,7 @@ jobs:
         run: |
           case "${{ matrix.channel }}" in
             latest)
-              uv pip install --upgrade "jax<0.11" "jaxlib<0.11" ;;
+              uv pip install --upgrade "jax<0.12" "jaxlib<0.12" ;;
             nightly)
               # --upgrade is required: jax/jaxlib are already installed at the
               # pinned version by `uv sync`, and without it uv leaves them in
