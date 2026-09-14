@@ -1725,17 +1725,27 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         // see: https://github.com/ml-explore/mlx/issues/3832
         std::string name = nameOpt->str();
         uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
-        auto fold = [&h](const std::string& s) {
-            for (unsigned char c : s)
-                h = (h ^ c) * 0x100000001b3ULL;  // FNV-1a 64-bit prime
+        auto foldBytes = [&h](const void* data, size_t size) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < size; ++i)
+                h = (h ^ bytes[i]) * 0x100000001b3ULL;  // FNV-1a 64-bit prime
+        };
+        // Length-prefix every field so different splits of the same bytes
+        // (e.g. source="a", header="bc" vs source="ab", header="c") differ.
+        auto fold = [&foldBytes](const std::string& s) {
+            uint64_t size = s.size();
+            foldBytes(&size, sizeof(size));
+            foldBytes(s.data(), s.size());
         };
         fold(name);
         fold(sourceOpt->str());
         fold(header);
-        for (const auto& n : input_names)
-            fold(n);
-        for (const auto& n : output_names)
-            fold(n);
+        for (const auto* names : {&input_names, &output_names}) {
+            uint64_t count = names->size();
+            foldBytes(&count, sizeof(count));
+            for (const auto& n : *names)
+                fold(n);
+        }
         std::string uniqueName = name + "_" + std::to_string(h);
         auto kernel = mlx::core::fast::metal_kernel(uniqueName, input_names, output_names,
                                                     sourceOpt->str(), header,
