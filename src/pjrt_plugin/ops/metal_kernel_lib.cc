@@ -1,5 +1,6 @@
 #include "pjrt_plugin/ops/metal_kernel_lib.h"
 
+#include <cstdio>
 #include <stdexcept>
 #include <tuple>
 
@@ -11,6 +12,23 @@
 namespace mlx::core {
 
 namespace {
+
+// Pipeline cache key. MLX caches a library's pipelines by this key alone, before
+// applying function constants, so the constant values must be part of it or two
+// specializations of one kernel would share the first compiled pipeline.
+std::string PipelineKey(const std::string& kname, const std::string& hash_name,
+                        const std::vector<MklConstant>& constants) {
+    std::string key = hash_name.empty() ? kname : hash_name;
+    for (const auto& c : constants) {
+        key += "_fc" + std::to_string(c.index) + "t" + std::to_string(c.type) + "v";
+        for (uint8_t byte : c.value) {
+            char hex[3];
+            std::snprintf(hex, sizeof(hex), "%02x", byte);
+            key += hex;
+        }
+    }
+    return key;
+}
 
 MTL::DataType to_mtl_type(MklConstant::Type t) {
     switch (t) {
@@ -102,7 +120,7 @@ void MetalKernelLibKernel::eval_gpu(const std::vector<array>& inputs, std::vecto
     // Cache the library under its path so distinct metallibs never clash and the
     // same file is only mapped once.
     auto* lib = d.get_library(libpath_, libpath_);
-    auto* kernel = d.get_kernel(kname_, lib, hash_name_.empty() ? kname_ : hash_name_, fclist);
+    auto* kernel = d.get_kernel(kname_, lib, PipelineKey(kname_, hash_name_, constants_), fclist);
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
