@@ -917,8 +917,9 @@ def metal_kernel_lib(
       ``"input": operand_idx``, ``"output": result_idx``, or ``"bytes": bytes``.
     - `function_constants`: list of dicts ``{"index", "type", "value"}`` where
       type is one of ``"bool" | "int" | "uint" | "float"``.
-    - `hash_name`: pipeline cache key (defaults to `name`); give distinct keys to
-      distinct function-constant specializations of the same kernel.
+    - `hash_name`: pipeline cache key (defaults to `name`). The function-constant
+      values are always appended to it, so distinct specializations of the
+      same kernel never share a cached pipeline.
     - `dispatch`: ``"threads"`` (default; `grid` is the total thread count per
       dim) or ``"threadgroups"`` (`grid` is the threadgroup count per dim, for
       kernels that index by threadgroup_position_in_grid).

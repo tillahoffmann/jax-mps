@@ -296,6 +296,43 @@ def test_metal_kernel_lib_buffers_and_function_constant(vadd_metallib, add_bias)
     np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-5)
 
 
+def test_metal_kernel_lib_function_constants_without_hash_name(vadd_metallib):
+    """Two specializations of one kernel without a hash_name must not share a
+    cached pipeline."""
+    import struct
+
+    n = 256
+    params = struct.pack("<f", 1.0)
+
+    def one(a, add_bias):
+        (out,) = metal_kernel_lib(
+            "scaled",
+            [a],
+            metallib_path=vadd_metallib,
+            output_shapes=[(n,)],
+            output_dtypes=[jnp.float32],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            buffers=[
+                {"slot": 0, "input": 0},
+                {"slot": 2, "bytes": params},
+                {"slot": 5, "output": 0},
+            ],
+            function_constants=[{"index": 7, "type": "bool", "value": add_bias}],
+        )
+        return out
+
+    def fn(a):
+        return one(a, False), one(a, True)
+
+    a = jax.random.normal(jax.random.PRNGKey(6), (n,))
+    plain, biased = _run_on_mps(fn, a)
+    np.testing.assert_allclose(np.asarray(plain), np.asarray(a), rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(biased), np.asarray(a) + 1.0, rtol=1e-6, atol=1e-5
+    )
+
+
 def test_metal_kernel_lib_dispatch_threadgroups(vadd_metallib):
     """dispatch='threadgroups': grid is the threadgroup count, and the kernel
     indexes by threadgroup_position_in_grid."""
