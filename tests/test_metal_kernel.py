@@ -168,6 +168,12 @@ _LIB_SOURCE = textwrap.dedent(
                      uint i [[thread_position_in_grid]]) {
         out[i] = a[i] + b[i];
     }
+    kernel void vsub(device const float* a   [[buffer(0)]],
+                     device const float* b   [[buffer(1)]],
+                     device float*       out [[buffer(2)]],
+                     uint i [[thread_position_in_grid]]) {
+        out[i] = a[i] - b[i];
+    }
     kernel void vmul2(device const float* a   [[buffer(0)]],
                       device const float* b   [[buffer(1)]],
                       device float*       s   [[buffer(2)]],
@@ -234,6 +240,38 @@ def test_metal_kernel_lib_single_output(vadd_metallib):
     a, b = (jax.random.normal(k, (n,)) for k in jax.random.split(key, 2))
     out = np.asarray(_run_on_mps(fn, a, b))
     np.testing.assert_allclose(out, np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6)
+
+
+def test_metal_kernel_lib_same_hash_name_different_kernels(vadd_metallib):
+    """Two kernels from one library sharing a hash_name must not share a cached
+    pipeline."""
+    n = 256
+
+    def one(name, a, b):
+        (out,) = metal_kernel_lib(
+            name,
+            [a, b],
+            metallib_path=vadd_metallib,
+            output_shapes=[(n,)],
+            output_dtypes=[jnp.float32],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            hash_name="shared",
+        )
+        return out
+
+    def fn(a, b):
+        return one("vadd", a, b), one("vsub", a, b)
+
+    key = jax.random.PRNGKey(7)
+    a, b = (jax.random.normal(k, (n,)) for k in jax.random.split(key, 2))
+    added, subtracted = _run_on_mps(fn, a, b)
+    np.testing.assert_allclose(
+        np.asarray(added), np.asarray(a) + np.asarray(b), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(subtracted), np.asarray(a) - np.asarray(b), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_metal_kernel_lib_multiple_outputs(vadd_metallib):

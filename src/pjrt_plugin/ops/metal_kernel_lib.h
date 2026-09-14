@@ -44,8 +44,8 @@ struct MklConstant {
 };
 
 // Run kernel `kname` from the metallib at `libpath`, producing outputs of the
-// given shapes/dtypes. `hash_name` is the pipeline cache key (defaults to
-// `kname` when empty; function-constant values are always appended).
+// given shapes/dtypes. `hash_name` is appended to the pipeline cache key, which
+// always includes `kname` and the function-constant values.
 // `threadgroup` is threads per group. When
 // `by_threadgroups` is false, `grid` is the total thread count per dim (MLX
 // dispatch_threads); when true, `grid` is the number of threadgroups per dim
