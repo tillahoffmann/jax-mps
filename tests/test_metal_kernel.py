@@ -274,6 +274,33 @@ def test_metal_kernel_lib_same_hash_name_different_kernels(vadd_metallib):
     )
 
 
+def test_metal_kernel_lib_non_contiguous_inputs(vadd_metallib):
+    """Transposed and strided inputs are copied row-contiguous before the kernel
+    reads them with flat indices."""
+    rows, cols = 8, 16
+    n = rows * cols
+
+    def fn(x, y):
+        (out,) = metal_kernel_lib(
+            "vadd",
+            [x.T, y[:, ::2]],
+            metallib_path=vadd_metallib,
+            output_shapes=[(n,)],
+            output_dtypes=[jnp.float32],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+        )
+        return out
+
+    key = jax.random.PRNGKey(8)
+    kx, ky = jax.random.split(key)
+    x = jax.random.normal(kx, (cols, rows))
+    y = jax.random.normal(ky, (rows, 2 * cols))
+    out = np.asarray(_run_on_mps(fn, x, y))
+    expected = (np.asarray(x).T + np.asarray(y)[:, ::2]).reshape(-1)
+    np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-6)
+
+
 def test_metal_kernel_lib_multiple_outputs(vadd_metallib):
     n = 512
 
