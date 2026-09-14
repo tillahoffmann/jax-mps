@@ -931,7 +931,7 @@ def metal_kernel_lib(
     inputs = [jnp.asarray(x) for x in inputs]
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
     out_dtypes = tuple(jnp.dtype(d) for d in output_dtypes)
-    if buffers is None and len(inputs) + len(out_shapes) > _MAX_METAL_BUFFERS:
+    if not buffers and len(inputs) + len(out_shapes) > _MAX_METAL_BUFFERS:
         raise ValueError(
             f"metal_kernel_lib: {len(inputs)} inputs + {len(out_shapes)} outputs "
             f"needs more than the {_MAX_METAL_BUFFERS} buffer slots Metal provides"

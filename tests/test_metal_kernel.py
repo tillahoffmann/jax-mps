@@ -410,6 +410,23 @@ def test_metal_kernel_lib_rejects_duplicate_slot():
         )
 
 
+def test_metal_kernel_lib_rejects_too_many_positional_buffers_with_empty_list():
+    """buffers=[] means positional binding, so it must hit the same slot limit
+    as buffers=None."""
+    inputs = [jnp.zeros((4,), jnp.float32)] * 31
+    with pytest.raises(ValueError, match="buffer slots Metal provides"):
+        metal_kernel_lib(
+            "k",
+            inputs,
+            metallib_path="unused.metallib",
+            output_shapes=[(4,)],
+            output_dtypes=[jnp.float32],
+            grid=(4, 1, 1),
+            threadgroup=(1, 1, 1),
+            buffers=[],
+        )
+
+
 def test_metal_kernel_lib_rejects_duplicate_constant_index():
     """A function-constant index set twice is ambiguous; reject up front."""
     a = jnp.zeros((4,), jnp.float32)
