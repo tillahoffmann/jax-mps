@@ -15,16 +15,13 @@ import pytest
 
 from jax_plugins.mps.ops import metal_kernel_jit, metal_kernel_lib
 
-try:
-    MPS_DEVICE = jax.devices("mps")[0]
-except (RuntimeError, IndexError):
-    MPS_DEVICE = None
-
-pytestmark = pytest.mark.skipif(MPS_DEVICE is None, reason="requires the MPS backend")
+# The shared fixture skips when no MPS device exists and under JAX_TEST_MODE=cpu.
+pytestmark = pytest.mark.usefixtures("mps_device")
 
 
 def _run_on_mps(fn, *arrays):
-    arrays = [jax.device_put(a, MPS_DEVICE) for a in arrays]
+    device = jax.devices("mps")[0]
+    arrays = [jax.device_put(a, device) for a in arrays]
     return jax.jit(fn)(*arrays)
 
 
