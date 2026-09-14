@@ -182,6 +182,9 @@ std::vector<array> metal_kernel_lib(const std::vector<array>& inputs,
                                     std::vector<MklConstant> constants, StreamOrDevice s_) {
     // Validate before building the graph: a slot bound twice would let the later
     // set_* call silently replace the earlier binding.
+    if (buffers.empty() && inputs.size() + out_shapes.size() > kMaxMetalBuffers)
+        throw std::invalid_argument(
+            "metal_kernel_lib: positional binding needs more than 31 buffer slots");
     std::array<bool, kMaxMetalBuffers> bound_slots{};
     for (const auto& b : buffers) {
         if (b.slot < 0 || static_cast<size_t>(b.slot) >= kMaxMetalBuffers || bound_slots[b.slot])
