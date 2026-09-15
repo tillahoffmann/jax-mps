@@ -858,6 +858,19 @@ size_t MlxExecutable::num_outputs() const {
     return num_outputs_;
 }
 
+std::string MlxExecutable::OptimizedModuleText() const {
+    std::string text;
+    if (!parsed_module_.module) {
+        return text;
+    }
+    // OwningOpRef::get() is the const accessor (operator-> is not); ModuleOp is
+    // a value-type handle so this is a copy of the handle, not the module.
+    llvm::raw_string_ostream os(text);
+    parsed_module_.module.get().print(os);
+    os.flush();
+    return text;
+}
+
 MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs) {
     MlxExecuteResult result;
     const bool profiling = IsProfilingEnabled();
