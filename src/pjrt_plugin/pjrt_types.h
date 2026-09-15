@@ -45,11 +45,19 @@ struct PJRT_DeviceDescription {
     PJRT_Device* device;  // Back-pointer to the device
 };
 
-struct PJRT_Memory {
+// PJRT_Memory and PJRT_Error became concrete structs in the XLA header with
+// PJRT C API 0.114 (each is a vtable pointer the plugin fills in), so our
+// per-instance data lives in these wrappers with the API struct first.
+struct MpsMemory {
+    PJRT_Memory base;
     PJRT_Device* device;
     PJRT_Client* client;
     int id;
 };
+
+inline MpsMemory* ToMps(PJRT_Memory* memory) {
+    return reinterpret_cast<MpsMemory*>(memory);
+}
 
 struct PJRT_TopologyDescription {
     PJRT_Client* client;
@@ -134,10 +142,22 @@ struct PJRT_Event {
 // Error type
 // ============================================================================
 
-struct PJRT_Error {
+struct MpsError {
+    PJRT_Error base;
     std::string message;
     PJRT_Error_Code code;
 };
+
+inline MpsError* ToMps(PJRT_Error* error) {
+    return reinterpret_cast<MpsError*>(error);
+}
+
+inline const MpsError* ToMps(const PJRT_Error* error) {
+    return reinterpret_cast<const MpsError*>(error);
+}
+
+// Defined in pjrt_client.cc alongside the error accessors.
+extern const PJRT_Error_FunctionTable kMpsErrorVtable;
 
 // ============================================================================
 // Helper functions

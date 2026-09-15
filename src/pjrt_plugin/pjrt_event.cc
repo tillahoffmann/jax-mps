@@ -63,8 +63,8 @@ private:
                     }
                 }
             } catch (const std::exception& e) {
-                error = new PJRT_Error{std::string("async completion: ") + e.what(),
-                                       PJRT_Error_Code_INTERNAL};
+                error = MakeError(std::string("async completion: ") + e.what(),
+                                  PJRT_Error_Code_INTERNAL);
             }
             // PJRT contract: the callback takes ownership of `error`.
             entry.callback(error, entry.user_arg);
@@ -176,8 +176,7 @@ PJRT_Error* MPS_Event_Await(PJRT_Event_Await_Args* args) {
         try {
             args->event->Await();
         } catch (const std::exception& e) {
-            return new PJRT_Error{std::string("event await: ") + e.what(),
-                                  PJRT_Error_Code_INTERNAL};
+            return MakeError(std::string("event await: ") + e.what(), PJRT_Error_Code_INTERNAL);
         }
     }
     return nullptr;
