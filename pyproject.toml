@@ -1,13 +1,13 @@
 [project]
 name = "jax-mps"
-version = "0.10.12"
+version = "0.11.0"
 description = "JAX backend for Apple Metal Performance Shaders (MPS)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
-    "jax>=0.10.0,<0.11",
-    "jaxlib>=0.10.0,<0.11",
+    "jax>=0.11.0,<0.12",
+    "jaxlib>=0.11.0,<0.12",
 ]
 keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
 classifiers = [
@@ -43,7 +43,7 @@ build.verbose = true
 wheel.packages = ["src/jax_plugins"]
 wheel.install-dir = "jax_plugins/mps"
 
-# Python-ABI agnostic wheel tag (still Requires-Python >= 3.11); results in py3-none-<platform>
+# Python-ABI agnostic wheel tag (still Requires-Python >= 3.12); results in py3-none-<platform>
 wheel.py-api = "py3"
 
 [tool.uv.sources]
@@ -55,7 +55,7 @@ numpyro = { git = "https://github.com/pyro-ppl/numpyro.git", rev = "18c2cc135a52
 [dependency-groups]
 dev = [
     "ctcache",
-    "flax>=0.10.7",
+    "flax>=0.12.9",
     "flatbuffers",
     "huggingface-hub",
     "hypothesis",

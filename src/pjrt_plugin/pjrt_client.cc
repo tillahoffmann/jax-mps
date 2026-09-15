@@ -14,19 +14,48 @@
 // Error handling
 // ============================================================================
 
+namespace {
+
+void ErrorDestroy(PJRT_Error* error) {
+    delete ToMps(error);
+}
+
+void ErrorMessage(const PJRT_Error* error, const char** message, size_t* message_size) {
+    const MpsError* err = ToMps(error);
+    *message = err->message.c_str();
+    *message_size = err->message.size();
+}
+
+PJRT_Error_Code ErrorGetCode(const PJRT_Error* error) {
+    return ToMps(error)->code;
+}
+
+}  // namespace
+
+const PJRT_Error_FunctionTable kMpsErrorVtable = {
+    /*struct_size=*/PJRT_Error_FunctionTable_STRUCT_SIZE,
+    /*instance_size=*/sizeof(MpsError),
+    /*extension_start=*/nullptr,
+    /*destroy=*/ErrorDestroy,
+    /*message=*/ErrorMessage,
+    /*get_code=*/ErrorGetCode,
+    /*for_each_payload=*/nullptr,
+};
+
 void MPS_Error_Destroy(PJRT_Error_Destroy_Args* args) {
-    delete args->error;
+    delete ToMps(args->error);
 }
 
 void MPS_Error_Message(PJRT_Error_Message_Args* args) {
     if (args->error) {
-        args->message = args->error->message.c_str();
-        args->message_size = args->error->message.size();
+        const MpsError* err = ToMps(args->error);
+        args->message = err->message.c_str();
+        args->message_size = err->message.size();
     }
 }
 
 PJRT_Error* MPS_Error_GetCode(PJRT_Error_GetCode_Args* args) {
-    args->code = args->error ? args->error->code : PJRT_Error_Code_OK;
+    args->code = args->error ? ToMps(args->error)->code : PJRT_Error_Code_OK;
     return nullptr;
 }
 

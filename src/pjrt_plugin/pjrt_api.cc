@@ -47,12 +47,15 @@ PJRT_Client* GetOrCreateDefaultClient() {
             dev->description = desc;
 
             // Create the default memory for the device
-            auto* mem = new PJRT_Memory();
+            auto* mem = new MpsMemory();
+            // ponytail: no memory vtable; nothing calls get/set_user_data yet.
+            // Populate it like kMpsErrorVtable if a client starts using it.
+            mem->base.vtable = nullptr;
             mem->device = dev;
             mem->client = g_default_client;
             mem->id = i;
-            dev->default_memory = mem;
-            g_default_client->memories.push_back(mem);
+            dev->default_memory = &mem->base;
+            g_default_client->memories.push_back(&mem->base);
 
             g_default_client->devices.push_back(dev);
         }
@@ -75,10 +78,11 @@ PJRT_Client* GetClient(PJRT_Client* client) {
 // ============================================================================
 
 PJRT_Error* MakeError(const std::string& msg, PJRT_Error_Code code) {
-    auto* error = new PJRT_Error();
+    auto* error = new MpsError();
+    error->base.vtable = &kMpsErrorVtable;
     error->message = msg;
     error->code = code;
-    return error;
+    return &error->base;
 }
 
 // ============================================================================

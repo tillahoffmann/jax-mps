@@ -7,11 +7,11 @@
 # shellcheck source=setup_deps_common.sh
 source "$(dirname "$0")/setup_deps_common.sh" "$@"
 
-# Pin to versions matching jaxlib 0.10.0 for bytecode compatibility
-# These are extracted from XLA commit b6f37ab7767f428fd6f993de5e211643d47d4deb
-XLA_COMMIT="${XLA_COMMIT:-b6f37ab7767f428fd6f993de5e211643d47d4deb}"
-STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-3a8886de8515f859875df37578b5caf33f6e52f3}"
-LLVM_COMMIT="${LLVM_COMMIT:-815edc3ff646392bfee2b381d37dd35e4b04f9c5}"
+# Pin to versions matching jaxlib 0.11.1 for bytecode compatibility
+# These are extracted from XLA commit dcf304bc5dca1932b99f740b911dbd73631a1a69
+XLA_COMMIT="${XLA_COMMIT:-dcf304bc5dca1932b99f740b911dbd73631a1a69}"
+STABLEHLO_COMMIT="${STABLEHLO_COMMIT:-7b1b15781ccbd770f50c7eef4b0c3e03834649fd}"
+LLVM_COMMIT="${LLVM_COMMIT:-75a45c373407c13a44c7abb28a78d891a97fe665}"
 
 echo "=== jax-mps LLVM/StableHLO setup ==="
 echo "Prefix:       $PREFIX"

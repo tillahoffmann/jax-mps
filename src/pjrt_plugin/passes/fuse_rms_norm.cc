@@ -289,7 +289,8 @@ public:
             /*called_computations=*/rewriter.getArrayAttr({}),
             /*operand_layouts=*/mlir::ArrayAttr(),
             /*result_layouts=*/mlir::ArrayAttr(),
-            /*output_operand_aliases=*/rewriter.getArrayAttr({}));
+            /*output_operand_aliases=*/rewriter.getArrayAttr({}),
+            /*result_tilings=*/mlir::ArrayAttr());
 
         rewriter.replaceOp(mulOp, customCall.getResults());
         return mlir::success();
