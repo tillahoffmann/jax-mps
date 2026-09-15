@@ -26,7 +26,7 @@ Time per step (second half): 0.928
 
 ## Installation
 
-jax-mps requires macOS on Apple Silicon and Python 3.13. Install it with pip:
+jax-mps requires macOS on Apple Silicon and Python 3.12 or later. Install it with pip:
 
 ```bash
 pip install jax-mps
