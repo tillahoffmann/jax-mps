@@ -209,8 +209,20 @@ PJRT_Error* MPS_LoadedExecutable_Execute(PJRT_LoadedExecutable_Execute_Args* arg
         }
     }
 
+    // look for non_donatable_input_indices in ExecuteOptions
+    // guarded on struct size
+    std::vector<int64_t> non_donatable;
+    constexpr size_t kNonDonatableFieldsEnd =
+        offsetof(PJRT_ExecuteOptions, num_non_donatable_input_indices) + sizeof(size_t);
+    if (args->options && args->options->struct_size >= kNonDonatableFieldsEnd &&
+        args->options->non_donatable_input_indices) {
+        non_donatable.assign(args->options->non_donatable_input_indices,
+                             args->options->non_donatable_input_indices +
+                                 args->options->num_non_donatable_input_indices);
+    }
+
     // Execute
-    auto result = mlx_executable->Execute(inputs);
+    auto result = mlx_executable->Execute(inputs, non_donatable);
 
     // Check for execution errors. A non-empty error_message always indicates a
     // failure inside Execute() (handler exception, silent return-false, or MLX
