@@ -859,7 +859,7 @@ void MlxExecutable::ParseDonationAttributes() {
 
         if (auto alias = entry.getArgAttrOfType<mlir::IntegerAttr>(i, "tf.aliasing_output")) {
             int64_t out_index = alias.getInt();
-            if (out_index < 0 || std::cmp_greater_equal(out_index, num_outputs_)) {
+            if (out_index < 0 || out_index >= num_outputs_) {
                 // invalid donation
                 MPS_LOG_WARN("Ignoring tf.aliasing_output=%lld on argument %u: only %zu outputs\n",
                              static_cast<long long>(out_index), i, num_outputs_);
@@ -986,7 +986,8 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs,
     }
 
     const std::vector<bool> donations = ResolveDonations(inputs, non_donatable);
-    const bool anyDonations = std::ranges::any_of(donations, [](bool d) { return d; });
+    const bool anyDonations =
+        std::any_of(donations.cbegin(), donations.cend(), [](bool d) { return d; });
 
     ExecContext ctx;
     ctx.module = *parsed_module_.module;
