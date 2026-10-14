@@ -94,6 +94,24 @@ struct PJRT_Executable {
             output_dim_sizes.resize(num_outputs, 0);
         });
     }
+
+    // MLIR assembly returned by PJRT_Executable_OptimizedProgram (consumed e.g.
+    // by Reactant.jl during compilation). jax-mps runs StableHLO simplification
+    // + MpsFusionPass before execution (stablehlo_parser.cc), so this is printed
+    // from the post-pass module MlxExecutable actually walks, not the program
+    // the executable was compiled from. Printed once and cached: PJRT's protocol
+    // is a size query followed by a fill, and the two must agree on the size or
+    // the caller's buffer overflows. Empty if there is no module to print.
+    mutable std::string optimized_program;
+    mutable std::once_flag optimized_program_flag;
+
+    void initOptimizedProgram() const {
+        std::call_once(optimized_program_flag, [this] {
+            if (executable) {
+                optimized_program = executable->OptimizedModuleText();
+            }
+        });
+    }
 };
 
 struct PJRT_LoadedExecutable {

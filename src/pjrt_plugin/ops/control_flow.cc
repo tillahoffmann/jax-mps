@@ -1422,6 +1422,15 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
 
     auto callTargetName = customCallOp.getCallTargetName().str();
 
+    // The parser renames `mhlo.*` targets to `mps.mhlo.*` so the reported
+    // optimized program exports to HLO (see finalizeModule in
+    // stablehlo_parser.cc). Strip the prefix so both spellings dispatch below,
+    // which also lets that program be compiled again by this plugin.
+    static constexpr std::string_view kMpsMhloPrefix = "mps.mhlo.";
+    if (std::string_view{callTargetName}.substr(0, kMpsMhloPrefix.size()) == kMpsMhloPrefix) {
+        callTargetName.erase(0, std::string_view{"mps."}.size());
+    }
+
     // Handle Sharding annotation and SPMD shape ops - just pass input through
     if (callTargetName == "Sharding" || callTargetName == "SPMDFullToShardShape" ||
         callTargetName == "SPMDShardToFullShape") {

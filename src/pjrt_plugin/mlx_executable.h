@@ -56,6 +56,12 @@ public:
 
     MlxExecuteResult Execute(const std::vector<MlxBuffer*>& inputs);
 
+    // MLIR assembly for the post-pass module (after StableHLO simplification
+    // and MpsFusionPass) -- i.e. the module Execute actually walks, not the
+    // program the executable was compiled from. Empty if the module is absent.
+    // Used by PJRT_Executable_OptimizedProgram.
+    std::string OptimizedModuleText() const;
+
 private:
     MlxExecutable() = default;
 

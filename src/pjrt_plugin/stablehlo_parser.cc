@@ -204,6 +204,21 @@ ParsedModule finalizeModule(std::unique_ptr<mlir::MLIRContext> context,
         return result;
     }
 
+    // Our lowerings (jax_plugins/mps/ops.py) emit unary ops XLA has no HLO
+    // equivalent for as `stablehlo.custom_call @mhlo.*`. XLA's StableHLO -> HLO
+    // conversion rejects that reserved namespace, and consumers run it on the
+    // program PJRT_Executable_OptimizedProgram returns (JAX does on every
+    // compile). Rename to `mps.mhlo.*` so the module we execute -- and report --
+    // exports as opaque custom calls, like our `mps.*` fusions. HandleCustomCall
+    // accepts both spellings. Done here, while compilation is single-threaded,
+    // rather than when the program is requested, which may race with Execute().
+    module->walk([&](mlir::stablehlo::CustomCallOp op) {
+        llvm::StringRef target = op.getCallTargetName();
+        if (target.starts_with("mhlo.")) {
+            op.setCallTargetName(("mps." + target).str());
+        }
+    });
+
     // Optional: dump the post-pass module to a file. Tests use this to inspect
     // the IR that our passes produced (see tests/test_fusion.py). Path is the
     // env var's value; one file per parsed module, named after a counter.
