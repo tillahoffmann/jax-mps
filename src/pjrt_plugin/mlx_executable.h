@@ -54,16 +54,42 @@ public:
         return output_info_;
     }
 
-    MlxExecuteResult Execute(const std::vector<MlxBuffer*>& inputs);
+    // Corresponds to jax.buffer_donor argument attribute per argument
+    const std::vector<bool>& donated_inputs() const {
+        return donated_inputs_;
+    }
+
+    // Corresponds to tf.aliasing_output argument attribute (-1 for un-aliased) per argument
+    const std::vector<int>& input_output_aliases() const {
+        return input_output_aliases_;
+    }
+
+    // Whether any donations exist
+    bool has_donations() const {
+        return has_donations_;
+    }
+
+    MlxExecuteResult Execute(const std::vector<MlxBuffer*>& inputs,
+                             const std::vector<int64_t>& non_donatable = {});
 
 private:
     MlxExecutable() = default;
+
+    // fill donated_inputs_/input_output_aliases_ from argument attributes
+    void ParseDonationAttributes();
+
+    // resolve donations using buffer values & non_donatable
+    std::vector<bool> ResolveDonations(const std::vector<MlxBuffer*>& inputs,
+                                       const std::vector<int64_t>& non_donatable) const;
 
     mps::ParsedModule parsed_module_;
     std::string error_;
     bool valid_ = false;
     size_t num_outputs_ = 0;
     std::vector<OutputInfo> output_info_;
+    std::vector<bool> donated_inputs_;
+    std::vector<int> input_output_aliases_;
+    bool has_donations_ = false;
 
     // MLX compile support (thread safety via GetPjrtGlobalMutex at PJRT layer)
     mutable bool compile_attempted_ = false;

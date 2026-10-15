@@ -130,6 +130,19 @@ def initialize() -> None:
             stacklevel=2,
         )
 
+    # register support for buffer donation (uses a private API, so we're careful here)
+    try:
+        from jax._src.interpreters.mlir import _platforms_with_donation
+
+        if "mps" not in _platforms_with_donation:
+            _platforms_with_donation.append("mps")
+    except ImportError as e:
+        warnings.warn(
+            f"jax-mps: failed to register support for buffer donations: {e}. "
+            "donate_argnames/donate_argnums will not work correctly.",
+            stacklevel=2,
+        )
+
     # Register the plugin using JAX's xla_bridge API
     try:
         from jax._src import xla_bridge as xb
