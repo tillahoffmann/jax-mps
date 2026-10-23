@@ -1,7 +1,7 @@
 import numpy
 import pytest
+from jax import lax, random
 from jax import numpy as jnp
-from jax import random
 from jax.scipy.linalg import solve_triangular
 
 from .util import OperationTestConfig, xfail_match
@@ -102,7 +102,36 @@ def _eigh_values_upper(A):
 def _eigh_reconstruct(A):
     """Reconstruct A from eigh to verify correctness: A = V @ diag(w) @ V.T."""
     w, V = jnp.linalg.eigh(A)
-    return V @ jnp.diag(w) @ V.T
+    return V @ (w[..., None] * jnp.swapaxes(V, -2, -1))
+
+
+def _random_square(key, n: int):
+    return random.normal(key, (n, n))
+
+
+def _nonfinite(func, value):
+    """Wrap a linalg test function to check its behavior on non-finite input.
+
+    Batch elements of `A` selected by `poison` get `value` in their top-left
+    entry. LAPACK's output for such matrices is implementation-defined (the CPU
+    reference may return e.g. eigenvalues `[nan, 1, 1]`), so we compare only a
+    per-batch "contains NaN" flag plus the outputs of the clean batch elements.
+    The poisoned matrices are built from `stop_gradient(A)` and selected with
+    `where`, so their (NaN) gradients are discarded rather than propagated.
+    """
+
+    def wrapped(A, poison):
+        mask = poison[..., None, None]
+        bad = lax.stop_gradient(A).at[..., 0, 0].set(value)
+        out = func(jnp.where(mask, bad, A))
+        axes = tuple(range(poison.ndim, out.ndim))
+        has_nan = jnp.isnan(out).any(axis=axes)
+        return has_nan.astype(out.dtype), jnp.where(
+            has_nan.reshape(has_nan.shape + (1,) * len(axes)), 0, out
+        )
+
+    wrapped.__name__ = f"{func.__name__}_nonfinite"
+    return wrapped
 
 
 def _lu_solve(A, b):
@@ -588,6 +617,52 @@ def make_linalg_op_configs():
             name="svd_values_4x8_wide",
         )
 
+        # Non-finite input must yield NaN for the affected batch elements, as
+        # XLA does, instead of raising (#244). See `_nonfinite` for how results
+        # are compared.
+        nonfinite_cases = [
+            (_eigh_values, _random_symmetric, "eigh_values"),
+            (_eigh_reconstruct, _random_symmetric, "eigh_reconstruct"),
+            (_svd_values, _random_square, "svd_values"),
+            (_svd_reconstruct, _random_square, "svd_reconstruct"),
+        ]
+        for func, make, label in nonfinite_cases:
+            for value, value_label in [(numpy.nan, "nan"), (numpy.inf, "inf")]:
+                # The CPU reference (Accelerate sgesdd) never returns on Inf.
+                if label.startswith("svd") and value_label == "inf":
+                    continue
+                yield OperationTestConfig(
+                    _nonfinite(func, value),
+                    lambda key, make=make: make(key, 3),
+                    numpy.array(True),
+                    name=f"{label}_{value_label}",
+                )
+        yield OperationTestConfig(
+            _nonfinite(_eigh_values, numpy.nan),
+            lambda key: _random_symmetric(key, 4, batch_shape=(3,)),
+            numpy.array([False, True, False]),
+            name="eigh_values_batched_nan",
+        )
+        yield OperationTestConfig(
+            _nonfinite(_eigh_reconstruct, numpy.nan),
+            lambda key: _random_symmetric(key, 4, batch_shape=(3,)),
+            numpy.array([True, False, False]),
+            name="eigh_reconstruct_batched_nan",
+        )
+        # Tall and wide (the latter is transposed before the custom_call).
+        for shape in [(3, 5, 3), (3, 3, 5)]:
+            yield OperationTestConfig(
+                _nonfinite(_svd_values, numpy.nan),
+                lambda key, shape=shape: random.normal(key, shape),
+                numpy.array([False, True, False]),
+                name=f"svd_values_batched_nan_{shape[1]}x{shape[2]}",
+            )
+        yield OperationTestConfig(
+            _nonfinite(_svd_reconstruct, numpy.nan),
+            lambda key: random.normal(key, (3, 4, 3)),
+            numpy.array([False, False, True]),
+            name="svd_reconstruct_batched_nan",
+        )
         # --- LU Decomposition ---
 
         # LU via solve (most practical test: A x = b)

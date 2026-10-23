@@ -1413,6 +1413,37 @@ inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
     return outs;
 }
 
+// LAPACK reports failure (info != 0) on non-finite input, and MLX's CPU
+// eigh/svd turn that into an exception. XLA instead returns NaN for the affected
+// batch elements (#244), which optimizers rely on to reject trial steps. Returns
+// a per-matrix "all finite" mask of shape a.shape[:-2] and a copy of `a` whose
+// non-finite matrices are zeroed so LAPACK runs safely; pass the decomposition
+// outputs through MaskNonFiniteOutput afterwards. `read_mask` restricts the
+// check to the entries LAPACK reads (e.g. one triangle for eigh).
+std::pair<mlx::core::array, mlx::core::array> GuardNonFiniteMatrices(
+    const mlx::core::array& a, const std::optional<mlx::core::array>& read_mask = std::nullopt) {
+    auto finite = mlx::core::isfinite(a);
+    if (read_mask)
+        finite = mlx::core::logical_or(finite, mlx::core::logical_not(*read_mask));
+    int ndim = static_cast<int>(a.ndim());
+    auto ok = mlx::core::all(finite, {ndim - 2, ndim - 1});
+    auto ok_mat = mlx::core::expand_dims(ok, {-2, -1});
+    auto safe = mlx::core::where(ok_mat, a, mlx::core::zeros_like(a));
+    return {ok, safe};
+}
+
+// Replace the outputs of non-finite batch elements (per `ok` from
+// GuardNonFiniteMatrices) with NaN.
+mlx::core::array MaskNonFiniteOutput(const mlx::core::array& out, const mlx::core::array& ok) {
+    int extra = static_cast<int>(out.ndim()) - static_cast<int>(ok.ndim());
+    std::vector<int> axes(extra);
+    for (int i = 0; i < extra; ++i)
+        axes[i] = -1 - i;
+    auto nan =
+        mlx::core::astype(mlx::core::array(std::numeric_limits<float>::quiet_NaN()), out.dtype());
+    return mlx::core::where(mlx::core::expand_dims(ok, axes), out, nan);
+}
+
 // Handler for stablehlo.custom_call
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -2044,7 +2075,12 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto v = ParseBackendConfig(customCallOp).getBoolean("lower"))
             lower = *v;
 
-        auto a_contig = mlx::core::contiguous(*a);
+        // Only the triangle selected by `lower` is read (row-major view).
+        int n = a->shape(-1);
+        auto ones = mlx::core::ones({n, n}, mlx::core::bool_);
+        auto [ok, a_safe] =
+            GuardNonFiniteMatrices(*a, lower ? mlx::core::tril(ones) : mlx::core::triu(ones));
+        auto a_contig = mlx::core::contiguous(a_safe);
         // Run eigh on the CPU (LAPACK). The vendored Metal Jacobi kernel
         // intermittently races under MLX's untracked-resource model AND is
         // 10-90x slower than CPU eigh across all sizes; upstream MLX has no GPU
@@ -2058,8 +2094,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         // genuinely symmetric inputs both choices are equivalent.
         auto [eigenvalues, eigenvectors] =
             mlx::core::linalg::eigh(a_contig, lower ? "U" : "L", mlx::core::Device::cpu);
-        values.emplace(ToKey(op->getResult(0)), std::move(eigenvectors));
-        values.emplace(ToKey(op->getResult(1)), std::move(eigenvalues));
+        values.emplace(ToKey(op->getResult(0)), MaskNonFiniteOutput(eigenvectors, ok));
+        values.emplace(ToKey(op->getResult(1)), MaskNonFiniteOutput(eigenvalues, ok));
         return true;
     }
 
@@ -2143,7 +2179,8 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto v = ParseBackendConfig(customCallOp).getBoolean("full_matrices"))
             full_matrices = *v;
 
-        auto a_contig = mlx::core::contiguous(*a);
+        auto [ok, a_safe] = GuardNonFiniteMatrices(*a);
+        auto a_contig = mlx::core::contiguous(a_safe);
         // Run SVD on the CPU (same rationale as eigh/qr).
         auto results = mlx::core::linalg::svd(a_contig, compute_uv, mlx::core::Device::cpu);
 
@@ -2152,9 +2189,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                 MPS_LOG_ERROR("mps.svd: MLX returned %zu results, expected 3\n", results.size());
                 return false;
             }
-            auto U = results[0];   // M×M (full)
-            auto S = results[1];   // K
-            auto Vt = results[2];  // N×N (full)
+            auto U = results[0];         // M×M (full)
+            const auto& S = results[1];  // K
+            auto Vt = results[2];        // N×N (full)
 
             if (!full_matrices) {
                 // Slice to thin: U → M×K, Vt → K×N
@@ -2175,15 +2212,15 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             }
 
             // JAX svd_p returns (s, u, vt) – singular values first!
-            values.emplace(ToKey(op->getResult(0)), std::move(S));
-            values.emplace(ToKey(op->getResult(1)), std::move(U));
-            values.emplace(ToKey(op->getResult(2)), std::move(Vt));
+            values.emplace(ToKey(op->getResult(0)), MaskNonFiniteOutput(S, ok));
+            values.emplace(ToKey(op->getResult(1)), MaskNonFiniteOutput(U, ok));
+            values.emplace(ToKey(op->getResult(2)), MaskNonFiniteOutput(Vt, ok));
         } else {
             if (results.size() != 1) {
                 MPS_LOG_ERROR("mps.svd: MLX returned %zu results, expected 1\n", results.size());
                 return false;
             }
-            values.emplace(ToKey(op->getResult(0)), std::move(results[0]));  // S
+            values.emplace(ToKey(op->getResult(0)), MaskNonFiniteOutput(results[0], ok));  // S
         }
         return true;
     }
