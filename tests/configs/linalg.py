@@ -109,20 +109,37 @@ def _random_square(key, n: int):
     return random.normal(key, (n, n))
 
 
-def _nonfinite(func, value):
+def _eigh_values_nosym(lower: bool):
+    """Eigh reading only one triangle (symmetrize_input=False)."""
+    from jax._src.lax import linalg as lax_linalg
+
+    def eigh_values(A):
+        _, w = lax_linalg.eigh(A, lower=lower, symmetrize_input=False)
+        return w
+
+    eigh_values.__name__ = f"eigh_values_{'lower' if lower else 'upper'}_nosym"
+    return eigh_values
+
+
+def _nonfinite(func, value, index: tuple[int, int] | None = (0, 0)):
     """Wrap a linalg test function to check its behavior on non-finite input.
 
-    Batch elements of `A` selected by `poison` get `value` in their top-left
-    entry. LAPACK's output for such matrices is implementation-defined (the CPU
-    reference may return e.g. eigenvalues `[nan, 1, 1]`), so we compare only a
-    per-batch "contains NaN" flag plus the outputs of the clean batch elements.
-    The poisoned matrices are built from `stop_gradient(A)` and selected with
-    `where`, so their (NaN) gradients are discarded rather than propagated.
+    Batch elements of `A` selected by `poison` get `value` at `index`, or in
+    every entry if `index` is None. LAPACK's output for such matrices is
+    implementation-defined (the CPU reference may return e.g. eigenvalues
+    `[nan, 1, 1]`), so we compare only a per-batch "contains NaN" flag plus the
+    outputs of the clean batch elements. The poisoned matrices are built from
+    `stop_gradient(A)` and selected with `where`, so their (NaN) gradients are
+    discarded rather than propagated.
     """
 
     def wrapped(A, poison):
         mask = poison[..., None, None]
-        bad = lax.stop_gradient(A).at[..., 0, 0].set(value)
+        bad = lax.stop_gradient(A)
+        if index is None:
+            bad = jnp.full_like(bad, value)
+        else:
+            bad = bad.at[..., index[0], index[1]].set(value)
         out = func(jnp.where(mask, bad, A))
         axes = tuple(range(poison.ndim, out.ndim))
         has_nan = jnp.isnan(out).any(axis=axes)
@@ -663,6 +680,43 @@ def make_linalg_op_configs():
             numpy.array([False, False, True]),
             name="svd_reconstruct_batched_nan",
         )
+        # All-NaN input: the reproducer from #244. Unlike a single NaN entry,
+        # this makes LAPACK report failure rather than return partial NaNs.
+        for func, make, label in nonfinite_cases:
+            yield OperationTestConfig(
+                _nonfinite(func, numpy.nan, index=None),
+                lambda key, make=make: make(key, 3),
+                numpy.array(True),
+                name=f"{label}_all_nan",
+            )
+        yield OperationTestConfig(
+            _nonfinite(_eigh_values, numpy.nan, index=None),
+            lambda key: _random_symmetric(key, 4, batch_shape=(3,)),
+            numpy.array([False, True, False]),
+            name="eigh_values_batched_all_nan",
+        )
+        yield OperationTestConfig(
+            _nonfinite(_svd_values, numpy.nan, index=None),
+            lambda key: random.normal(key, (3, 4, 3)),
+            numpy.array([False, True, False]),
+            name="svd_values_batched_all_nan",
+        )
+
+        # With symmetrize_input=False eigh reads only one triangle: non-finite
+        # entries there must give NaN, while entries in the ignored triangle
+        # must leave the (finite) eigenvalues unchanged.
+        for lower in [True, False]:
+            tri = "lower" if lower else "upper"
+            read, ignored = ((2, 0), (0, 2)) if lower else ((0, 2), (2, 0))
+            for value, value_label in [(numpy.nan, "nan"), (numpy.inf, "inf")]:
+                for where_label, index in [("read", read), ("ignored", ignored)]:
+                    yield OperationTestConfig(
+                        _nonfinite(_eigh_values_nosym(lower), value, index=index),
+                        lambda key: _random_symmetric(key, 3, batch_shape=(2,)),
+                        numpy.array([True, False]),
+                        name=f"eigh_values_{tri}_nosym_{value_label}_{where_label}",
+                    )
+
         # --- LU Decomposition ---
 
         # LU via solve (most practical test: A x = b)
