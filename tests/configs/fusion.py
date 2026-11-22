@@ -388,6 +388,63 @@ def make_fusion_configs() -> list[FusionTestConfig]:
         )
     )
 
+    # --- fuse_sdpa: dot_general -> scale -> softmax -> dot_general -> mps.sdpa ---
+    # Hand-rolled attention (no jax.nn.dot_product_attention) must reach
+    # MLX's fused attention kernel. The fused kernel accumulates in a
+    # different order than two matmuls + softmax, hence the looser tolerance.
+
+    def _attn_matmul(q, k, v):
+        s = q @ jnp.swapaxes(k, -1, -2) / jnp.sqrt(jnp.float32(q.shape[-1]))
+        return jnn.softmax(s, axis=-1) @ v
+
+    def _attn_einsum(q, k, v):
+        s = jnp.einsum("bnth,bnsh->bnts", q, k) * 0.125
+        return jnp.einsum("bnts,bnsh->bnth", jnn.softmax(s, axis=-1), v)
+
+    def _attn_btnh(q, k, v):
+        # Sequence-major (B, T, N, H) layout, as in flax / jax.nn.
+        s = jnp.einsum("btnh,bsnh->bnts", q, k) * 0.125
+        return jnp.einsum("bnts,bsnh->btnh", jnn.softmax(s, axis=-1), v)
+
+    def _attn_unscaled(q, k, v):
+        return jnn.softmax(q @ jnp.swapaxes(k, -1, -2), axis=-1) @ v
+
+    def _attn_probs_escape(q, k, v):
+        # The attention weights are used again, so fusing would compute them
+        # twice; the pass must leave this alone.
+        p = jnn.softmax(q @ jnp.swapaxes(k, -1, -2) * 0.125, axis=-1)
+        return p @ v + p[..., :1]
+
+    for name, func, shapes in [
+        ("matmul_div_sqrt", _attn_matmul, [(2, 4, 16, 32)] * 3),
+        ("einsum_mul", _attn_einsum, [(2, 4, 16, 64), (2, 4, 24, 64), (2, 4, 24, 64)]),
+        ("btnh_layout", _attn_btnh, [(2, 16, 4, 64), (2, 24, 4, 64), (2, 24, 4, 64)]),
+        ("unscaled", _attn_unscaled, [(2, 2, 8, 16)] * 3),
+        # Batch 1: JAX squeezes the unit batch dim, leaving rank-3 matmuls.
+        ("batch1", _attn_matmul, [(1, 4, 16, 32)] * 3),
+        ("batch1_btnh", _attn_btnh, [(1, 16, 4, 64), (1, 24, 4, 64), (1, 24, 4, 64)]),
+    ]:
+        configs.append(
+            FusionTestConfig(
+                name=f"sdpa.{name}",
+                func=func,
+                args=tuple(randn(*shape) for shape in shapes),
+                expected_custom_calls={"mps.sdpa": 1, "mps.softmax": 0},
+                atol=1e-4,
+                rtol=1e-4,
+                fusion_atol=1e-5,
+                fusion_rtol=1e-5,
+            )
+        )
+    configs.append(
+        FusionTestConfig(
+            name="sdpa.negative.probs_escape",
+            func=_attn_probs_escape,
+            args=tuple(randn(2, 4, 16, 32) for _ in range(3)),
+            expected_custom_calls={"mps.sdpa": 0, "mps.softmax": 1},
+        )
+    )
+
     # --- canonicalize_broadcast_identity: must not change numerics ---
 
     # x - broadcast(0) over the SAME shape folds to x (and stays numerically
