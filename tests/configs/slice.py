@@ -627,4 +627,146 @@ def make_slice_op_configs():
                 lambda key: random.randint(key, (4,), 0, 8),
                 name="gather_non_contiguous_window_dims_grad",
             ),
+            # Out-of-bounds scatter indices: StableHLO skips any update whose
+            # window does not fit in the operand. JAX's default mode="drop"
+            # (FILL_OR_DROP) relies on this, so the update must vanish rather
+            # than land in a neighbouring row or batch (jax-mps#240).
+            OperationTestConfig(
+                lambda x, idx, val: jax.vmap(
+                    lambda a, i, v: a.at[i].set(v, mode="drop")
+                )(x, idx, val),
+                lambda key: random.normal(key, (3, 10, 4)),
+                numpy.array([[1, 3, 10], [1, 3, 10], [1, 3, 5]], dtype=numpy.int32),
+                lambda key: random.normal(key, (3, 3, 4)),
+                name="scatter_drop_oob_batched_set",
+            ),
+            OperationTestConfig(
+                lambda x, idx, val: jax.vmap(
+                    lambda a, i, v: a.at[i].add(v, mode="drop")
+                )(x, idx, val),
+                lambda key: random.normal(key, (3, 10, 4)),
+                numpy.array([[1, 3, 10], [12, 3, 0], [1, 3, 5]], dtype=numpy.int32),
+                lambda key: random.normal(key, (3, 3, 4)),
+                name="scatter_drop_oob_batched_add",
+            ),
+            *[
+                OperationTestConfig(
+                    # JAX only differentiates scatter_mul with unique_indices.
+                    lambda x, idx, val, method=method: getattr(x.at[idx], method)(
+                        val, mode="drop", unique_indices=True
+                    ),
+                    lambda key: random.normal(key, (10, 4)),
+                    numpy.array([1, 10, 3, 12], dtype=numpy.int32),
+                    lambda key: random.normal(key, (4, 4)),
+                    name=f"scatter_drop_oob_{method}",
+                )
+                for method in ["set", "add", "mul", "min", "max"]
+            ],
+            # Raw negative start index (no Python-style wrap-around at the
+            # StableHLO level) must also be dropped.
+            OperationTestConfig(
+                lambda x, idx, val: lax.scatter(
+                    x,
+                    idx,
+                    val,
+                    lax.ScatterDimensionNumbers(
+                        update_window_dims=(1,),
+                        inserted_window_dims=(0,),
+                        scatter_dims_to_operand_dims=(0,),
+                    ),
+                    mode=lax.GatherScatterMode.FILL_OR_DROP,
+                ),
+                lambda key: random.normal(key, (10, 4)),
+                numpy.array([[1], [-1], [3]], dtype=numpy.int32),
+                lambda key: random.normal(key, (3, 4)),
+                name="scatter_drop_negative_index",
+            ),
+            # Single-axis window scatter: a window that starts in bounds but
+            # runs past the end is skipped as a whole.
+            *[
+                OperationTestConfig(
+                    lambda x, idx, val, scatter=scatter: scatter(
+                        x,
+                        idx,
+                        val,
+                        lax.ScatterDimensionNumbers(
+                            update_window_dims=(1,),
+                            inserted_window_dims=(),
+                            scatter_dims_to_operand_dims=(0,),
+                        ),
+                        mode=lax.GatherScatterMode.FILL_OR_DROP,
+                    ),
+                    lambda key: random.normal(key, (8,)),
+                    numpy.array([[1], [6], [4]], dtype=numpy.int32),
+                    lambda key: random.normal(key, (3, 3)),
+                    name=f"window_scatter_drop_oob_{name}",
+                )
+                for name, scatter in [("set", lax.scatter), ("add", lax.scatter_add)]
+            ],
+            # Multi-axis window scatter, unbatched and batched, with windows
+            # running past the end of either axis.
+            *[
+                OperationTestConfig(
+                    lambda x, y, idx, scatter=scatter: scatter(
+                        x,
+                        idx,
+                        y,
+                        _WINDOW_2D_DNUMS,
+                        unique_indices=True,
+                        mode=lax.GatherScatterMode.FILL_OR_DROP,
+                    ),
+                    lambda key: random.normal(key, (5, 6)),
+                    lambda key: random.normal(key, (2, 3)),
+                    lambda key: jnp.array([4, 1], dtype=jnp.int32),
+                    name=f"multi_axis_window_scatter_drop_oob_{name}",
+                )
+                for name, scatter in [
+                    ("set", lax.scatter),
+                    ("add", lax.scatter_add),
+                    ("mul", lax.scatter_mul),
+                ]
+            ],
+            *[
+                OperationTestConfig(
+                    lambda x, y, idx, scatter=scatter: jax.vmap(
+                        lambda a, b, i: scatter(
+                            a,
+                            i,
+                            b,
+                            _WINDOW_2D_DNUMS,
+                            unique_indices=True,
+                            mode=lax.GatherScatterMode.FILL_OR_DROP,
+                        )
+                    )(x, y, idx),
+                    lambda key: random.normal(key, (3, 5, 6)),
+                    lambda key: random.normal(key, (3, 2, 3)),
+                    lambda key: jnp.array([[0, 1], [4, 2], [3, 4]], dtype=jnp.int32),
+                    name=f"batched_multi_axis_window_scatter_drop_oob_{name}",
+                )
+                for name, scatter in [
+                    ("set", lax.scatter),
+                    ("add", lax.scatter_add),
+                    ("mul", lax.scatter_mul),
+                ]
+            ],
+            # Generic (scatter_apply) body: the gather-apply-scatter fallback
+            # must drop out-of-bounds entries too.
+            OperationTestConfig(
+                lambda x, idx: lax.scatter_apply(
+                    x,
+                    idx,
+                    lambda v: v * 2,
+                    lax.ScatterDimensionNumbers(
+                        update_window_dims=(),
+                        inserted_window_dims=(0,),
+                        scatter_dims_to_operand_dims=(0,),
+                    ),
+                    update_shape=(3,),
+                    mode=lax.GatherScatterMode.FILL_OR_DROP,
+                ),
+                lambda key: random.normal(key, (5,)),
+                numpy.array([[1], [5], [3]], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="scatter_apply_drop_oob",
+            ),
         ]
