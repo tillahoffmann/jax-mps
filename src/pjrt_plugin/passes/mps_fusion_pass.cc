@@ -7,6 +7,7 @@
 #include "pjrt_plugin/passes/fuse_bias_add.h"
 #include "pjrt_plugin/passes/fuse_layer_norm.h"
 #include "pjrt_plugin/passes/fuse_rms_norm.h"
+#include "pjrt_plugin/passes/fuse_sdpa.h"
 #include "pjrt_plugin/passes/fuse_softmax.h"
 
 namespace mps {
@@ -34,6 +35,9 @@ protected:
         populateCanonicalizeBroadcastIdentityPatterns(patterns);
         populateFuseBiasAddPatterns(patterns);
         populateFuseSoftmaxPatterns(patterns);
+        // Consumes @mps.softmax produced above; the greedy driver revisits the
+        // softmax's users once it is rewritten.
+        populateFuseSdpaPatterns(patterns);
         populateFuseLayerNormPatterns(patterns);
         populateFuseRmsNormPatterns(patterns);
         if (mlir::failed(mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
