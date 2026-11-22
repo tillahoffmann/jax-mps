@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <set>
 
+#include "mlir/IR/Matchers.h"
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -293,24 +294,14 @@ bool HandleGather(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::
     return true;
 }
 
-bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
-                   ExecContext& ctx) {
-    auto scatterOp = CastOp<mlir::stablehlo::ScatterOp>(op, "stablehlo.scatter");
-    if (!scatterOp)
-        return false;
-
-    // Only support single-input scatter for now
-    if (scatterOp.getInputs().size() != 1) {
-        MPS_LOG_ERROR("stablehlo.scatter: multi-input scatter not supported\n");
-        return false;
-    }
-
-    auto* operand = RequireValue(values, scatterOp.getInputs()[0], "stablehlo.scatter");
-    auto* scatterIndices = RequireValue(values, scatterOp.getScatterIndices(), "stablehlo.scatter");
-    auto* updates = RequireValue(values, scatterOp.getUpdates()[0], "stablehlo.scatter");
-    if (!operand || !scatterIndices || !updates)
-        return false;
-
+// Lowers a single-input scatter whose start indices are all in bounds (or have
+// already been redirected into padding by HandleScatter). Returns the scattered
+// operand.
+std::optional<mlx::core::array> ScatterInBounds(mlir::stablehlo::ScatterOp scatterOp,
+                                                const mlx::core::array* operand,
+                                                const mlx::core::array* scatterIndices,
+                                                const mlx::core::array* updates, ExecContext& ctx,
+                                                ValueMap& values) {
     auto dn = scatterOp.getScatterDimensionNumbers();
     auto insertedWindowDims = dn.getInsertedWindowDims();
     auto scatterDimsToOperandDims = dn.getScatterDimsToOperandDims();
@@ -427,7 +418,7 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                     if (indexAxis < 0 || indexAxis >= static_cast<int>(batchCoordinates.size())) {
                         MPS_LOG_ERROR(
                             "stablehlo.scatter: invalid scatter index batching dimension\n");
-                        return false;
+                        return std::nullopt;
                     }
                     axes.push_back(operandAxis);
                     perAxisIdx.push_back(mlx::core::reshape(
@@ -516,12 +507,11 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
                         MPS_LOG_ERROR(
                             "stablehlo.scatter: unsupported scatter update type "
                             "for multi-dim slice update\n");
-                        return false;
+                        return std::nullopt;
                 }
             }
 
-            values.emplace(ToKey(op->getResult(0)), std::move(result));
-            return true;
+            return result;
         }
 
         // Single-axis window scatter: expand start indices to per-element indices
@@ -650,17 +640,14 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
             result =
                 ApplyScatterGeneric(body, *operand, idxVec, reshapedUpdates, axes, ctx, values);
         }
-        if (!result)
-            return false;
-        values.emplace(ToKey(op->getResult(0)), std::move(*result));
-        return true;
+        return result;
     }
 
     // ===== General point scatter path =====
     auto extraction_opt = ExtractPerAxisIndices(*scatterIndices, scatterDimsToOperandDims,
                                                 indexVectorDim, "stablehlo.scatter");
     if (!extraction_opt)
-        return false;
+        return std::nullopt;
     auto& idxVec = extraction_opt->idxVec;
     auto& axes = extraction_opt->axes;
     auto& idxBatchShape = extraction_opt->idxBatchShape;
@@ -713,6 +700,146 @@ bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core:
         result = ApplyScatter(scatterType, *operand, idxVec, reshapedUpdates, axes);
     } else {
         result = ApplyScatterGeneric(body, *operand, idxVec, reshapedUpdates, axes, ctx, values);
+    }
+    return result;
+}
+
+// Window extent along each scatter axis (scatter_dims_to_operand_dims[i]): 1 for
+// an inserted window dim, otherwise the matching update window dim's size.
+std::vector<int> ScatterWindowExtents(mlir::stablehlo::ScatterDimensionNumbersAttr dn,
+                                      const mlx::core::array& operand,
+                                      const mlx::core::array& updates) {
+    auto insertedWindowDims = dn.getInsertedWindowDims();
+    auto inputBatchingDims = dn.getInputBatchingDims();
+    auto updateWindowDims = dn.getUpdateWindowDims();
+    std::set<int> insertedSet(insertedWindowDims.begin(), insertedWindowDims.end());
+    std::set<int> batchingSet(inputBatchingDims.begin(), inputBatchingDims.end());
+
+    // updateWindowDims[j] holds the extent of the j-th operand dim that is
+    // neither inserted nor batching.
+    std::vector<int> windowPos(operand.ndim(), -1);
+    int j = 0;
+    for (int d = 0; d < operand.ndim(); ++d) {
+        if (!insertedSet.count(d) && !batchingSet.count(d)) {
+            windowPos[d] = j++;
+        }
+    }
+
+    std::vector<int> extents;
+    for (auto dim : dn.getScatterDimsToOperandDims()) {
+        int d = static_cast<int>(dim);
+        int pos = windowPos[d];
+        extents.push_back(pos < 0 ? 1 : updates.shape(static_cast<int>(updateWindowDims[pos])));
+    }
+    return extents;
+}
+
+// True when the scatter indices are a compile-time constant and every start
+// index keeps its window inside the operand, so the out-of-bounds handling
+// in HandleScatter can be skipped (the common `x.at[3].set(v)` case).
+bool ConstantScatterIndicesInBounds(mlir::stablehlo::ScatterOp scatterOp,
+                                    const mlx::core::array& operand,
+                                    const std::vector<int>& extents) {
+    mlir::DenseIntElementsAttr attr;
+    if (!mlir::matchPattern(scatterOp.getScatterIndices(), mlir::m_Constant(&attr))) {
+        return false;
+    }
+    auto dn = scatterOp.getScatterDimensionNumbers();
+    auto axes = dn.getScatterDimsToOperandDims();
+    int indexVectorDim = static_cast<int>(dn.getIndexVectorDim());
+    auto shape = attr.getType().getShape();
+    bool hasIdxVecDim = indexVectorDim < static_cast<int>(shape.size());
+    int64_t stride = 1;
+    for (int d = indexVectorDim + 1; d < static_cast<int>(shape.size()); ++d) {
+        stride *= shape[d];
+    }
+    bool isUnsigned = attr.getElementType().isUnsignedInteger();
+
+    int64_t flat = 0;
+    for (const llvm::APInt& value : attr.getValues<llvm::APInt>()) {
+        size_t component =
+            hasIdxVecDim ? static_cast<size_t>((flat / stride) % shape[indexVectorDim]) : 0;
+        ++flat;
+        if (component >= axes.size()) {
+            return false;
+        }
+        int64_t start =
+            isUnsigned ? static_cast<int64_t>(value.getZExtValue()) : value.getSExtValue();
+        int64_t maxStart = static_cast<int64_t>(operand.shape(static_cast<int>(axes[component]))) -
+                           extents[component];
+        if (start < 0 || start > maxStart) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// StableHLO skips any update whose full window does not fit in the operand
+// (JAX's default mode="drop" relies on this). MLX's scatter and slice_update
+// do not bounds-check, so an out-of-bounds index would otherwise write into a
+// neighbouring row or batch (jax-mps#240). Pad the operand past the end of
+// every scatter axis, redirect invalid start indices into that padding, scatter
+// as usual, then slice the padding back off.
+bool HandleScatter(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
+                   ExecContext& ctx) {
+    auto scatterOp = CastOp<mlir::stablehlo::ScatterOp>(op, "stablehlo.scatter");
+    if (!scatterOp)
+        return false;
+
+    // Only support single-input scatter for now
+    if (scatterOp.getInputs().size() != 1) {
+        MPS_LOG_ERROR("stablehlo.scatter: multi-input scatter not supported\n");
+        return false;
+    }
+
+    auto* operand = RequireValue(values, scatterOp.getInputs()[0], "stablehlo.scatter");
+    auto* scatterIndices = RequireValue(values, scatterOp.getScatterIndices(), "stablehlo.scatter");
+    auto* updates = RequireValue(values, scatterOp.getUpdates()[0], "stablehlo.scatter");
+    if (!operand || !scatterIndices || !updates)
+        return false;
+
+    auto dn = scatterOp.getScatterDimensionNumbers();
+    auto scatterAxes = ToIntVec(dn.getScatterDimsToOperandDims());
+    auto extents = ScatterWindowExtents(dn, *operand, *updates);
+
+    std::optional<mlx::core::array> result;
+    if (scatterAxes.empty() || ConstantScatterIndicesInBounds(scatterOp, *operand, extents)) {
+        result = ScatterInBounds(scatterOp, operand, scatterIndices, updates, ctx, values);
+    } else {
+        int indexVectorDim = static_cast<int>(dn.getIndexVectorDim());
+        auto extraction = ExtractPerAxisIndices(*scatterIndices, dn.getScatterDimsToOperandDims(),
+                                                indexVectorDim, "stablehlo.scatter");
+        if (!extraction)
+            return false;
+        auto& starts = extraction->idxVec;
+
+        auto zero = mlx::core::array(0, mlx::core::int32);
+        auto valid = mlx::core::array(true);
+        for (size_t i = 0; i < starts.size(); ++i) {
+            auto maxStart =
+                mlx::core::array(operand->shape(scatterAxes[i]) - extents[i], mlx::core::int32);
+            valid = mlx::core::logical_and(
+                valid, mlx::core::logical_and(mlx::core::greater_equal(starts[i], zero),
+                                              mlx::core::less_equal(starts[i], maxStart)));
+        }
+
+        mlx::core::Shape low(scatterAxes.size(), 0);
+        mlx::core::Shape high(extents.begin(), extents.end());
+        std::vector<mlx::core::array> redirected;
+        for (size_t i = 0; i < starts.size(); ++i) {
+            auto padStart = mlx::core::array(operand->shape(scatterAxes[i]), mlx::core::int32);
+            redirected.push_back(mlx::core::where(valid, starts[i], padStart));
+        }
+        auto safeIndices =
+            extraction->hasIdxVecDim ? mlx::core::stack(redirected, indexVectorDim) : redirected[0];
+        auto padded = mlx::core::pad(*operand, scatterAxes, low, high,
+                                     mlx::core::zeros({}, operand->dtype()));
+
+        result = ScatterInBounds(scatterOp, &padded, &safeIndices, updates, ctx, values);
+        if (result) {
+            result =
+                mlx::core::slice(*result, mlx::core::Shape(operand->ndim(), 0), operand->shape());
+        }
     }
     if (!result)
         return false;
