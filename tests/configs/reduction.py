@@ -449,3 +449,69 @@ def make_reduction_op_configs():
             _int_input((1023, 3)),
             name="reduce_xor-int-long",
         )
+
+    # Non-identity initializers for the MLX-native reductions (sum/prod/max/min).
+    # StableHLO folds the init into every reduction (and every window) exactly
+    # once; dropping it silently returns the identity-init answer. Values are
+    # chosen to land inside the data range so a dropped or doubled init shows.
+    # Reduced sizes and windows are > 1 because XLA CPU (the reference) drops
+    # the init for size-1 reductions. JAX has no VJP for reductions with a
+    # non-monoid init, so these are forward-only.
+    def _uniform(shape, lo, hi):
+        return lambda key: random.uniform(key, shape, minval=lo, maxval=hi)
+
+    init_cases = [
+        ("sum", lax.add, 2.5, _uniform((4, 7), -1.0, 1.0)),
+        ("prod", lax.mul, 2.0, _uniform((4, 7), 0.5, 1.5)),
+        ("max", lax.max, 0.5, _uniform((4, 7), -1.0, 1.0)),
+        ("min", lax.min, -0.5, _uniform((4, 7), -1.0, 1.0)),
+    ]
+    with OperationTestConfig.module_name("reduction-init"):
+        for name, op, init, make_input in init_cases:
+            for axes, suffix in [((1,), "axis1"), ((0, 1), "all")]:
+                yield OperationTestConfig(
+                    lambda x, op=op, init=init, axes=axes: lax.reduce(
+                        x, jnp.float32(init), op, axes
+                    ),
+                    make_input,
+                    name=f"reduce_{name}-init-{suffix}",
+                    differentiable_argnums=(),
+                )
+            for padding in ["valid", "same"]:
+                yield OperationTestConfig(
+                    lambda x, op=op, init=init, padding=padding: lax.reduce_window(
+                        x, jnp.float32(init), op, (2, 3), (1, 2), padding
+                    ),
+                    make_input,
+                    name=f"reduce_window_{name}-init-{padding}",
+                    differentiable_argnums=(),
+                )
+            # Full-length, low-padded window along one axis: the cumulative
+            # (cumsum/cumprod/cummax/cummin) tier.
+            yield OperationTestConfig(
+                lambda x, op=op, init=init: lax.reduce_window(
+                    x, jnp.float32(init), op, (1, 7), (1, 1), ((0, 0), (6, 0))
+                ),
+                make_input,
+                name=f"reduce_window_{name}-init-cumulative",
+                differentiable_argnums=(),
+            )
+        # Base-dilation holes, like padding, must not pick up the init.
+        yield OperationTestConfig(
+            lambda x: lax.reduce_window(
+                x, jnp.float32(2.5), lax.add, (2, 3), (1, 1), "valid", (1, 2)
+            ),
+            _uniform((4, 7), -1.0, 1.0),
+            name="reduce_window_sum-init-base-dilation",
+            differentiable_argnums=(),
+        )
+        yield OperationTestConfig(
+            lambda x: lax.reduce(x, jnp.int32(7), lax.add, (1,)),
+            lambda key: random.randint(key, (4, 7), -50, 50, dtype=jnp.int32),
+            name="reduce_sum-int-init",
+        )
+        yield OperationTestConfig(
+            lambda x: lax.reduce(x, jnp.int32(40), lax.max, (1,)),
+            lambda key: random.randint(key, (4, 7), -50, 50, dtype=jnp.int32),
+            name="reduce_max-int-init",
+        )
