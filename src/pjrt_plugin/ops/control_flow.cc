@@ -348,6 +348,58 @@ std::optional<int64_t> ReadIntScalar(const mlx::core::array& a, bool isUnsigned)
     return std::nullopt;
 }
 
+// Loop-carried buffers at least this large that the body updates in place
+// switch the counted path to a synchronous periodic flush (jax-mps#215). Below
+// it the full-buffer copy an async flush forces is cheaper than the pipeline
+// bubble of waiting (measured on M-series: no async penalty up to 64 MiB in a
+// dispatch-bound scan, 2.5x slower at 256 MiB).
+constexpr int64_t kSyncFlushAccumulatorBytes = int64_t{32} << 20;
+
+// MLX's GPU eval keeps every evaluated array's buffer referenced from the
+// command buffer's completion handler, which runs on a Metal callback thread
+// after the GPU has signaled the eval's event. eval() returns on that signal,
+// so a buffer that was just evaluated can still have a second reference, and
+// MLX then refuses to donate it: the next in-place update (slice_update,
+// scatter) silently copies the whole buffer instead. Waiting for the command
+// buffer to complete lets the handler release those references.
+void ReleaseRetainedInputs() {
+    SyncGpuStream();
+}
+
+// Whether the while body updates a large loop-carried value in place: a
+// dynamic_update_slice or scatter whose operand is one of the body's block
+// arguments (the canonical lowering of lax.scan's stacked outputs and of
+// `carry.at[i].set(...)`) and whose static size is at least
+// kSyncFlushAccumulatorBytes.
+bool HasLargeInPlaceAccumulator(mlir::stablehlo::WhileOp whileOp) {
+    auto& bodyRegion = whileOp.getBody();
+    if (!bodyRegion.hasOneBlock())
+        return false;
+    auto& bodyBlock = bodyRegion.front();
+    auto isLargeLoopVar = [&](mlir::Value v) {
+        auto arg = mlir::dyn_cast<mlir::BlockArgument>(v);
+        if (!arg || arg.getOwner() != &bodyBlock)
+            return false;
+        auto ty = mlir::dyn_cast<mlir::RankedTensorType>(arg.getType());
+        if (!ty || !ty.hasStaticShape())
+            return false;
+        int64_t bits = ty.getNumElements() * ty.getElementTypeBitWidth();
+        return bits / 8 >= kSyncFlushAccumulatorBytes;
+    };
+    for (auto& op : bodyBlock) {
+        if (auto dus = mlir::dyn_cast<mlir::stablehlo::DynamicUpdateSliceOp>(op)) {
+            if (isLargeLoopVar(dus.getOperand()))
+                return true;
+        } else if (auto scatter = mlir::dyn_cast<mlir::stablehlo::ScatterOp>(op)) {
+            for (auto input : scatter.getInputs()) {
+                if (isLargeLoopVar(input))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Runtime parameters for the counted fast path, resolved against the
 // primitive's input layout (loop vars first, then external captures).
 struct CountedExec {
@@ -393,16 +445,20 @@ public:
     // bodyHasControlFlow: set by the body/cond trace when the regions contain
     //   nested control-flow primitives (while/case). The counted path uses it
     //   to decide whether the periodic flush may be async (see eval_impl).
+    // syncFlush: the body updates a large loop-carried buffer in place, so the
+    //   counted path's periodic flush must be synchronous (see eval_impl).
     WhileLoopPrimitive(mlx::core::Stream stream, CondFn condFn, BodyFn bodyCondFn, size_t nLoopVars,
                        size_t nExt, std::optional<CountedExec> counted = std::nullopt,
-                       std::shared_ptr<std::atomic<bool>> bodyHasControlFlow = nullptr)
+                       std::shared_ptr<std::atomic<bool>> bodyHasControlFlow = nullptr,
+                       bool syncFlush = false)
         : Primitive(stream),
           compiledBodyCond_(mlx::core::compile(std::move(bodyCondFn))),
           compiledCond_(mlx::core::compile(std::move(condFn))),
           nLoopVars_(nLoopVars),
           nExt_(nExt),
           counted_(counted),
-          bodyHasControlFlow_(std::move(bodyHasControlFlow)) {
+          bodyHasControlFlow_(std::move(bodyHasControlFlow)),
+          syncFlush_(syncFlush) {
         if (stream.device.type != mlx::core::Device::cpu) {
             throw std::runtime_error(
                 "WhileLoopPrimitive must be on the CPU stream \u2014 GPU stream "
@@ -473,6 +529,16 @@ private:
             // documented for JAX_MPS_ASYNC_DISPATCH in mlx_executable.cc).
             // The trace runs on the first compiledBodyCond_ call (i == 0),
             // so the flag is always set before the first flush.
+            //
+            // It is also synchronous when the body updates a large
+            // loop-carried buffer in place (syncFlush_, e.g. a scan's stacked
+            // outputs). An eval's command buffer keeps a reference to the
+            // buffers it evaluated until its completion handler runs, so when
+            // the next chunk is encoded right after an async flush its first
+            // dynamic_update_slice cannot donate the buffer and copies all of
+            // it — once per chunk, quadratic in the trip count (jax-mps#215).
+            // See ReleaseRetainedInputs. Waiting costs a pipeline bubble per
+            // chunk, which is cheaper than the copy once the buffer is large.
             constexpr int64_t kEvalInterval = 64;
             for (int64_t i = 0; i < *tripCount; ++i) {
                 auto combined = compiledBodyCond_(current);
@@ -491,10 +557,14 @@ private:
                         current.begin(), current.begin() + static_cast<Diff>(nLoopVars_));
                     const bool nestedControlFlow =
                         bodyHasControlFlow_ && bodyHasControlFlow_->load(std::memory_order_relaxed);
-                    if (nestedControlFlow)
+                    if (syncFlush_) {
                         mlx::core::eval(vars);
-                    else
+                        ReleaseRetainedInputs();
+                    } else if (nestedControlFlow) {
+                        mlx::core::eval(vars);
+                    } else {
                         mlx::core::async_eval(vars);
+                    }
                     // Surface exceptions parked by stream worker threads (MLX
                     // patch 10): a failed body kernel otherwise feeds garbage
                     // into subsequent iterations while the error stays hidden.
@@ -519,17 +589,23 @@ private:
                                              std::to_string(combined.size()) +
                                              " results, expected " +
                                              std::to_string(1 + nLoopVars_));
+                // Update loop vars from combined[1..nLoopVars] BEFORE eval so
+                // the previous iteration's values are referenced only by this
+                // iteration's graph. Holding them in `current` across the eval
+                // makes them non-donatable, so an in-place update such as a
+                // scan's stacked-output dynamic_update_slice would copy the
+                // whole loop-carried buffer every iteration (jax-mps#215).
+                for (size_t j = 0; j < nLoopVars_; ++j)
+                    current[j] = combined[1 + j];
                 // Synchronous eval — bounded graph, no accumulation, safe
                 // re-entry for nested WhileLoopPrimitives.
                 mlx::core::eval(combined);
+                if (syncFlush_)
+                    ReleaseRetainedInputs();
                 // Surface parked stream-thread exceptions before reading the
                 // cond scalar: a failed body kernel would otherwise yield a
                 // garbage condition and can spin the loop indefinitely.
                 mlx::core::scheduler::rethrow_pending_exception();
-
-                // Update loop vars from combined[1..nLoopVars]
-                for (size_t j = 0; j < nLoopVars_; ++j)
-                    current[j] = std::move(combined[1 + j]);
                 // Check condition from combined[0]
                 condTrue = combined[0].item<bool>();
             }
@@ -584,6 +660,8 @@ private:
     std::optional<CountedExec> counted_;
     // Set during the body/cond trace; gates the async periodic flush.
     std::shared_ptr<std::atomic<bool>> bodyHasControlFlow_;
+    // Body updates a large loop-carried buffer in place; forces a sync flush.
+    bool syncFlush_;
 };
 
 // Custom MLX primitive that encapsulates a multi-branch case/switch with
@@ -859,9 +937,9 @@ bool HandleWhile(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::a
         // kernels internally. eval()/async_eval() calls inside the loop would
         // deadlock on a GPU stream (see WhileLoopPrimitive class comment).
         auto cpuStream = mlx::core::default_stream(mlx::core::Device::cpu);
-        auto prim = std::make_shared<WhileLoopPrimitive>(cpuStream, std::move(condFn),
-                                                         std::move(bodyCondFn), nLoopVars, nExt,
-                                                         counted, bodyHasControlFlow);
+        auto prim = std::make_shared<WhileLoopPrimitive>(
+            cpuStream, std::move(condFn), std::move(bodyCondFn), nLoopVars, nExt, counted,
+            bodyHasControlFlow, HasLargeInPlaceAccumulator(whileOp));
 
         auto outputArrays =
             mlx::core::array::make_arrays(std::move(outShapes), outDtypes, prim, primInputs);
