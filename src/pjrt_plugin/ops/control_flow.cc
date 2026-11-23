@@ -1730,11 +1730,20 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                           op->getNumResults(), output_names.size());
             return false;
         }
-        if (op->getNumOperands() + op->getNumResults() > kMaxMetalBuffers) {
+        // MLX also binds one buffer per <input>_shape / _strides / _ndim the
+        // source references (see mlx::core::fast::metal_kernel).
+        unsigned metadataBuffers = 0;
+        for (const auto& n : input_names) {
+            for (const char* suffix : {"_shape", "_strides", "_ndim"}) {
+                if (sourceOpt->contains(n + suffix))
+                    ++metadataBuffers;
+            }
+        }
+        if (op->getNumOperands() + op->getNumResults() + metadataBuffers > kMaxMetalBuffers) {
             MPS_LOG_ERROR(
-                "mps.metal_kernel_jit: %u inputs + %u outputs needs more than the %u "
-                "buffer slots Metal provides\n",
-                op->getNumOperands(), op->getNumResults(), kMaxMetalBuffers);
+                "mps.metal_kernel_jit: %u inputs + %u outputs + %u shape/stride/ndim "
+                "buffers needs more than the %u buffer slots Metal provides\n",
+                op->getNumOperands(), op->getNumResults(), metadataBuffers, kMaxMetalBuffers);
             return false;
         }
 

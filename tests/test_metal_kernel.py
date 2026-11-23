@@ -168,6 +168,14 @@ _LIB_SOURCE = textwrap.dedent(
                      uint i [[thread_position_in_grid]]) {
         out[i] = a[i] + b[i];
     }
+    // Name extends "vadd" so (vadd, hash "x_h") vs (vadd_x, hash "h") would
+    // collide under a naive "<name>_<hash>" pipeline key.
+    kernel void vadd_x(device const float* a   [[buffer(0)]],
+                       device const float* b   [[buffer(1)]],
+                       device float*       out [[buffer(2)]],
+                       uint i [[thread_position_in_grid]]) {
+        out[i] = a[i] + b[i] + 100.0f;
+    }
     kernel void vsub(device const float* a   [[buffer(0)]],
                      device const float* b   [[buffer(1)]],
                      device float*       out [[buffer(2)]],
@@ -208,8 +216,9 @@ _LIB_SOURCE = textwrap.dedent(
 @pytest.fixture(scope="module")
 def vadd_metallib(tmp_path_factory):
     """Compile a small .metallib for metal_kernel_lib tests."""
-    if shutil.which("xcrun") is None:
-        pytest.skip("requires xcrun (Xcode Command Line Tools) to build a .metallib")
+    # Building a .metallib needs Xcode's command-line tools; MPS CI runners
+    # have them. Fail loudly rather than skipping coverage when they're missing.
+    assert shutil.which("xcrun"), "xcrun (Xcode Command Line Tools) is required"
     d = tmp_path_factory.mktemp("metallib")
     src, air, lib = d / "k.metal", d / "k.air", d / "k.metallib"
     src.write_text(_LIB_SOURCE)
@@ -524,3 +533,102 @@ def test_metal_kernel_lib_backend_rejects_duplicate_constant_index(vadd_metallib
 
     with pytest.raises(RuntimeError, match="index negative or set more than once"):
         np.asarray(_run_on_mps(fn, jnp.zeros((4,), jnp.float32)))
+
+
+def test_metal_kernel_jit_same_source_different_dtypes():
+    """One kernel name/source used with float32 and float16 inputs in a single
+    program must compile one pipeline per dtype signature."""
+    n = 128
+    source = f"uint i = thread_position_in_grid.x; if (i < {n}u) out[i] = a[i] * 2;"
+
+    def one(a):
+        (out,) = metal_kernel_jit(
+            "double",
+            [a],
+            output_shapes=[(n,)],
+            output_dtypes=[a.dtype],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            source=source,
+            input_names=["a"],
+            output_names=["out"],
+        )
+        return out
+
+    def fn(a):
+        return one(a), one(a.astype(jnp.float16))
+
+    a = jax.random.normal(jax.random.PRNGKey(9), (n,))
+    f32, f16 = _run_on_mps(fn, a)
+    assert f32.dtype == jnp.float32 and f16.dtype == jnp.float16
+    np.testing.assert_allclose(np.asarray(f32), 2 * np.asarray(a), rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(f16, dtype=np.float32), 2 * np.asarray(a), rtol=2e-3, atol=2e-3
+    )
+
+
+def test_metal_kernel_jit_metadata_buffers_count_toward_slot_limit():
+    """MLX binds an extra buffer for each referenced <input>_shape/_strides/_ndim,
+    so they count toward Metal's 31 slots."""
+    inputs = [jnp.zeros(4) for _ in range(29)]
+    names = [f"a{i}" for i in range(29)]
+    source = "out[0] = a0[0] + a0_shape[0] + a1_ndim;"  # 29 + 1 out + 2 metadata
+    with pytest.raises(ValueError, match="buffer slots"):
+        metal_kernel_jit(
+            "too_many",
+            inputs,
+            output_shapes=[(1,)],
+            output_dtypes=[jnp.float32],
+            grid=(1, 1, 1),
+            threadgroup=(1, 1, 1),
+            source=source,
+            input_names=names,
+            output_names=["out"],
+        )
+
+
+def test_metal_kernel_lib_explicit_layout_must_bind_every_output(vadd_metallib):
+    """An explicit layout that leaves a result unbound would return
+    uninitialized memory, so it is rejected."""
+    with pytest.raises(ValueError, match="output 0 is not bound"):
+        metal_kernel_lib(
+            "vadd",
+            [jnp.zeros(4), jnp.zeros(4)],
+            metallib_path=vadd_metallib,
+            output_shapes=[(4,)],
+            output_dtypes=[jnp.float32],
+            grid=(4, 1, 1),
+            threadgroup=(4, 1, 1),
+            buffers=[{"slot": 0, "input": 0}, {"slot": 1, "input": 1}],
+        )
+
+
+def test_metal_kernel_lib_name_and_hash_name_boundary(vadd_metallib):
+    """(name="vadd", hash_name="x_h") and (name="vadd_x", hash_name="h") must
+    not share a cached pipeline."""
+    n = 64
+
+    def one(name, hash_name, a, b):
+        (out,) = metal_kernel_lib(
+            name,
+            [a, b],
+            metallib_path=vadd_metallib,
+            output_shapes=[(n,)],
+            output_dtypes=[jnp.float32],
+            grid=(n, 1, 1),
+            threadgroup=(64, 1, 1),
+            hash_name=hash_name,
+        )
+        return out
+
+    def fn(a, b):
+        return one("vadd", "x_h", a, b), one("vadd_x", "h", a, b)
+
+    key = jax.random.PRNGKey(10)
+    a, b = (jax.random.normal(k, (n,)) for k in jax.random.split(key, 2))
+    plain, shifted = _run_on_mps(fn, a, b)
+    expected = np.asarray(a) + np.asarray(b)
+    np.testing.assert_allclose(np.asarray(plain), expected, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(shifted), expected + 100, rtol=1e-6, atol=1e-5
+    )

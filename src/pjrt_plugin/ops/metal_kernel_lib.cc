@@ -22,9 +22,20 @@ constexpr size_t kMaxMetalBuffers = 31;
 // applying function constants, so the kernel name and constant values must be
 // part of it or two kernels sharing a hash_name, or two specializations of one
 // kernel, would share the first compiled pipeline.
+//
+// MLX also uses a key that differs from the kernel name as the Metal
+// *specialized function name*, so it must stay a valid identifier. The plain
+// kernel name is the key when there is nothing to specialize (MLX then loads
+// the function directly); otherwise the name and hash_name are length-prefixed
+// ("k<len>_<name>_h<len>_<hash>") so different splits of the same characters
+// (e.g. "vadd" + "x_h" vs "vadd_x" + "h") cannot produce the same key, and each
+// constant's hex value has a fixed width for its type.
 std::string PipelineKey(const std::string& kname, const std::string& hash_name,
                         const std::vector<MklConstant>& constants) {
-    std::string key = hash_name.empty() ? kname : kname + "_" + hash_name;
+    if (hash_name.empty() && constants.empty())
+        return kname;
+    std::string key = "k" + std::to_string(kname.size()) + "_" + kname + "_h" +
+                      std::to_string(hash_name.size()) + "_" + hash_name;
     for (const auto& c : constants) {
         key += "_fc" + std::to_string(c.index) + "t" + std::to_string(c.type) + "v";
         for (uint8_t byte : c.value) {
@@ -186,11 +197,24 @@ std::vector<array> metal_kernel_lib(const std::vector<array>& inputs,
         throw std::invalid_argument(
             "metal_kernel_lib: positional binding needs more than 31 buffer slots");
     std::array<bool, kMaxMetalBuffers> bound_slots{};
+    std::vector<bool> bound_outputs(out_shapes.size(), false);
     for (const auto& b : buffers) {
         if (b.slot < 0 || static_cast<size_t>(b.slot) >= kMaxMetalBuffers || bound_slots[b.slot])
             throw std::invalid_argument(
                 "metal_kernel_lib: buffer slot out of range or bound more than once");
         bound_slots[b.slot] = true;
+        if (b.kind == MklBuffer::kOutput && b.arg >= 0 &&
+            static_cast<size_t>(b.arg) < bound_outputs.size())
+            bound_outputs[b.arg] = true;
+    }
+    // Outputs are allocated uninitialized, so an explicit layout that never
+    // binds one would hand back garbage.
+    if (!buffers.empty()) {
+        for (size_t i = 0; i < bound_outputs.size(); ++i) {
+            if (!bound_outputs[i])
+                throw std::invalid_argument("metal_kernel_lib: output " + std::to_string(i) +
+                                            " is not bound to a buffer slot");
+        }
     }
     std::unordered_set<int> constant_indices;
     for (const auto& c : constants) {

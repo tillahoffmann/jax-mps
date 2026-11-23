@@ -627,10 +627,11 @@ _metal_kernel_jit_p.def_abstract_eval(_metal_kernel_jit_abstract)
 
 
 def _metal_kernel_jit_impl(*inputs, **params):
-    raise NotImplementedError(
-        "mps.metal_kernel_jit is only lowered on the MPS backend (no host/CPU "
-        "equivalent for arbitrary Metal source)."
-    )
+    # Eager calls compile the single primitive, like JAX's own primitives.
+    # Only the MPS lowering exists (arbitrary Metal source has no CPU
+    # equivalent), so on other backends lowering fails with JAX's usual
+    # "no lowering for platform" error.
+    return jax.jit(lambda *xs: _metal_kernel_jit_p.bind(*xs, **params))(*inputs)
 
 
 _metal_kernel_jit_p.def_impl(_metal_kernel_jit_impl)
@@ -714,10 +715,18 @@ def metal_kernel_jit(
     if len(output_names) != len(output_shapes):
         raise ValueError("output_names must match the number of outputs")
 
-    if len(inputs) + len(output_shapes) > _MAX_METAL_BUFFERS:
+    # MLX also binds one buffer per <input>_shape / _strides / _ndim the source
+    # references, so those count toward the slot limit too.
+    n_metadata = sum(
+        f"{n}{suffix}" in source
+        for n in input_names
+        for suffix in ("_shape", "_strides", "_ndim")
+    )
+    if len(inputs) + len(output_shapes) + n_metadata > _MAX_METAL_BUFFERS:
         raise ValueError(
             f"metal_kernel_jit: {len(inputs)} inputs + {len(output_shapes)} outputs "
-            f"needs more than the {_MAX_METAL_BUFFERS} buffer slots Metal provides"
+            f"+ {n_metadata} shape/stride/ndim buffers needs more than the "
+            f"{_MAX_METAL_BUFFERS} buffer slots Metal provides"
         )
 
     out_shapes = tuple(tuple(int(d) for d in s) for s in output_shapes)
@@ -763,9 +772,8 @@ _metal_kernel_lib_p.def_abstract_eval(_metal_kernel_lib_abstract)
 
 
 def _metal_kernel_lib_impl(*inputs, **params):
-    raise NotImplementedError(
-        "mps.metal_kernel_lib is only lowered on the MPS backend."
-    )
+    # See _metal_kernel_jit_impl.
+    return jax.jit(lambda *xs: _metal_kernel_lib_p.bind(*xs, **params))(*inputs)
 
 
 _metal_kernel_lib_p.def_impl(_metal_kernel_lib_impl)
@@ -851,6 +859,11 @@ def _canon_buffers(buffers, n_inputs, n_outputs):
             out.append((slot, "output", arg, None))
         else:  # bytes
             out.append((slot, "bytes", None, bytes(b["bytes"])))
+    # Outputs are allocated uninitialized, so every result needs a slot.
+    bound_outputs = {arg for (_, kind, arg, _) in out if kind == "output"}
+    for i in range(n_outputs):
+        if i not in bound_outputs:
+            raise ValueError(f"output {i} is not bound to a buffer slot")
     return tuple(out)
 
 
