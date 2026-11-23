@@ -66,6 +66,8 @@ uv pip install -e .
 uv run pytest
 ```
 
+If you change `third_party/mlx/version.txt` or `third_party/mlx/patches/`, rerun `./scripts/setup_deps_mlx.sh` first: CMake configure fails loudly when the installed MLX no longer matches them, rather than linking a stale `libmlx.a`.
+
 # Benchmarks
 
 Benchmarks are excluded from normal test runs. To run them:

@@ -114,6 +114,69 @@ find_library(VERSION_LIB Version HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
 find_package(MLX REQUIRED CONFIG)
 message(STATUS "Found MLX: ${MLX_DIR}")
 
+# Refuse to link an MLX built from a different version or patch set (#208).
+# setup_deps_mlx.sh stamps its install prefix with
+# "<version.txt>:<sha256 of the concatenated patches>", but nothing on the
+# `uv pip install -e .` path reruns it, so editing third_party/mlx would
+# otherwise silently link the stale libmlx.a. Re-derive the expected stamp here
+# and fail configure on a mismatch. CMAKE_CONFIGURE_DEPENDS reruns configure
+# when the pin, a patch or the stamp changes. Pass
+# -DJAX_MPS_SKIP_MLX_STAMP_CHECK=ON to build against an MLX installed some other
+# way; it applies to that configure only (dropped from the cache below), so one
+# override cannot silently disable the check for later builds.
+set(MLX_SKIP_STAMP_CHECK "${JAX_MPS_SKIP_MLX_STAMP_CHECK}")
+unset(JAX_MPS_SKIP_MLX_STAMP_CHECK CACHE)
+set(MLX_PIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx/version.txt")
+if(NOT MLX_SKIP_STAMP_CHECK AND EXISTS "${MLX_PIN_FILE}")
+    # MLX_DIR is <prefix>/share/cmake/MLX.
+    get_filename_component(MLX_INSTALL_PREFIX "${MLX_DIR}/../../.." ABSOLUTE)
+    set(MLX_STAMP_FILE "${MLX_INSTALL_PREFIX}/.mlx-tag")
+
+    file(READ "${MLX_PIN_FILE}" MLX_EXPECTED_REF)
+    string(REGEX REPLACE "[ \t\r\n]" "" MLX_EXPECTED_REF "${MLX_EXPECTED_REF}")
+    # Same digest as `cat patches/*.patch | shasum -a 256` (GLOB sorts names;
+    # empty when there are no patches, as in the script).
+    file(GLOB MLX_PATCH_FILES CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx/patches/*.patch")
+    set(MLX_PATCHES_HASH "")
+    if(MLX_PATCH_FILES)
+        set(MLX_PATCHES_CONTENT "")
+        foreach(patch IN LISTS MLX_PATCH_FILES)
+            file(READ "${patch}" patch_content)
+            string(APPEND MLX_PATCHES_CONTENT "${patch_content}")
+        endforeach()
+        string(SHA256 MLX_PATCHES_HASH "${MLX_PATCHES_CONTENT}")
+    endif()
+    set(MLX_EXPECTED_TAG "${MLX_EXPECTED_REF}:${MLX_PATCHES_HASH}")
+
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                 "${MLX_PIN_FILE}" ${MLX_PATCH_FILES})
+    set(MLX_INSTALLED_TAG "")
+    if(EXISTS "${MLX_STAMP_FILE}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MLX_STAMP_FILE}")
+        file(READ "${MLX_STAMP_FILE}" MLX_INSTALLED_TAG)
+        string(STRIP "${MLX_INSTALLED_TAG}" MLX_INSTALLED_TAG)
+    endif()
+
+    if(NOT MLX_INSTALLED_TAG STREQUAL MLX_EXPECTED_TAG)
+        if(MLX_INSTALLED_TAG STREQUAL "")
+            set(MLX_INSTALLED_DESC "missing (no ${MLX_STAMP_FILE})")
+        else()
+            set(MLX_INSTALLED_DESC "${MLX_INSTALLED_TAG}")
+        endif()
+        message(FATAL_ERROR
+            "The MLX install at ${MLX_INSTALL_PREFIX} is stale: it does not match "
+            "third_party/mlx (version.txt + patches/).\n"
+            "  expected:  ${MLX_EXPECTED_TAG}\n"
+            "  installed: ${MLX_INSTALLED_DESC}\n"
+            "Rebuild it with:\n"
+            "  ./scripts/setup_deps_mlx.sh --prefix ${MLX_INSTALL_PREFIX}\n"
+            "then rerun the build. (Pass -DJAX_MPS_SKIP_MLX_STAMP_CHECK=ON to "
+            "link it anyway.)")
+    endif()
+    message(STATUS "MLX install matches third_party/mlx: ${MLX_EXPECTED_TAG}")
+endif()
+
 # Source files
 set(PJRT_SOURCES
     src/pjrt_plugin/pjrt_api.cc
