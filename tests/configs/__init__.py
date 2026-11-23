@@ -10,6 +10,7 @@ from .fused import make_fused_op_configs
 from .fusion import FusionTestConfig, make_fusion_configs
 from .linalg import make_linalg_op_configs
 from .matmul import make_matmul_op_configs
+from .metal_kernel import make_metal_kernel_op_configs
 from .misc import make_misc_op_configs
 from .numpyro import make_numpyro_op_configs
 from .quantized import make_quantized_op_configs
@@ -36,6 +37,7 @@ __all__ = [
     "make_fusion_configs",
     "make_linalg_op_configs",
     "make_matmul_op_configs",
+    "make_metal_kernel_op_configs",
     "make_misc_op_configs",
     "make_numpyro_op_configs",
     "make_quantized_op_configs",
