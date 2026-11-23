@@ -1335,26 +1335,16 @@ bool HandleCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::ar
 //
 // Inputs (all uint32, broadcast to the output shape here): key0, key1, count0,
 // count1. Outputs: out0, out1 (uint32, output shape).
-std::vector<mlx::core::array> Threefry2x32Kernel(const mlx::core::array& k0,
-                                                 const mlx::core::array& k1,
-                                                 const mlx::core::array& x0,
-                                                 const mlx::core::array& x1,
-                                                 const mlx::core::Shape& outShape, int64_t total) {
-    static const char* kHeader = R"(
+// Metal header shared by every threefry kernel below: the threefry2x32-20 hash
+// of one counter pair (X0, X1) under key (ks0, ks1), updated in place.
+constexpr const char* kThreefryHeader = R"(
 inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
     return (x << n) | (x >> (32u - n));
 }
-)";
-    // Body of the [[kernel]]; MLX declares key0/key1/count0/count1 as inputs,
-    // out0/out1 as outputs, and provides thread_position_in_grid. Inputs are
-    // row-contiguous (ensure_row_contiguous), so a flat 1-D index suffices.
-    static const char* kSource = R"(
-    uint idx = thread_position_in_grid.x;
-    uint32_t ks0 = key0[idx];
-    uint32_t ks1 = key1[idx];
+inline void tfry_hash(uint32_t ks0, uint32_t ks1, thread uint32_t& X0, thread uint32_t& X1) {
     uint32_t ks2 = ks0 ^ ks1 ^ 0x1BD11BDAu;
-    uint32_t X0 = count0[idx] + ks0;
-    uint32_t X1 = count1[idx] + ks1;
+    X0 += ks0;
+    X1 += ks1;
     // block 0 — rotations {13,15,26,6}, inject (ks1, ks2 + 1)
     X0 += X1; X1 = X0 ^ tfry_rotl(X1, 13u);
     X0 += X1; X1 = X0 ^ tfry_rotl(X1, 15u);
@@ -1385,6 +1375,22 @@ inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
     X0 += X1; X1 = X0 ^ tfry_rotl(X1, 26u);
     X0 += X1; X1 = X0 ^ tfry_rotl(X1, 6u);
     X0 += ks2; X1 += ks0 + 5u;
+}
+)";
+
+std::vector<mlx::core::array> Threefry2x32Kernel(const mlx::core::array& k0,
+                                                 const mlx::core::array& k1,
+                                                 const mlx::core::array& x0,
+                                                 const mlx::core::array& x1,
+                                                 const mlx::core::Shape& outShape, int64_t total) {
+    // Body of the [[kernel]]; MLX declares key0/key1/count0/count1 as inputs,
+    // out0/out1 as outputs, and provides thread_position_in_grid. Inputs are
+    // row-contiguous (ensure_row_contiguous), so a flat 1-D index suffices.
+    static const char* kSource = R"(
+    uint idx = thread_position_in_grid.x;
+    uint32_t X0 = count0[idx];
+    uint32_t X1 = count1[idx];
+    tfry_hash(key0[idx], key1[idx], X0, X1);
     out0[idx] = X0;
     out1[idx] = X1;
 )";
@@ -1393,7 +1399,7 @@ inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
     // name, so a function-local static is safe and avoids re-wrapping per call.
     static const mlx::core::fast::CustomKernelFunction kernel = mlx::core::fast::metal_kernel(
         "threefry2x32", /*input_names=*/{"key0", "key1", "count0", "count1"},
-        /*output_names=*/{"out0", "out1"}, kSource, kHeader,
+        /*output_names=*/{"out0", "out1"}, kSource, kThreefryHeader,
         /*ensure_row_contiguous=*/true);
 
     // Flatten to 1-D before dispatch: MLX declares rank-0 kernel inputs as
@@ -1411,6 +1417,128 @@ inline uint32_t tfry_rotl(uint32_t x, uint32_t n) {
     outs[0] = mlx::core::reshape(outs[0], outShape);
     outs[1] = mlx::core::reshape(outs[1], outShape);
     return outs;
+}
+
+// The counter layouts below are affine in the flat output index, so the
+// kernels derive counters from the thread index instead of materializing
+// JAX's iota and packing it with ~13 StableHLO ops (jax-mps#210). Each layout
+// mirrors one of JAX's threefry wrappers (jax/_src/random/threefry2x32.py)
+// exactly, so outputs stay bit-identical to the CPU backend:
+//
+//   partitionable (jax_threefry_partitionable=True): element i hashes the
+//   64-bit counter i as (hi=0, lo=i), since callers cap sizes below 2^31.
+//   original: threefry_2x32 over iota(n) splits the (zero-padded to even)
+//   counters into halves x0 = [0, h), x1 = [h, 2h) with h = ceil(n/2), and
+//   concatenates the hashed halves.
+
+// random.split of one key into `num` keys; returns the flat uint32[2 * num]
+// buffer of the (*shape, 2) result.
+mlx::core::array ThreefrySplitKernel(const mlx::core::array& key, int64_t num, bool partitionable) {
+    static const char* kSource = R"(
+    uint t = thread_position_in_grid.x;
+    uint n = threads_per_grid.x;
+    uint32_t X0 = PARTITIONABLE ? 0u : t;
+    uint32_t X1 = PARTITIONABLE ? t : t + n;
+    tfry_hash(key[0], key[1], X0, X1);
+    if (PARTITIONABLE) {
+        out[2 * t] = X0;
+        out[2 * t + 1] = X1;
+    } else {
+        out[t] = X0;
+        out[t + n] = X1;
+    }
+)";
+    static const mlx::core::fast::CustomKernelFunction kernel = mlx::core::fast::metal_kernel(
+        "threefry_split", /*input_names=*/{"key"}, /*output_names=*/{"out"}, kSource,
+        kThreefryHeader, /*ensure_row_contiguous=*/true);
+    int threads = static_cast<int>(std::min<int64_t>(num, 256));
+    return kernel({key}, /*output_shapes=*/{{static_cast<int32_t>(2 * num)}},
+                  /*output_dtypes=*/{mlx::core::uint32},
+                  /*grid=*/{static_cast<int>(num), 1, 1},
+                  /*threadgroup=*/{threads, 1, 1},
+                  /*template_args=*/{{"PARTITIONABLE", partitionable}},
+                  /*init_value=*/std::nullopt, /*verbose=*/false, /*s=*/{})[0];
+}
+
+// random.bits of `size` elements of width bitWidth (8/16/32/64); returns a
+// flat array of `size` elements of dtype uint{bitWidth}. The caller guarantees
+// that the number of 32-bit words hashed fits in int32.
+mlx::core::array ThreefryBitsKernel(const mlx::core::array& key, int64_t size, int bitWidth,
+                                    bool partitionable) {
+    // WIDE: 64-bit output, one counter pair per element. Otherwise T is the
+    // output dtype (partitionable) or uint32 words viewed afterwards
+    // (original 8/16-bit, which packs several elements per word).
+    static const char* kSource = R"(
+    uint t = thread_position_in_grid.x;
+    uint32_t X0;
+    uint32_t X1;
+    if (PARTITIONABLE) {
+        X0 = 0u;
+        X1 = t;
+        tfry_hash(key[0], key[1], X0, X1);
+        out[t] = WIDE ? T((ulong(X0) << 32) | ulong(X1)) : T(X0 ^ X1);
+    } else if (WIDE) {
+        uint n = threads_per_grid.x;
+        X0 = t;
+        X1 = t + n;
+        tfry_hash(key[0], key[1], X0, X1);
+        out[t] = T((ulong(X0) << 32) | ulong(X1));
+    } else {
+        uint n = nwords[0];
+        uint h = threads_per_grid.x;
+        bool has_hi = t + h < n;
+        X0 = t;
+        X1 = has_hi ? t + h : 0u;  // JAX zero-pads an odd count
+        tfry_hash(key[0], key[1], X0, X1);
+        out[t] = T(X0);
+        if (has_hi) {
+            out[t + h] = T(X1);
+        }
+    }
+)";
+    static const mlx::core::fast::CustomKernelFunction kernel = mlx::core::fast::metal_kernel(
+        "threefry_bits", /*input_names=*/{"key", "nwords"}, /*output_names=*/{"out"}, kSource,
+        kThreefryHeader, /*ensure_row_contiguous=*/true);
+
+    const bool wide = bitWidth == 64;
+    mlx::core::Dtype outDtype = mlx::core::uint32;
+    switch (bitWidth) {
+        case 8:
+            outDtype = mlx::core::uint8;
+            break;
+        case 16:
+            outDtype = mlx::core::uint16;
+            break;
+        case 64:
+            outDtype = mlx::core::uint64;
+            break;
+        default:
+            break;
+    }
+    // Original sub-word layout: hash ceil(bitWidth * size / 32) words, then
+    // reinterpret them little-endian (exactly JAX's shift/mask unpacking).
+    const bool packed = !partitionable && !wide;
+    int64_t outLen = size;
+    int64_t grid = size;
+    if (packed) {
+        outLen = (bitWidth * size + 31) / 32;
+        grid = (outLen + 1) / 2;
+    }
+    mlx::core::array nwords(static_cast<uint32_t>(outLen));
+    nwords = mlx::core::reshape(nwords, {1});
+    mlx::core::Dtype kernelDtype = packed ? mlx::core::uint32 : outDtype;
+    int threads = static_cast<int>(std::min<int64_t>(grid, 256));
+    auto out = kernel({key, nwords}, /*output_shapes=*/{{static_cast<int32_t>(outLen)}},
+                      /*output_dtypes=*/{kernelDtype},
+                      /*grid=*/{static_cast<int>(grid), 1, 1}, /*threadgroup=*/{threads, 1, 1},
+                      /*template_args=*/
+                      {{"PARTITIONABLE", partitionable}, {"WIDE", wide}, {"T", kernelDtype}},
+                      /*init_value=*/std::nullopt, /*verbose=*/false, /*s=*/{})[0];
+    if (packed && bitWidth != 32) {
+        out = mlx::core::view(out, outDtype);
+        out = mlx::core::slice(out, {0}, {static_cast<int32_t>(size)});
+    }
+    return out;
 }
 
 // LAPACK reports failure (info != 0) on non-finite input, and MLX's CPU
@@ -1707,6 +1835,67 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
                                        mlx::core::broadcast_to(*x1, outShape), outShape, total);
         values.emplace(ToKey(op->getResult(0)), std::move(outs[0]));
         values.emplace(ToKey(op->getResult(1)), std::move(outs[1]));
+        return true;
+    }
+
+    // Handle mps.threefry_split / mps.threefry_bits — jax.random's split and
+    // random_bits for a single threefry key as one Metal kernel each (see
+    // ThreefrySplitKernel / ThreefryBitsKernel and jax-mps#210). Input: the raw
+    // uint32[2] key. backend_config: {"partitionable": <bool>} plus
+    // {"bit_width": <int>} for bits.
+    if (callTargetName == "mps.threefry_split" || callTargetName == "mps.threefry_bits") {
+        const bool isSplit = callTargetName == "mps.threefry_split";
+        const char* name = isSplit ? "mps.threefry_split" : "mps.threefry_bits";
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR("%s: expected 1 input and 1 output\n", name);
+            return false;
+        }
+        auto* key = RequireValue(values, op->getOperand(0), name);
+        if (!key)
+            return false;
+        if (key->size() != 2 || key->dtype() != mlx::core::uint32) {
+            MPS_LOG_ERROR("%s: expected a uint32[2] key\n", name);
+            return false;
+        }
+        auto shapeOpt = GetResultShape(op, name);
+        if (!shapeOpt)
+            return false;
+        const mlx::core::Shape& outShape = *shapeOpt;
+        auto config = ParseBackendConfig(customCallOp);
+        const bool partitionable = config.getBoolean("partitionable").value_or(true);
+        const int bitWidth = static_cast<int>(config.getInteger("bit_width").value_or(32));
+        if (!isSplit && bitWidth != 8 && bitWidth != 16 && bitWidth != 32 && bitWidth != 64) {
+            MPS_LOG_ERROR("mps.threefry_bits: unsupported bit_width %d\n", bitWidth);
+            return false;
+        }
+
+        auto dtypeOpt = GetResultDtype(op, name);
+        if (!dtypeOpt)
+            return false;
+
+        // 32-bit words hashed: the element count for split (which already
+        // counts both words of each key) and for <= 32-bit bits, twice it for
+        // 64-bit bits. The Python lowering only emits these calls when that
+        // count fits int32 (else it keeps JAX's default lowering); bail per
+        // dim so the running product itself cannot overflow.
+        const int64_t wordsPerElem = !isSplit && bitWidth == 64 ? 2 : 1;
+        int64_t total = 1;
+        for (auto d : outShape) {
+            total *= d;
+            if (total * wordsPerElem > std::numeric_limits<int32_t>::max()) {
+                MPS_LOG_ERROR("%s: output exceeds 2^31-1 words\n", name);
+                return false;
+            }
+        }
+        if (total == 0) {
+            values.emplace(ToKey(op->getResult(0)), mlx::core::zeros(outShape, *dtypeOpt));
+            return true;
+        }
+        mlx::core::array keyFlat = mlx::core::reshape(*key, {2});
+        mlx::core::array out = isSplit
+                                   ? ThreefrySplitKernel(keyFlat, total / 2, partitionable)
+                                   : ThreefryBitsKernel(keyFlat, total, bitWidth, partitionable);
+        values.emplace(ToKey(op->getResult(0)), mlx::core::reshape(out, outShape));
         return true;
     }
 

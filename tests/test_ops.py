@@ -367,7 +367,10 @@ def test_rng_bit_generator() -> None:
 def test_threefry2x32_lowers_to_custom_call() -> None:
     """Regression: jax.random must lower to our fused @mps.threefry2x32 custom
     call (issue #196) rather than JAX's ~140-op inline PRNG expansion. A future
-    JAX change that drops the mps-platform lowering would make this fail."""
+    JAX change that drops the mps-platform lowering would make this fail.
+
+    Uses fold_in, which still goes through the threefry2x32 primitive; split and
+    bits have their own fused calls (see the test below)."""
     if TEST_MODE == "cpu":
         pytest.skip("MPS-specific test skipped in CPU-only mode")
 
@@ -375,10 +378,36 @@ def test_threefry2x32_lowers_to_custom_call() -> None:
     with jax.default_device(device):
         key = random.key(0)
         ir_text = str(
-            jax.jit(lambda k: random.bits(k, shape=(16,)))
+            jax.jit(lambda k: random.key_data(random.fold_in(k, 3)))
             .lower(key)
             .compiler_ir(dialect="stablehlo")
         )
     assert "@mps.threefry2x32" in ir_text, (
         f"Expected `@mps.threefry2x32` in lowered IR; got:\n{ir_text}"
     )
+
+
+@pytest.mark.parametrize("partitionable", [False, True])
+@pytest.mark.parametrize(
+    "fn, target",
+    [
+        (lambda k: random.key_data(random.split(k, 3)), "@mps.threefry_split"),
+        (lambda k: random.bits(k, (16,)), "@mps.threefry_bits"),
+        (lambda k: random.uniform(k, (4, 5)), "@mps.threefry_bits"),
+    ],
+    ids=["split", "bits", "uniform"],
+)
+def test_threefry_split_bits_lower_to_single_custom_call(
+    fn, target, partitionable
+) -> None:
+    """jax.random.split / bits on a single threefry key must lower to one fused
+    custom call with no iota-based counter packing around it (issue #210)."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    device = jax.devices("mps")[0]
+    with jax.default_device(device), jax.threefry_partitionable(partitionable):
+        ir_text = str(jax.jit(fn).lower(random.key(0)).compiler_ir(dialect="stablehlo"))
+    assert ir_text.count(target) == 1, f"Expected one `{target}`; got:\n{ir_text}"
+    assert "@mps.threefry2x32" not in ir_text, ir_text
+    assert "stablehlo.iota" not in ir_text, ir_text

@@ -1,3 +1,4 @@
+import jax
 from jax import numpy as jnp
 from jax import random
 
@@ -26,7 +27,8 @@ def make_random_op_configs(partitionable=None):
         with OperationTestConfig.module_name("random"):
             # scalar / small-odd / even-2d / large-odd — the last exercises the
             # odd/even split boundary in the count-packing layout (issue #196).
-            for shape in [(), (3,), (4, 8), (257,)]:
+            # (5,) packs 8-bit draws into an even word count; (257,) an odd one.
+            for shape in [(), (3,), (5,), (4, 8), (257,)]:
                 yield from [
                     OperationTestConfig(
                         random.normal, random.key(17), shape, static_argnums=(1,)
@@ -81,6 +83,43 @@ def make_random_op_configs(partitionable=None):
                         name="randint",
                     ),
                 ]
+            # Multi-dim split shape and a large split (counter layout across
+            # threadgroups), fused into @mps.threefry_split (issue #210).
+            yield OperationTestConfig(
+                lambda key: random.split(key, (2, 3)), random.key(21), name="split_2d"
+            )
+            yield OperationTestConfig(
+                lambda key: random.split(key, 1000), random.key(21), name="split_1000"
+            )
+            # Large draws span many threadgroups of the fused bits kernel.
+            for dtype in (jnp.uint8, jnp.uint32):
+                yield OperationTestConfig(
+                    lambda key, dtype=dtype: random.bits(key, (513, 7), dtype=dtype),
+                    random.key(22),
+                    name=f"bits_large_{jnp.dtype(dtype).name}",
+                )
+            # Batched keys keep JAX's default lowering around threefry2x32.
+            yield OperationTestConfig(
+                lambda keys: jax.vmap(lambda k: random.uniform(k, (3,)))(keys),
+                random.split(random.key(23), 4),
+                name="uniform_batched_keys",
+            )
+            yield OperationTestConfig(
+                lambda keys: jax.vmap(random.split)(keys),
+                random.split(random.key(23), 4),
+                name="split_batched_keys",
+            )
+            yield OperationTestConfig(
+                lambda key: random.fold_in(key, 7), random.key(24), name="fold_in"
+            )
+            # 64-bit draws pair two hashed words per element (needs x64).
+            for shape in [(), (257,)]:
+                yield OperationTestConfig(
+                    lambda key, shape=shape: random.bits(key, shape, dtype=jnp.uint64),
+                    random.key(25),
+                    name=f"bits_uint64_{len(shape)}d",
+                    config_overrides={"jax_enable_x64": True},
+                )
             # Bug: indexing into split result differs on MPS vs CPU in eager mode.
             # JIT compiles around the bug; only eager exposes it.
             if MPS_DEVICE is not None:
@@ -92,6 +131,6 @@ def make_random_op_configs(partitionable=None):
 
     for config in _build():
         if overrides is not None:
-            config.config_overrides = overrides
+            config.config_overrides = {**config.config_overrides, **overrides}
             config.name = f"{config.name}{suffix}"
         yield config
