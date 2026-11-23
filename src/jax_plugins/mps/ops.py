@@ -12,10 +12,13 @@ decompose to standard JAX ops.
 # pyright: reportFunctionMemberAccess=false, reportCallIssue=false
 
 import importlib
+import json
+import math
 import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 # The jax._src imports below are kept only because no public jax.* / jax.extend.*
@@ -750,6 +753,92 @@ def _threefry2x32_lowering(ctx, k1, k2, x1, x2):
     ).results
 
 
+# Largest number of 32-bit words the fused threefry split/bits kernels hash in
+# one dispatch (the Metal grid and MLX shapes are int32). Bigger draws keep
+# JAX's default lowering, which also handles its > 2**32-word block splitting.
+_THREEFRY_MAX_WORDS = 2**31 - 1
+
+
+def _is_single_threefry_key(aval, threefry_impl):
+    """True for an unbatched (rank-0) key array of the default threefry impl.
+
+    ``aval.dtype._impl`` is the key's PRNGImpl; JAX exposes it publicly only for
+    concrete arrays (``jax.random.key_impl``), not for abstract values.
+    """
+    return aval.ndim == 0 and getattr(aval.dtype, "_impl", None) is threefry_impl
+
+
+def _make_threefry_split_lowering(default_lowering, threefry_impl):
+    """MPS lowering for ``random_split_p`` (``jax.random.split``).
+
+    JAX lowers a threefry split as ``iota`` + count packing + the threefry hash +
+    stack: ~13 tiny ops that each cost ~1.5us of dispatch inside a loop body even
+    after the hash itself is fused (issue #210). For a single key we instead emit
+    ``@mps.threefry_split``, one Metal kernel that derives the counters from the
+    thread index, bit-identical to JAX under either ``jax_threefry_partitionable``
+    setting (read here, at lowering time, as JAX's own lowering does). Batched
+    keys, other PRNG impls and very large splits keep the default lowering.
+    """
+
+    def lowering(ctx, keys, *, shape):
+        (aval,) = ctx.avals_in
+        num = math.prod(shape)
+        if (
+            not _is_single_threefry_key(aval, threefry_impl)
+            or num == 0
+            or 2 * num > _THREEFRY_MAX_WORDS
+        ):
+            return default_lowering(ctx, keys, shape=shape)
+        out_type = ir.RankedTensorType.get(
+            (*shape, 2), mlir.dtype_to_ir_type(np.dtype(np.uint32))
+        )
+        partitionable = bool(jax.config.jax_threefry_partitionable)
+        return mlir.custom_call(
+            call_target_name="mps.threefry_split",
+            result_types=[out_type],
+            operands=[keys],
+            backend_config=json.dumps({"partitionable": partitionable}),
+        ).results
+
+    return lowering
+
+
+def _make_threefry_bits_lowering(default_lowering, threefry_impl):
+    """MPS lowering for ``random_bits_p`` (``jax.random.bits`` and everything
+    built on it: ``uniform``, ``normal``, ``randint``, ...).
+
+    Emits ``@mps.threefry_bits``, one Metal kernel that generates the counters
+    in-kernel and packs them to ``bit_width`` exactly as JAX's threefry wrapper
+    does (issue #210); JAX's float post-processing (``uniform``'s mantissa fill
+    etc.) still runs on top as ordinary ops. Falls back to the default lowering
+    for batched keys, other PRNG impls and very large draws.
+    """
+
+    def lowering(ctx, keys, *, bit_width, shape):
+        (aval,) = ctx.avals_in
+        size = math.prod(shape)
+        words = size * (2 if bit_width == 64 else 1)
+        if (
+            not _is_single_threefry_key(aval, threefry_impl)
+            or bit_width not in (8, 16, 32, 64)
+            or size == 0
+            or words > _THREEFRY_MAX_WORDS
+        ):
+            return default_lowering(ctx, keys, bit_width=bit_width, shape=shape)
+        (aval_out,) = ctx.avals_out
+        partitionable = bool(jax.config.jax_threefry_partitionable)
+        return mlir.custom_call(
+            call_target_name="mps.threefry_bits",
+            result_types=[_aval_to_ir_type(aval_out)],
+            operands=[keys],
+            backend_config=json.dumps(
+                {"partitionable": partitionable, "bit_width": bit_width}
+            ),
+        ).results
+
+    return lowering
+
+
 def _logistic_lowering(ctx, x, *, accuracy=None):
     """MPS lowering for logistic_p: emit a native stablehlo.logistic op.
 
@@ -1226,6 +1315,47 @@ def register_fused_ops():
             "jax-mps: could not register fused threefry2x32 lowering ("
             + "; ".join(errors)
             + "); jax.random will use the slower default expansion.",
+            stacklevel=2,
+        )
+
+    # random_split_p / random_bits_p: fold JAX's counter generation and packing
+    # around threefry2x32 into one kernel per call (issue #210). These
+    # primitives have no public jax.* / jax.extend.* surface, so they come from
+    # jax._src (jax._src.random.prng since jax 0.11; jax._src.prng before).
+    # Their default lowerings are kept as the fallback for cases we don't fuse.
+    # If the module moves again we skip the fusion — correct, just slower.
+    prng_mod = None
+    prng_errors = []
+    for path in ("jax._src.random.prng", "jax._src.prng"):
+        try:
+            prng_mod = importlib.import_module(path)
+            prng_mod.random_split_p, prng_mod.random_split_lowering  # noqa: B018
+            prng_mod.random_bits_p, prng_mod.random_bits_lowering  # noqa: B018
+            break
+        except Exception as e:  # probe alternative jax internals in turn
+            prng_mod = None
+            prng_errors.append(f"{path}: {e!r}")
+    threefry_impl = getattr(
+        importlib.import_module("jax.extend.random"), "threefry_prng_impl", None
+    )
+    if prng_mod is not None and threefry_impl is not None:
+        mlir.register_lowering(
+            prng_mod.random_split_p,
+            _make_threefry_split_lowering(
+                prng_mod.random_split_lowering, threefry_impl
+            ),
+            platform="mps",
+        )
+        mlir.register_lowering(
+            prng_mod.random_bits_p,
+            _make_threefry_bits_lowering(prng_mod.random_bits_lowering, threefry_impl),
+            platform="mps",
+        )
+    else:  # pragma: no cover - defensive against jax internals moving again
+        warnings.warn(
+            "jax-mps: could not register fused threefry split/bits lowerings ("
+            + "; ".join(prng_errors or ["jax.extend.random.threefry_prng_impl"])
+            + "); jax.random will use the slower default lowering.",
             stacklevel=2,
         )
 
