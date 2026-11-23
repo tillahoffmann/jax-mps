@@ -1,6 +1,8 @@
 #pragma once
 
-// complex64 decompositions and solves that MLX's linalg rejects (issue #120).
+// complex64 decompositions and solves that MLX's linalg rejects (issue #120),
+// plus the raw Householder QR routines (geqrf, orgqr) for float32 and
+// complex64, which MLX does not expose at all.
 //
 // MLX's linalg::cholesky / qr / solve_triangular only accept float32/float64,
 // so complex64 inputs are routed here instead: a CPU-stream MLX primitive that
@@ -30,10 +32,21 @@ mlx::core::array ComplexTriangularSolve(const mlx::core::array& a, const mlx::co
                                         bool leftSide, bool lower, ComplexTranspose transpose,
                                         bool unitDiagonal);
 
-// Householder QR: returns (Q, R) with Q of shape (..., M, K) and R of shape
-// (..., K, N), K = min(M, N), or Q (..., M, M) and R (..., M, N) when
-// fullMatrices.
-std::pair<mlx::core::array, mlx::core::array> ComplexQr(const mlx::core::array& a,
-                                                        bool fullMatrices);
+// Householder QR of float32 or complex64 matrices (LAPACK geqrf + orgqr/
+// ungqr): returns (Q, R) with Q of shape (..., M, K) and R of shape (..., K, N),
+// K = min(M, N), or Q (..., M, M) and R (..., M, N) when fullMatrices — in
+// which case the extra columns of Q complete an orthonormal basis.
+std::pair<mlx::core::array, mlx::core::array> HouseholderQr(const mlx::core::array& a,
+                                                            bool fullMatrices);
+
+// LAPACK geqrf (float32 or complex64): returns the packed factorization (R on
+// and above the diagonal, Householder vectors below it) and the K = min(M, N)
+// reflector scale factors tau, of shape (..., K).
+std::pair<mlx::core::array, mlx::core::array> Geqrf(const mlx::core::array& a);
+
+// LAPACK orgqr/ungqr (float32 or complex64): the (..., M, N) matrix whose
+// columns are the first N columns of H_1 ... H_k, with the reflectors stored
+// below the diagonal of `a` and k = taus.shape(-1) <= N <= M.
+mlx::core::array HouseholderProduct(const mlx::core::array& a, const mlx::core::array& taus);
 
 }  // namespace jax_mps

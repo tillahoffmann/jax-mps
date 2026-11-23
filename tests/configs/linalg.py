@@ -378,6 +378,89 @@ def _complex_linalg_configs():
     )
 
 
+def _qr_orthogonality_complete(A):
+    """Q^H Q for complete-mode QR: the extra columns of Q must complete an
+    orthonormal basis, not be zero padding."""
+    Q, _ = jnp.linalg.qr(A, mode="complete")
+    return jnp.conj(jnp.swapaxes(Q, -2, -1)) @ Q
+
+
+def _geqrf(A):
+    """Raw Householder QR (LAPACK geqrf): packed reflectors and taus.
+
+    ``mode="raw"`` is the public route to ``geqrf``; it returns the packed
+    factorization transposed, as NumPy does, so transpose it back."""
+    h, taus = jnp.linalg.qr(A, mode="raw")
+    return jnp.swapaxes(h, -2, -1), taus
+
+
+def _householder_product_of_geqrf(A):
+    """Q (thin) rebuilt from geqrf's reflectors via LAPACK orgqr/ungqr."""
+    return lax.linalg.householder_product(*_geqrf(A))
+
+
+def _ormqr_of_geqrf(left: bool, transpose: bool):
+    def ormqr(A, C):
+        a, taus = _geqrf(A)
+        return lax.linalg.ormqr(a, taus, C, left=left, transpose=transpose)
+
+    ormqr.__name__ = f"ormqr_{'left' if left else 'right'}{'_t' if transpose else ''}"
+    return ormqr
+
+
+def _householder_configs():
+    """Raw Householder primitives (geqrf, householder_product, ormqr) and
+    complete-mode QR, real and complex."""
+    for dtype in ["float32", "complex64"]:
+        cplx = dtype == "complex64"
+
+        def gen(shape, cplx=cplx):
+            return lambda key: (
+                _crandn(key, shape) if cplx else random.normal(key, shape)
+            )
+
+        for shape in [(5, 3), (4, 4), (3, 5), (2, 4, 3)]:
+            tag = f"{dtype}_{'x'.join(map(str, shape))}"
+            yield OperationTestConfig(
+                _geqrf, gen(shape), name=f"geqrf_{tag}", differentiable_argnums=()
+            )
+        for shape in [(5, 3), (4, 4), (2, 4, 3)]:
+            tag = f"{dtype}_{'x'.join(map(str, shape))}"
+            yield OperationTestConfig(
+                _householder_product_of_geqrf,
+                gen(shape),
+                name=f"householder_product_{tag}",
+                differentiable_argnums=(),
+            )
+        # householder_product with fewer taus than columns (k < n).
+        yield OperationTestConfig(
+            lambda A: lax.linalg.householder_product(
+                _geqrf(A)[0], _geqrf(A)[1][..., :2]
+            ),
+            gen((5, 4)),
+            name=f"householder_product_{dtype}_k_lt_n",
+            differentiable_argnums=(),
+        )
+        for left in [True, False]:
+            for transpose in [False, True]:
+                c_shape = (5, 2) if left else (2, 5)
+                func = _ormqr_of_geqrf(left, transpose)
+                yield OperationTestConfig(
+                    func,
+                    gen((5, 3)),
+                    gen(c_shape),
+                    name=f"{func.__name__}_{dtype}",
+                    differentiable_argnums=(),
+                )
+        for shape in [(5, 3), (4, 2), (2, 5, 3), (3, 5)]:
+            tag = f"{dtype}_{'x'.join(map(str, shape))}"
+            yield OperationTestConfig(
+                _qr_orthogonality_complete,
+                gen(shape),
+                name=f"qr_orthogonality_complete_{tag}",
+            )
+
+
 def make_linalg_op_configs():
     with OperationTestConfig.module_name("linalg"):
         yield from _complex_linalg_configs()
@@ -676,6 +759,8 @@ def make_linalg_op_configs():
             lambda key: random.normal(key, (8, 16)),
             name="qr_reconstruct_8x16",
         )
+
+        yield from _householder_configs()
 
         # --- Eigenvalue Decomposition ---
 

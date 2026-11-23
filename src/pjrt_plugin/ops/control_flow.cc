@@ -1445,6 +1445,14 @@ mlx::core::array MaskNonFiniteOutput(const mlx::core::array& out, const mlx::cor
     return mlx::core::where(mlx::core::expand_dims(ok, axes), out, nan);
 }
 
+// The Accelerate Householder routines take float32 or complex64; other
+// floating inputs (float16, bfloat16) are computed in float32.
+mlx::core::array AsHouseholderDtype(const mlx::core::array& a) {
+    if (a.dtype() == mlx::core::complex64)
+        return a;
+    return mlx::core::astype(a, mlx::core::float32);
+}
+
 // Handler for stablehlo.custom_call
 bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::core::array>& outputs,
                       ExecContext& ctx) {
@@ -2100,7 +2108,43 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         return true;
     }
 
-    // Handle mps.qr — QR decomposition via MLX.
+    // Raw Householder QR primitives, as emitted by JAX's platform-independent
+    // lowerings: "Qr" is lax.linalg.geqrf (returns the packed factorization
+    // and taus) and "ProductOfElementaryHouseholderReflectors" is
+    // lax.linalg.householder_product (LAPACK orgqr/ungqr). Both run through
+    // Accelerate on the CPU stream, like mps.qr.
+    if (callTargetName == "Qr") {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
+            MPS_LOG_ERROR("stablehlo.custom_call Qr: expected 1 input and 2 outputs\n");
+            return false;
+        }
+        auto* a = RequireValue(values, op->getOperand(0), "Qr");
+        if (!a)
+            return false;
+        auto [packed, taus] = Geqrf(AsHouseholderDtype(*a));
+        values.emplace(ToKey(op->getResult(0)), mlx::core::astype(packed, a->dtype()));
+        values.emplace(ToKey(op->getResult(1)), mlx::core::astype(taus, a->dtype()));
+        return true;
+    }
+
+    if (callTargetName == "ProductOfElementaryHouseholderReflectors") {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
+            MPS_LOG_ERROR(
+                "stablehlo.custom_call ProductOfElementaryHouseholderReflectors: expected 2 "
+                "inputs and 1 output\n");
+            return false;
+        }
+        auto* a = RequireValue(values, op->getOperand(0), callTargetName.c_str());
+        auto* taus = RequireValue(values, op->getOperand(1), callTargetName.c_str());
+        if (!a || !taus)
+            return false;
+        auto compute = AsHouseholderDtype(*a);
+        auto q = HouseholderProduct(compute, mlx::core::astype(*taus, compute.dtype()));
+        values.emplace(ToKey(op->getResult(0)), mlx::core::astype(q, a->dtype()));
+        return true;
+    }
+
+    // Handle mps.qr — QR decomposition via MLX (thin, real) or Accelerate.
     // Inputs: a.  Outputs: Q, R.
     if (callTargetName == "mps.qr") {
         if (op->getNumOperands() != 1 || op->getNumResults() != 2) {
@@ -2115,12 +2159,14 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         if (auto v = ParseBackendConfig(customCallOp).getBoolean("full_matrices"))
             full_matrices = *v;
 
-        if (a->dtype() == mlx::core::complex64) {
-            // MLX's qr is real-only; use Accelerate's cgeqrf + cungqr, which
-            // also builds a proper full-matrices Q (issue #120).
-            auto [Q, R] = ComplexQr(*a, full_matrices);
-            values.emplace(ToKey(op->getResult(0)), std::move(Q));
-            values.emplace(ToKey(op->getResult(1)), std::move(R));
+        if (a->dtype() == mlx::core::complex64 || full_matrices) {
+            // MLX's qr is real-only and thin-only. Accelerate's geqrf +
+            // orgqr/ungqr handles complex64 (issue #120) and builds a proper
+            // full-matrices Q whose extra columns complete an orthonormal
+            // basis, rather than zero padding.
+            auto [Q, R] = HouseholderQr(AsHouseholderDtype(*a), full_matrices);
+            values.emplace(ToKey(op->getResult(0)), mlx::core::astype(Q, a->dtype()));
+            values.emplace(ToKey(op->getResult(1)), mlx::core::astype(R, a->dtype()));
             return true;
         }
 
@@ -2129,39 +2175,6 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         // races under MLX's untracked-resource model and is slower than LAPACK;
         // upstream MLX has no GPU QR. MLX handles GPU<->CPU movement + sync.
         auto [Q, R] = mlx::core::linalg::qr(a_contig, mlx::core::Device::cpu);
-
-        if (full_matrices) {
-            // MLX QR returns thin: Q is M×K, R is K×N (K=min(M,N)).
-            // For full_matrices: Q should be M×M, R should be M×N.
-            // Pad with zeros (the extra Q columns are not a proper
-            // orthogonal complement, but match JAX's convention for
-            // reconstruction: Q @ R = A regardless).
-            auto ndim = Q.ndim();
-            auto M = a->shape(static_cast<int>(a->ndim()) - 2);
-            auto N = a->shape(static_cast<int>(a->ndim()) - 1);
-            auto K = std::min(M, N);
-
-            if (Q.shape(static_cast<int>(ndim) - 1) != M) {
-                // Pad Q columns: M×K → M×M
-                auto pad_width = mlx::core::zeros({Q.shape(0), M - K}, Q.dtype());
-                if (ndim == 2) {
-                    Q = mlx::core::concatenate({Q, pad_width}, 1);
-                } else {
-                    // Batched: reshape pad to match batch dims
-                    auto pw_shape = Q.shape();
-                    pw_shape[static_cast<int>(ndim) - 1] = M - K;
-                    pad_width = mlx::core::zeros(pw_shape, Q.dtype());
-                    Q = mlx::core::concatenate({Q, pad_width}, static_cast<int>(ndim) - 1);
-                }
-            }
-            if (R.shape(static_cast<int>(ndim) - 2) != M) {
-                // Pad R rows: K×N → M×N
-                auto pw_shape = R.shape();
-                pw_shape[static_cast<int>(ndim) - 2] = M - K;
-                auto pad_rows = mlx::core::zeros(pw_shape, R.dtype());
-                R = mlx::core::concatenate({R, pad_rows}, static_cast<int>(ndim) - 2);
-            }
-        }
 
         values.emplace(ToKey(op->getResult(0)), std::move(Q));
         values.emplace(ToKey(op->getResult(1)), std::move(R));
