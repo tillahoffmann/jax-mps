@@ -29,6 +29,7 @@
 #include "pjrt_plugin/logging.h"
 #include "pjrt_plugin/mlx_buffer.h"
 #include "pjrt_plugin/ops/handler_utils.h"
+#include "pjrt_plugin/trace_recorder.h"
 #include "pjrt_plugin/type_utils.h"
 
 namespace jax_mps {
@@ -963,10 +964,25 @@ bool MlxExecutable::ResolveDonations(const std::vector<MlxBuffer*>& inputs,
     return true;
 }
 
+std::string MlxExecutable::TraceName() const {
+    // The StableHLO module name JAX assigns, e.g. "jit_f".
+    if (mlir::ModuleOp module = parsed_module_.module.get()) {
+        if (auto name = module.getSymName())
+            return name->str();
+    }
+    return "mps_executable";
+}
+
 MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs,
                                         const std::vector<int64_t>& non_donatable) {
     MlxExecuteResult result;
     const bool profiling = IsProfilingEnabled();
+    // jax.profiler trace capture (pjrt_profiler.cc): host wall-clock spans for
+    // the whole call, the graph build and the evaluation.
+    const bool tracing = TraceRecordingActive();
+    const int64_t trace_start_ns = tracing ? WallClockNs() : 0;
+    int64_t trace_graph_end_ns = 0;
+    bool trace_async = false;
     Clock::time_point exec_start;
     Clock::time_point dispatch_start;
     Clock::time_point dispatch_end;
@@ -1106,6 +1122,9 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs,
     if (profiling) {
         dispatch_end = Clock::now();
     }
+    if (tracing) {
+        trace_graph_end_ns = WallClockNs();
+    }
 
     if (outputs.size() != num_outputs_) {
         MPS_LOG_ERROR("Output count mismatch: expected %zu, got %zu\n", num_outputs_,
@@ -1141,6 +1160,7 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs,
         const bool capturing = capture.BeginDispatch();
         try {
             if (IsAsyncDispatchEnabled() && !capturing) {
+                trace_async = true;
                 // Resolve any control-flow primitives (while/case) synchronously
                 // first: their internal re-entrant eval() deadlocks under an
                 // async_eval outer pass (it waits cross-stream on a per-stream
@@ -1181,6 +1201,10 @@ MlxExecuteResult MlxExecutable::Execute(const std::vector<MlxBuffer*>& inputs,
     }
     if (profiling) {
         eval_end = Clock::now();
+    }
+    if (tracing) {
+        RecordExecution(
+            {TraceName(), trace_start_ns, trace_graph_end_ns, WallClockNs(), trace_async});
     }
 
     for (auto& arr : outputs) {
