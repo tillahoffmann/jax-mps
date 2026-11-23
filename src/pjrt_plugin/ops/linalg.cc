@@ -8,6 +8,7 @@
 #include <numeric>
 #include <unordered_set>
 
+#include "pjrt_plugin/ops/complex_linalg.h"
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -561,6 +562,11 @@ bool HandleCholesky(mlir::Operation* op, ValueMap& values, std::vector<mlx::core
         return false;
 
     bool lower = cholOp.getLower();
+    if (a->dtype() == mlx::core::complex64) {
+        // MLX's cholesky is real-only; use Accelerate's cpotrf (issue #120).
+        values.emplace(ToKey(op->getResult(0)), ComplexCholesky(*a, lower));
+        return true;
+    }
     // Run cholesky on the CPU (LAPACK). The vendored MPS path is racy under
     // MLX's untracked-resource model (intermittently corrupts itself and nearby
     // ops) and 10-300x slower than CPU; triangular_solve already runs on CPU.
@@ -585,6 +591,22 @@ bool HandleTriangularSolve(mlir::Operation* op, ValueMap& values,
     bool lower = triSolveOp.getLower();
     bool unit_diagonal = triSolveOp.getUnitDiagonal();
     auto transpose = triSolveOp.getTransposeA();
+
+    if (a_ptr->dtype() == mlx::core::complex64 || b_ptr->dtype() == mlx::core::complex64) {
+        // MLX's solve_triangular is real-only; use Accelerate's ctrsm, which
+        // also handles the side, conjugate transpose and unit diagonal
+        // directly (issue #120). Singular matrices give inf/NaN, as on CPU.
+        auto mode = ComplexTranspose::kNone;
+        if (transpose == mlir::stablehlo::Transpose::TRANSPOSE)
+            mode = ComplexTranspose::kTranspose;
+        else if (transpose == mlir::stablehlo::Transpose::ADJOINT)
+            mode = ComplexTranspose::kAdjoint;
+        auto a_c = mlx::core::astype(*a_ptr, mlx::core::complex64);
+        auto b_c = mlx::core::astype(*b_ptr, mlx::core::complex64);
+        values.emplace(ToKey(op->getResult(0)),
+                       ComplexTriangularSolve(a_c, b_c, left_side, lower, mode, unit_diagonal));
+        return true;
+    }
 
     auto a_solve = *a_ptr;
     auto b_solve = *b_ptr;
