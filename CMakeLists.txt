@@ -60,7 +60,11 @@ message(STATUS "Found protoc: ${Protobuf_PROTOC_EXECUTABLE}")
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_ORIG})
 
 # Generate C++ from proto files
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS src/proto/device_assignment.proto)
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS src/proto/device_assignment.proto
+                      src/proto/xplane.proto)
+# Lets lint jobs generate the *.pb.h headers without a full build
+# (`cmake --build build --target generated_protos` before clang-tidy).
+add_custom_target(generated_protos DEPENDS ${PROTO_SRCS} ${PROTO_HDRS})
 
 # Find MLIR and LLVM packages
 find_package(MLIR REQUIRED CONFIG)
@@ -122,6 +126,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/pjrt_memory.cc
     src/pjrt_plugin/pjrt_buffer.cc
     src/pjrt_plugin/pjrt_profiler.cc
+    src/pjrt_plugin/trace_recorder.cc
     src/pjrt_plugin/pjrt_executable.cc
     src/pjrt_plugin/pjrt_event.cc
     src/pjrt_plugin/pjrt_topology.cc

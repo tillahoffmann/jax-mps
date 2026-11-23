@@ -1,4 +1,4 @@
-// Minimal PJRT profiler extension — returns errors for all operations.
+// PJRT profiler extension: exports MPS executions to jax.profiler traces.
 #pragma once
 
 #include <xla/backends/profiler/plugin/profiler_c_api.h>

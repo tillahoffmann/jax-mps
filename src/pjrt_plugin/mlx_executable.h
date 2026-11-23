@@ -90,6 +90,9 @@ private:
                           const std::vector<int64_t>& non_donatable, std::vector<bool>& donate,
                           std::string& error) const;
 
+    // Name shown for this executable in jax.profiler traces.
+    std::string TraceName() const;
+
     mps::ParsedModule parsed_module_;
     std::string error_;
     bool valid_ = false;

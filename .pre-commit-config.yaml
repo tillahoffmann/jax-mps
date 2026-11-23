@@ -41,6 +41,7 @@ repos:
             CLANG_TIDY=$(command -v clang-tidy || echo "$(brew --prefix llvm 2>/dev/null)/bin/clang-tidy")
             [ -x "$CLANG_TIDY" ] || { echo "clang-tidy not found. Install with: brew install llvm"; exit 127; }
             cmake -B build -S .
+            cmake --build build --target generated_protos
             export CTCACHE_DIR="${HOME}/.cache/clang-tidy-cache"
             find src -type f -name "*.cc" ! -name "pjrt_executable.cc" | xargs -n 1 -P $(sysctl -n hw.ncpu) uv run clang-tidy-cache "$CLANG_TIDY" -p build
           '
