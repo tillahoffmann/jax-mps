@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -348,6 +349,17 @@ std::optional<int64_t> ReadIntScalar(const mlx::core::array& a, bool isUnsigned)
     return std::nullopt;
 }
 
+// Speculative run-ahead for data-dependent while loops (see
+// WhileLoopPrimitive::eval_impl). On by default; JAX_MPS_WHILE_SPECULATION=0
+// restores one synced iteration per step, e.g. to bisect a regression.
+bool SpeculativeWhileEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("JAX_MPS_WHILE_SPECULATION");
+        return v == nullptr || std::string_view(v) != "0";
+    }();
+    return enabled;
+}
+
 // Runtime parameters for the counted fast path, resolved against the
 // primitive's input layout (loop vars first, then external captures).
 struct CountedExec {
@@ -397,6 +409,8 @@ public:
                        size_t nExt, std::optional<CountedExec> counted = std::nullopt,
                        std::shared_ptr<std::atomic<bool>> bodyHasControlFlow = nullptr)
         : Primitive(stream),
+          compiledMaskedStep_(mlx::core::compile(
+              MakeMaskedStep(std::make_shared<const BodyFn>(bodyCondFn), nLoopVars))),
           compiledBodyCond_(mlx::core::compile(std::move(bodyCondFn))),
           compiledCond_(mlx::core::compile(std::move(condFn))),
           nLoopVars_(nLoopVars),
@@ -502,7 +516,8 @@ private:
                 }
             }
         } else {
-            // Dynamic path: per-iteration cond eval + host readback.
+            // Dynamic path: the exit depends on loop state, so the condition
+            // has to come back to the host.
             //
             // Initial condition check (before first body execution).
             auto initCond = compiledCond_(current);
@@ -511,27 +526,79 @@ private:
             mlx::core::eval(initCond[0]);
             bool condTrue = initCond[0].item<bool>();
 
-            // Loop: body+cond combined per iteration.
+            // Speculative run-ahead (jax-mps#83, #196): chain `runAhead`
+            // iterations lazily and evaluate them as one batch with a single
+            // readback, instead of a GPU sync + readback per iteration. A
+            // running `active` flag (active &= cond after each step) freezes
+            // the loop vars via `where` once the condition turns false, so the
+            // batch ends in exactly the state after the last true iteration;
+            // steps past the exit recompute the body on that frozen state and
+            // are discarded. The batch size adapts to a wall-clock budget: it
+            // doubles while a batch finishes in under half the budget and
+            // halves when one overruns it, capped to bound the lazy graph. So
+            // cheap, sync-dominated bodies amortize one sync over up to
+            // kMaxRunAhead iterations, while the work wasted past the exit stays
+            // within about one batch (~kBatchBudgetSec) per loop, however
+            // expensive the body.
+            //
+            // Bodies with nested while/case keep one synced iteration per
+            // step: a nested loop run on a frozen (post-exit) state is not
+            // guaranteed to terminate. The first iteration always runs synced:
+            // it traces the body, which sets bodyHasControlFlow_.
+            constexpr int kMaxRunAhead = 64;
+            constexpr double kBatchBudgetSec = 2e-3;
+            int runAhead = 2;
+            bool first = true;
             while (condTrue) {
-                auto combined = compiledBodyCond_(current);
-                if (combined.size() != 1 + nLoopVars_)
-                    throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
-                                             std::to_string(combined.size()) +
-                                             " results, expected " +
-                                             std::to_string(1 + nLoopVars_));
-                // Synchronous eval — bounded graph, no accumulation, safe
-                // re-entry for nested WhileLoopPrimitives.
-                mlx::core::eval(combined);
-                // Surface parked stream-thread exceptions before reading the
-                // cond scalar: a failed body kernel would otherwise yield a
-                // garbage condition and can spin the loop indefinitely.
-                mlx::core::scheduler::rethrow_pending_exception();
+                const bool nestedControlFlow =
+                    bodyHasControlFlow_ && bodyHasControlFlow_->load(std::memory_order_relaxed);
+                if (first || nestedControlFlow || !SpeculativeWhileEnabled()) {
+                    first = false;
+                    auto combined = compiledBodyCond_(current);
+                    if (combined.size() != 1 + nLoopVars_)
+                        throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
+                                                 std::to_string(combined.size()) +
+                                                 " results, expected " +
+                                                 std::to_string(1 + nLoopVars_));
+                    // Synchronous eval — bounded graph, no accumulation, safe
+                    // re-entry for nested WhileLoopPrimitives.
+                    mlx::core::eval(combined);
+                    // Surface parked stream-thread exceptions before reading the
+                    // cond scalar: a failed body kernel would otherwise yield a
+                    // garbage condition and can spin the loop indefinitely.
+                    mlx::core::scheduler::rethrow_pending_exception();
 
-                // Update loop vars from combined[1..nLoopVars]
+                    for (size_t j = 0; j < nLoopVars_; ++j)
+                        current[j] = std::move(combined[1 + j]);
+                    condTrue = combined[0].item<bool>();
+                    continue;
+                }
+
+                auto start = std::chrono::steady_clock::now();
+                std::vector<mlx::core::array> stepInputs;
+                stepInputs.reserve(1 + current.size());
+                stepInputs.emplace_back(true);
+                stepInputs.insert(stepInputs.end(), current.begin(), current.end());
+                for (int k = 0; k < runAhead; ++k) {
+                    auto stepped = compiledMaskedStep_(stepInputs);
+                    for (size_t j = 0; j <= nLoopVars_; ++j)
+                        stepInputs[j] = std::move(stepped[j]);
+                }
+                using Diff = std::vector<mlx::core::array>::difference_type;
+                std::vector<mlx::core::array> batch(
+                    stepInputs.begin(), stepInputs.begin() + static_cast<Diff>(1 + nLoopVars_));
+                mlx::core::eval(batch);
+                mlx::core::scheduler::rethrow_pending_exception();
                 for (size_t j = 0; j < nLoopVars_; ++j)
-                    current[j] = std::move(combined[1 + j]);
-                // Check condition from combined[0]
-                condTrue = combined[0].item<bool>();
+                    current[j] = std::move(stepInputs[1 + j]);
+                condTrue = stepInputs[0].item<bool>();
+
+                const double batchSec =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                if (batchSec < 0.5 * kBatchBudgetSec)
+                    runAhead = std::min(2 * runAhead, kMaxRunAhead);
+                else if (batchSec > kBatchBudgetSec)
+                    runAhead = std::max(1, runAhead / 2);
             }
         }
 
@@ -574,11 +641,38 @@ private:
         return static_cast<int64_t>(count);
     }
 
+    // One speculative step for the dynamic path: inputs [active, loopVars...,
+    // ext...] -> [active && cond(body), where(active, body, loopVars)...].
+    // Compiled as a whole so the select fuses with the body's outputs.
+    // The body is held through a shared_ptr: capturing a std::function by
+    // value inside another std::function trips clang-analyzer's NewDeleteLeaks
+    // false positive.
+    static CompiledFn MakeMaskedStep(std::shared_ptr<const BodyFn> bodyCondFn, size_t nLoopVars) {
+        return [bodyCondFn = std::move(bodyCondFn),
+                nLoopVars](const std::vector<mlx::core::array>& inputs) {
+            const auto& active = inputs[0];
+            std::vector<mlx::core::array> state(inputs.begin() + 1, inputs.end());
+            auto combined = (*bodyCondFn)(state);
+            if (combined.size() != 1 + nLoopVars)
+                throw std::runtime_error("WhileLoopPrimitive: bodyCondFn returned " +
+                                         std::to_string(combined.size()) + " results, expected " +
+                                         std::to_string(1 + nLoopVars));
+            std::vector<mlx::core::array> out;
+            out.reserve(1 + nLoopVars);
+            auto cond = mlx::core::astype(mlx::core::reshape(combined[0], {}), mlx::core::bool_);
+            out.push_back(mlx::core::logical_and(active, cond));
+            for (size_t j = 0; j < nLoopVars; ++j)
+                out.push_back(mlx::core::where(active, combined[1 + j], state[j]));
+            return out;
+        };
+    }
+
     // Public mlx::core::compile() returns a std::function whose internal
     // shared_ptr deleter calls compile_erase when the last copy dies. Cache
     // eviction is tied to this primitive's lifetime — no manual erase needed.
-    CompiledFn compiledBodyCond_;  // returns [cond, body...]
-    CompiledFn compiledCond_;      // initial check only
+    CompiledFn compiledMaskedStep_;  // speculative dynamic-path step
+    CompiledFn compiledBodyCond_;    // returns [cond, body...]
+    CompiledFn compiledCond_;        // initial check only
     size_t nLoopVars_;
     size_t nExt_;
     std::optional<CountedExec> counted_;

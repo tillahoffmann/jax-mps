@@ -41,6 +41,102 @@ def _checkpointed_fn(x):
     return jnp.tanh(x * 2 + 1)
 
 
+# ---- data-dependent while loops (speculative run-ahead, jax-mps#83/#196) ----
+# The exit depends on float/random state, so DetectCountedLoop can't count the
+# trips and the loop runs in batches with masked post-exit steps. Trip counts
+# straddle the batch sizes (powers of two up to 64) so the exit lands at every
+# position within a batch.
+
+
+def _float_count_until(n_trips):
+    """Float accumulator x += 0.5 until x >= n/2: exactly n_trips iterations
+    (exact in float32), and float-driven so it is not a counted loop."""
+    limit = jnp.float32(n_trips / 2)
+
+    def f(x0):
+        return lax.while_loop(
+            lambda s: s[0] < limit,
+            lambda s: (s[0] + 0.5, s[1] + 1, s[2] * 0.99 + s[0]),
+            (x0, jnp.int32(0), jnp.float32(1.0)),
+        )
+
+    return f
+
+
+def _poisoned_after_exit(x0):
+    """The body divides by (3 - i): past the exit (i == 3) it produces inf/NaN,
+    which must never reach the result."""
+
+    def body(s):
+        x, i = s
+        return x + 1.0 / (3.0 - i.astype(jnp.float32)) + jnp.log(2.0 - i), i + 1
+
+    return lax.while_loop(lambda s: s[1] < 2 + (s[0] > -1e30), body, (x0, jnp.int32(0)))
+
+
+def _random_walk_until(key):
+    """Random-walk until the running sum leaves [-3, 3] (bit-exact RNG + exit)."""
+
+    def cond(s):
+        return (jnp.abs(s[1]) < 3.0) & (s[2] < 10_000)
+
+    def body(s):
+        k, total, n, path = s
+        k, sub = random.split(k)
+        step = random.normal(sub, ())
+        return k, total + step, n + 1, path.at[n % 8].add(step)
+
+    return lax.while_loop(
+        cond, body, (key, jnp.float32(0.0), jnp.int32(0), jnp.zeros(8))
+    )
+
+
+def _nested_data_dependent(x0):
+    """Outer data-dependent loop whose body runs an inner data-dependent loop
+    (keeps one synced iteration per step)."""
+
+    def inner(y):
+        return lax.while_loop(lambda v: v < 10.0, lambda v: v * 1.5 + 0.1, y)
+
+    return lax.while_loop(
+        lambda s: s[1] < 5 + (s[0] < -1e30),
+        lambda s: (inner(s[0]) * 0.1, s[1] + 1),
+        (x0, jnp.int32(0)),
+    )
+
+
+def _data_dependent_while_configs():
+    configs = [
+        OperationTestConfig(
+            _float_count_until(n),
+            jnp.float32(0.0),
+            differentiable_argnums=(),
+            name=f"lax.while_loop.data_dependent_{n}",
+        )
+        for n in (0, 1, 2, 3, 7, 31, 64, 65, 200, 1000)
+    ]
+    configs += [
+        OperationTestConfig(
+            _poisoned_after_exit,
+            jnp.float32(0.0),
+            differentiable_argnums=(),
+            name="lax.while_loop.poisoned_after_exit",
+        ),
+        OperationTestConfig(
+            _random_walk_until,
+            lambda key: key,
+            name="lax.while_loop.random_walk_until",
+        ),
+        OperationTestConfig(
+            _nested_data_dependent,
+            jnp.float32(1.0),
+            differentiable_argnums=(),
+            name="lax.while_loop.nested_data_dependent",
+        ),
+    ]
+    return configs
+
+
 def make_control_flow_op_configs():
     with OperationTestConfig.module_name("control_flow"):
         return [
@@ -581,4 +677,5 @@ def make_control_flow_op_configs():
                 lambda key: key,
                 name="lax.fori_loop.rng_scatter",
             ),
+            *_data_dependent_while_configs(),
         ]
