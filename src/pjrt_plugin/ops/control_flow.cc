@@ -1433,8 +1433,7 @@ std::vector<mlx::core::array> Threefry2x32Kernel(const mlx::core::array& k0,
 
 // random.split of one key into `num` keys; returns the flat uint32[2 * num]
 // buffer of the (*shape, 2) result.
-mlx::core::array ThreefrySplitKernel(const mlx::core::array& key, int64_t num,
-                                     bool partitionable) {
+mlx::core::array ThreefrySplitKernel(const mlx::core::array& key, int64_t num, bool partitionable) {
     static const char* kSource = R"(
     uint t = thread_position_in_grid.x;
     uint n = threads_per_grid.x;
@@ -1529,13 +1528,12 @@ mlx::core::array ThreefryBitsKernel(const mlx::core::array& key, int64_t size, i
     nwords = mlx::core::reshape(nwords, {1});
     mlx::core::Dtype kernelDtype = packed ? mlx::core::uint32 : outDtype;
     int threads = static_cast<int>(std::min<int64_t>(grid, 256));
-    auto out =
-        kernel({key, nwords}, /*output_shapes=*/{{static_cast<int32_t>(outLen)}},
-               /*output_dtypes=*/{kernelDtype},
-               /*grid=*/{static_cast<int>(grid), 1, 1}, /*threadgroup=*/{threads, 1, 1},
-               /*template_args=*/
-               {{"PARTITIONABLE", partitionable}, {"WIDE", wide}, {"T", kernelDtype}},
-               /*init_value=*/std::nullopt, /*verbose=*/false, /*s=*/{})[0];
+    auto out = kernel({key, nwords}, /*output_shapes=*/{{static_cast<int32_t>(outLen)}},
+                      /*output_dtypes=*/{kernelDtype},
+                      /*grid=*/{static_cast<int>(grid), 1, 1}, /*threadgroup=*/{threads, 1, 1},
+                      /*template_args=*/
+                      {{"PARTITIONABLE", partitionable}, {"WIDE", wide}, {"T", kernelDtype}},
+                      /*init_value=*/std::nullopt, /*verbose=*/false, /*s=*/{})[0];
     if (packed && bitWidth != 32) {
         out = mlx::core::view(out, outDtype);
         out = mlx::core::slice(out, {0}, {static_cast<int32_t>(size)});
@@ -1894,9 +1892,9 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
             return true;
         }
         mlx::core::array keyFlat = mlx::core::reshape(*key, {2});
-        mlx::core::array out =
-            isSplit ? ThreefrySplitKernel(keyFlat, total / 2, partitionable)
-                    : ThreefryBitsKernel(keyFlat, total, bitWidth, partitionable);
+        mlx::core::array out = isSplit
+                                   ? ThreefrySplitKernel(keyFlat, total / 2, partitionable)
+                                   : ThreefryBitsKernel(keyFlat, total, bitWidth, partitionable);
         values.emplace(ToKey(op->getResult(0)), mlx::core::reshape(out, outShape));
         return true;
     }

@@ -397,7 +397,9 @@ def test_threefry2x32_lowers_to_custom_call() -> None:
     ],
     ids=["split", "bits", "uniform"],
 )
-def test_threefry_split_bits_lower_to_single_custom_call(fn, target, partitionable) -> None:
+def test_threefry_split_bits_lower_to_single_custom_call(
+    fn, target, partitionable
+) -> None:
     """jax.random.split / bits on a single threefry key must lower to one fused
     custom call with no iota-based counter packing around it (issue #210)."""
     if TEST_MODE == "cpu":
@@ -405,9 +407,7 @@ def test_threefry_split_bits_lower_to_single_custom_call(fn, target, partitionab
 
     device = jax.devices("mps")[0]
     with jax.default_device(device), jax.threefry_partitionable(partitionable):
-        ir_text = str(
-            jax.jit(fn).lower(random.key(0)).compiler_ir(dialect="stablehlo")
-        )
+        ir_text = str(jax.jit(fn).lower(random.key(0)).compiler_ir(dialect="stablehlo"))
     assert ir_text.count(target) == 1, f"Expected one `{target}`; got:\n{ir_text}"
     assert "@mps.threefry2x32" not in ir_text, ir_text
     assert "stablehlo.iota" not in ir_text, ir_text
