@@ -76,6 +76,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         "chlo.atan2",
         "chlo.atanh",
         "chlo.bessel_i1e",
+        "chlo.conj",
         "chlo.cosh",
         "chlo.digamma",
         "chlo.erf",

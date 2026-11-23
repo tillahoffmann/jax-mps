@@ -4,7 +4,7 @@ from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 
-from .util import OperationTestConfig, xfail_match
+from .util import OperationTestConfig, complex_standard_normal, xfail_match
 
 
 def _random_invertible(key, n: int, batch_shape: tuple[int, ...] = ()):
@@ -222,8 +222,165 @@ def _random_triangular_unit_diag(key, n: int):
     return L * (1 - eye) + eye
 
 
+# --- complex64 helpers (issue #120) ---
+
+
+def _crandn(key, shape):
+    return complex_standard_normal(key, shape, complex=True).astype(jnp.complex64)
+
+
+def _random_hermitian_posdef(key, n: int, batch_shape: tuple[int, ...] = ()):
+    """Random Hermitian positive-definite complex64 matrices."""
+    A = _crandn(key, (*batch_shape, n, n))
+    return A @ jnp.conj(jnp.swapaxes(A, -2, -1)) + n * jnp.eye(n, dtype=jnp.complex64)
+
+
+def _random_hermitian(key, n: int):
+    A = _crandn(key, (n, n))
+    return (A + jnp.conj(A.T)) / 2
+
+
+def _random_complex_triangular(
+    key, n: int, lower: bool = True, batch_shape: tuple[int, ...] = ()
+):
+    """Well-conditioned complex64 triangular matrices (|diag| >= 1)."""
+    M = _crandn(key, (*batch_shape, n, n))
+    T = jnp.tril(M) if lower else jnp.triu(M)
+    eye = jnp.eye(n, dtype=jnp.complex64)
+    return T * (1 - eye) + (T * eye) * (1 + 1 / (jnp.abs(T * eye) + 1e-3))
+
+
+def _random_complex_invertible(key, n: int, batch_shape: tuple[int, ...] = ()):
+    return _crandn(key, (*batch_shape, n, n)) + n * jnp.eye(n, dtype=jnp.complex64)
+
+
+def _qr_unitarity(A):
+    """Q^H Q for a thin complex QR (should be the identity)."""
+    Q, _ = jnp.linalg.qr(A)
+    return jnp.conj(jnp.swapaxes(Q, -2, -1)) @ Q
+
+
+def _qr_abs_r(A):
+    """|R|: R is unique up to a unit-modulus phase per row."""
+    return jnp.abs(jnp.linalg.qr(A)[1])
+
+
+def _complex_linalg_configs():
+    """complex64 decompositions and solves (issue #120)."""
+    for n in [2, 4]:
+        yield OperationTestConfig(
+            jnp.linalg.cholesky,
+            lambda key, n=n: _random_hermitian_posdef(key, n),
+            name=f"cholesky_complex_{n}x{n}",
+        )
+    yield OperationTestConfig(
+        jnp.linalg.cholesky,
+        lambda key: _random_hermitian_posdef(key, 3, (2,)),
+        name="cholesky_complex_batched",
+    )
+    # Not positive definite: all-NaN factor, as on XLA's CPU backend.
+    yield OperationTestConfig(
+        jnp.linalg.cholesky,
+        numpy.array([[-1, 1j], [-1j, 1]], dtype=numpy.complex64),
+        name="cholesky_complex_non_posdef",
+        differentiable_argnums=(),
+    )
+    yield OperationTestConfig(
+        lambda A: lax.linalg.cholesky(A, symmetrize_input=False),
+        lambda key: _random_hermitian_posdef(key, 3),
+        name="cholesky_complex_no_symmetrize",
+    )
+
+    for lower in [True, False]:
+        tri = "lower" if lower else "upper"
+        for trans in [0, 1, 2]:
+            yield OperationTestConfig(
+                lambda T, B, lower=lower, trans=trans: solve_triangular(
+                    T, B, lower=lower, trans=trans
+                ),
+                lambda key, lower=lower: _random_complex_triangular(key, 4, lower),
+                lambda key: _crandn(key, (4, 3)),
+                name=f"triangular_solve_complex_{tri}_trans{trans}",
+            )
+        # Right-side solve: X @ T = B.
+        yield OperationTestConfig(
+            lambda T, B, lower=lower: lax.linalg.triangular_solve(
+                T, B, left_side=False, lower=lower
+            ),
+            lambda key, lower=lower: _random_complex_triangular(key, 4, lower),
+            lambda key: _crandn(key, (2, 4)),
+            name=f"triangular_solve_complex_{tri}_right",
+        )
+    yield OperationTestConfig(
+        lambda T, B: solve_triangular(T, B, lower=True, unit_diagonal=True),
+        lambda key: _random_complex_triangular(key, 3, True),
+        lambda key: _crandn(key, (3, 1)),
+        name="triangular_solve_complex_unit_diagonal",
+    )
+    yield OperationTestConfig(
+        lambda T, B: solve_triangular(T, B, lower=True),
+        lambda key: _random_complex_triangular(key, 3, True, (2,)),
+        lambda key: _crandn(key, (2, 3, 2)),
+        name="triangular_solve_complex_batched",
+    )
+
+    yield OperationTestConfig(
+        jnp.linalg.solve,
+        lambda key: _random_complex_invertible(key, 4),
+        lambda key: _crandn(key, (4, 2)),
+        name="solve_complex",
+    )
+    yield OperationTestConfig(
+        jnp.linalg.inv,
+        lambda key: _random_complex_invertible(key, 3, (2,)),
+        name="inv_complex_batched",
+    )
+    yield OperationTestConfig(
+        jnp.linalg.det,
+        lambda key: _random_complex_invertible(key, 3),
+        name="det_complex",
+    )
+
+    for shape in [(4, 4), (5, 3), (3, 5), (2, 4, 3)]:
+        tag = "x".join(map(str, shape))
+        yield OperationTestConfig(
+            _qr_reconstruct,
+            lambda key, shape=shape: _crandn(key, shape),
+            name=f"qr_complex_reconstruct_{tag}",
+        )
+        yield OperationTestConfig(
+            _qr_unitarity,
+            lambda key, shape=shape: _crandn(key, shape),
+            name=f"qr_complex_unitary_{tag}",
+        )
+        yield OperationTestConfig(
+            _qr_abs_r,
+            lambda key, shape=shape: _crandn(key, shape),
+            name=f"qr_complex_abs_r_{tag}",
+        )
+    for shape in [(5, 3), (3, 5)]:
+        yield OperationTestConfig(
+            _qr_reconstruct_complete,
+            lambda key, shape=shape: _crandn(key, shape),
+            name=f"qr_complex_reconstruct_complete_{'x'.join(map(str, shape))}",
+        )
+
+    # Already supported via MLX's CPU LAPACK path; pinned here so it stays so.
+    yield OperationTestConfig(
+        jnp.linalg.eigvalsh,
+        lambda key: _random_hermitian(key, 4),
+        name="eigvalsh_complex",
+    )
+    yield OperationTestConfig(
+        _svd_values,
+        lambda key: _crandn(key, (4, 3)),
+        name="svd_values_complex",
+    )
+
+
 def make_linalg_op_configs():
     with OperationTestConfig.module_name("linalg"):
+        yield from _complex_linalg_configs()
         for n in [2, 3, 4]:
             yield OperationTestConfig(
                 jnp.linalg.cholesky,

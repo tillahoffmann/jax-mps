@@ -138,6 +138,7 @@ set(PJRT_SOURCES
     src/pjrt_plugin/ops/reduction.cc
     src/pjrt_plugin/ops/collectives.cc
     src/pjrt_plugin/ops/linalg.cc
+    src/pjrt_plugin/ops/complex_linalg.cc
     src/pjrt_plugin/ops/control_flow.cc
     src/pjrt_plugin/ops/sort_fft_complex.cc
     ${PROTO_SRCS}

@@ -24,6 +24,7 @@
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Matchers.h"
+#include "pjrt_plugin/ops/complex_linalg.h"
 #include "pjrt_plugin/ops/handler_utils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 
@@ -2113,6 +2114,15 @@ bool HandleCustomCall(mlir::Operation* op, ValueMap& values, std::vector<mlx::co
         bool full_matrices = false;
         if (auto v = ParseBackendConfig(customCallOp).getBoolean("full_matrices"))
             full_matrices = *v;
+
+        if (a->dtype() == mlx::core::complex64) {
+            // MLX's qr is real-only; use Accelerate's cgeqrf + cungqr, which
+            // also builds a proper full-matrices Q (issue #120).
+            auto [Q, R] = ComplexQr(*a, full_matrices);
+            values.emplace(ToKey(op->getResult(0)), std::move(Q));
+            values.emplace(ToKey(op->getResult(1)), std::move(R));
+            return true;
+        }
 
         auto a_contig = mlx::core::contiguous(*a);
         // Run QR on the CPU (same rationale as eigh): the vendored Metal kernel
